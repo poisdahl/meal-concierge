@@ -656,7 +656,7 @@ class RecipeStoreTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "6")
+            ).fetchone()[0], "8")
             self.assertNotIn("is_favorite", json.loads(before[5]))
         self.assertFalse(self.path.with_name("recipes-v3.backup.sqlite3").exists())
 
@@ -1378,7 +1378,7 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual(
                 connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0],
-                "6",
+                "8",
             )
 
     def test_v1_backup_waits_for_and_includes_a_concurrent_writer(self):
@@ -1442,7 +1442,7 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "6")
+            ).fetchone()[0], "8")
             self.assertTrue({
                 "library_operations", "library_mappings", "library_connection_controls",
                 "recipe_favorites",
@@ -1513,7 +1513,7 @@ class RecipeStoreTests(unittest.TestCase):
         newer.parent.mkdir()
         create_v2_bank(newer, full_recipe("Newer", external_id="newer"))
         with closing(sqlite3.connect(newer)) as connection:
-            connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
+            connection.execute("UPDATE metadata SET value='99' WHERE key='schema_version'")
             connection.commit()
         with self.assertRaisesRegex(RecipeError, "newer"):
             RecipeStore(newer, "Hus A").search("")
@@ -1619,14 +1619,14 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "6")
+            ).fetchone()[0], "8")
             self.assertIn("recipe_favorites", {
                 row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             })
         RecipeStore(path, "Hus A").search("")
         self.assertEqual((backup.stat().st_ino, backup.read_bytes()), before)
 
-    def test_v3_control_only_bank_is_backed_up_and_unknown_v7_fails_closed(self):
+    def test_v3_control_only_bank_is_backed_up_and_unknown_v8_fails_closed(self):
         control_only = Path(self.temp.name) / "control-only" / "recipes.sqlite3"
         control_only.parent.mkdir()
         create_v3_bank(control_only, full_recipe("Removed v3", external_id="removed-v3"))
@@ -1649,7 +1649,7 @@ class RecipeStoreTests(unittest.TestCase):
         newer.parent.mkdir()
         create_v3_bank(newer, full_recipe("Future v5", external_id="future-v5"))
         with closing(sqlite3.connect(newer)) as connection:
-            connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
+            connection.execute("UPDATE metadata SET value='99' WHERE key='schema_version'")
             connection.commit()
         with self.assertRaisesRegex(RecipeError, "newer"):
             RecipeStore(newer, "Hus A").search("")
@@ -2435,7 +2435,7 @@ class StateMigrationTests(unittest.TestCase):
             (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
             store = StateStore(root, {**CONFIG, "household": "Hus A", "provider": "oda"})
             migrated = store.read()
-            self.assertEqual(migrated["version"], 13)
+            self.assertEqual(migrated["version"], 14)
             self.assertIn("product_favorites", migrated)
             self.assertNotIn("favorites", migrated)
             self.assertEqual(migrated["profile"]["recipes"]["repeat_cooldown_weeks"], 6)
@@ -2498,7 +2498,7 @@ class StateMigrationTests(unittest.TestCase):
 
             store = StateStore(root, {**CONFIG, "provider": "oda"})
             migrated = store.read()
-            self.assertEqual(migrated["version"], 13)
+            self.assertEqual(migrated["version"], 14)
             self.assertEqual(migrated["email_jobs"][0]["provider"], "oda")
             self.assertEqual(migrated["email_jobs"][0]["status"], "pending")
             self.assertEqual(migrated["order_snapshot_providers"]["order-old"], "oda")
@@ -2541,7 +2541,7 @@ class StateMigrationTests(unittest.TestCase):
 
             migrated = StateStore(root, {**CONFIG, "provider": "oda"}).read()
 
-            self.assertEqual(migrated["version"], 13)
+            self.assertEqual(migrated["version"], 14)
             self.assertIsNone(migrated["cart_plan"])
             backup = json.loads((root / "state-v3.backup.json").read_text(encoding="utf-8"))
             self.assertEqual(backup["version"], 3)
@@ -2565,7 +2565,7 @@ class StateMigrationTests(unittest.TestCase):
                 "profile_overrides": {"recipes": {"sources": {"themealdb": False}}},
             }).read()
 
-            self.assertEqual(migrated["version"], 13)
+            self.assertEqual(migrated["version"], 14)
             self.assertEqual(migrated["setup"]["status"], "needs_review")
             self.assertFalse(migrated["profile"]["recipes"]["sources"]["themealdb"])
             self.assertTrue(migrated["profile"]["recipes"]["sources"]["wikibooks"])

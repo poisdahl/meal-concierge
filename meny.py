@@ -1595,7 +1595,11 @@ class MenyClient:
         if not label:
             raise HouseholdError("MENY cart control identity is unavailable")
         selector = '[data-meal-concierge-action="cart"]'
-        ready = self._eval(r"""
+        def fill(template, **values):
+            # One pass: an inserted path or product name is never searched for another placeholder.
+            return re.sub("|".join(values), lambda match: json.dumps(values[match[0]]), template)
+
+        ready = self._eval(fill(r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
@@ -1605,7 +1609,7 @@ class MenyClient:
   const target = marked[0];
   return JSON.stringify({ready:authenticated.length === 1 && location.origin === 'https://meny.no' && location.pathname === PRODUCT && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL});
 })()
-""".replace("PRODUCT", json.dumps(product)).replace("LABEL", json.dumps(label)))
+""", PRODUCT=product, LABEL=label))
         if ready != {"ready": True}:
             raise HouseholdError("MENY cart control changed")
         self._invoke("scrollintoview", selector)
@@ -1614,17 +1618,19 @@ class MenyClient:
             raise HouseholdError("MENY cart control is not clickable")
         x = box["x"] + box["width"] / 2
         y = box["y"] + box["height"] / 2
-        clear = self._eval(r"""
+        # Single-letter coordinate placeholders used to be replaced inside the
+        # product names "Yoghurt" and "X-tra" after the label was inserted.
+        clear = self._eval(fill(r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
-  const target = marked[0], hit = document.elementFromPoint(X, Y);
+  const target = marked[0], hit = document.elementFromPoint(__HIT_X__, __HIT_Y__);
   return JSON.stringify({clear:authenticated.length === 1 && location.origin === 'https://meny.no' && location.pathname === PRODUCT && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL && Boolean(hit) && (hit === target || target.contains(hit))});
 })()
-""".replace("PRODUCT", json.dumps(product)).replace("LABEL", json.dumps(label)).replace("X", json.dumps(x)).replace("Y", json.dumps(y)))
+""", PRODUCT=product, LABEL=label, __HIT_X__=x, __HIT_Y__=y))
         if clear != {"clear": True}:
             raise HouseholdError("MENY cart control is obscured or changed")
         self._require_time(3)

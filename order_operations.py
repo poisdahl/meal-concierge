@@ -1955,6 +1955,7 @@ class OrderOperations:
                         self._cancellation_checkout_guard(state, pending)
                     except HouseholdError as exc:
                         raise CancellationPreconditionError(str(exc)) from exc
+            submit_returned = False
             try:
                 self.browser.submit_cancellation(
                     order_id,
@@ -1963,6 +1964,7 @@ class OrderOperations:
                     before_click,
                     deadline=deadline,
                 )
+                submit_returned = True
                 if getattr(self.browser, "native_receipt_reconciliation", False):
                     current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
                     tracking = current["tracking"]
@@ -1973,18 +1975,27 @@ class OrderOperations:
                 if self.provider in {"oda", "mathem"}:
                     self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
                                                     expected_binding=require_order_binding(pending["browser"].get("binding")))
-            except CancellationPreconditionError:
+            except CancellationPreconditionError as exc:
+                if submit_returned:
+                    exc.outcome_unknown = True
+                    raise
                 with self.store.locked() as state:
-                    current_pending = state.get("pending_cancellation")
-                    if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser") == pending.get("browser"):
+                    if state.get("pending_cancellation") == pending:
+                        self._store_protected_result(state, confirmation_id, "cancellation", {
+                            "status": "not_dispatched", "confirmation_id": confirmation_id, "cancelled": False,
+                            "order_id": order_id, "retry_allowed": False,
+                            "next": "Prepare a fresh cancellation. For standing authorization, use a new intent key.",
+                        }, target_id=order_id)
                         state["pending_cancellation"] = None
                 raise
-            except HouseholdError:
-                with self.store.locked() as state:
-                    current_pending = state.get("pending_cancellation")
-                    if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser") == pending.get("browser"):
-                        state["pending_cancellation"]["status"] = "uncertain"
-                raise
+            except HouseholdError as exc:
+                exc.outcome_unknown = True
+                try:
+                    with self.store.locked() as state:
+                        if state.get("pending_cancellation") == pending:
+                            state["pending_cancellation"]["status"] = "uncertain"
+                finally:
+                    raise exc
             cancelled = self._cancellation_completed(order_id, current)
             with self.store.locked() as state:
                 if canonical(state.get("pending_cancellation")) != canonical(pending):
@@ -2137,6 +2148,15 @@ class OrderOperations:
                         "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
                     }
                     self._store_protected_result(state, pending["confirmation_id"], "cancellation", terminal, target_id=order_id)
+                elif (self.provider in {"oda", "mathem"} and
+                      str(current["tracking"].get("status") or "").casefold() == "delivered"):
+                    terminal = {"cancelled": False, "status": "delivered", "retry_allowed": False,
+                                "order_id": order_id, "confirmation_id": pending["confirmation_id"],
+                                "tracking_status": "delivered",
+                                "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"}}
+                    self._store_protected_result(state, pending["confirmation_id"], "cancellation", terminal, target_id=order_id)
+                    state["pending_cancellation"] = None
+                    return terminal
                 else:
                     state["pending_cancellation"]["status"] = "uncertain"
             return {**(terminal if cancelled else {}), "cancelled": cancelled, "tracking": current["tracking"], "retry_allowed": False}
@@ -2144,6 +2164,7 @@ class OrderOperations:
     def _checkout_dietary(self, summary, deadline=None):
         from dietary_assessment import assess, digest, rules
         from product_planner import nonfood_candidate
+        from product_observations import IncompleteProductBatch
         profile = self.store.read()['profile']
         findings = []
         if rules(profile):
@@ -2156,6 +2177,8 @@ class OrderOperations:
                     group = queries[offset:offset + 8]
                     try:
                         search_results.update(batch(group, size=20, deadline=deadline))
+                    except IncompleteProductBatch as exc:
+                        search_results.update(exc.observations)
                     except HouseholdError:
                         pass  # Fall back to exact single-query reads below.
             reader = getattr(self.provider_client, 'product_dietary_evidence', None)
@@ -2372,7 +2395,8 @@ class OrderOperations:
         equipment = [i for i in assess_menu(state).get('issues', []) if i.get('code') == 'equipment_unavailable']
         if equipment:
             return {'confirmed': False, 'status': 'needs_input', 'reason': 'equipment_unavailable', 'issues': equipment}
-        due = self._due_recurring(state, self._household_today(state)) if plan.get('include_recurring', True) else []
+        scope, rows = self._menu_recurring_scope(state)
+        due = [r['item'] for r in rows if r['decision'] != 'skip'] if plan.get('include_recurring', True) else []
         if canonical(due) != canonical(plan.get('recurring_items', [])):
             return {'confirmed': False, 'status': 'needs_input', 'reason': 'weekly_goods_changed',
                     'next': 'Synchronize cart action=weekly for this menu before preparing checkout.'}
@@ -2462,6 +2486,33 @@ class OrderOperations:
             return self._checkout_retire_attempt(deadline, request)
         if action == "switch_payment":
             return self._checkout_switch_payment(deadline, request.get("confirmation_id"), request.get("checkout_payment"))
+        if action == "discard_review":
+            token = request.get("confirmation_id")
+            with self._browser_operation(deadline), self.store.locked() as state:
+                previous_result = self._read_protected_result(state, token, "checkout") if isinstance(token, str) else None
+                if previous_result and previous_result.get("status") == "review_discarded":
+                    return previous_result
+                pending = state.get("pending_checkout") or {}
+                child = pending.get("recovery")
+                review = child or pending
+                if (not token or review.get("status") != "awaiting_confirmation"
+                        or token != review.get("confirmation_id") or state.get("pending_cancellation")):
+                    raise HouseholdError("discard_review requires the current unsubmitted confirmation")
+                receipt = {"status": "review_discarded", "confirmation_id": token, "confirmed": False,
+                           "retry_allowed": False, "original_confirmation_id": pending["confirmation_id"]}
+                if child:
+                    if "restore_recovery" not in child:
+                        raise HouseholdError("this older recovery review lacks the original attempt binding; reconcile its current confirmation")
+                    prior = child["restore_recovery"]
+                    if prior is None:
+                        pending.pop("recovery")
+                    else:
+                        pending["recovery"] = deepcopy(prior)
+                    receipt["active_confirmation_id"] = (prior or pending)["confirmation_id"]
+                else:
+                    state["pending_checkout"] = None
+                self._store_protected_result(state, token, "checkout", receipt)
+            return receipt
         if action == "abort_payment":
             return self._checkout_abort_payment(deadline, request.get("confirmation_id"))
         if action == "abandon_unpaid":
@@ -2470,6 +2521,11 @@ class OrderOperations:
                 str(request["confirmation_id"]),
                 str(request["order_id"]),
             )
+        if action == "renew_review":
+            original = request.get("confirmation_id")
+            if not isinstance(original, str) or not original:
+                raise HouseholdError("review renewal requires the original checkout confirmation_id")
+            return self._checkout_prepare(deadline, renew_confirmation_id=original)
         if action == "prepare" and request.get("recovery"):
             return self._checkout_recovery_prepare(
                 deadline,
@@ -2753,6 +2809,7 @@ class OrderOperations:
         payment_override: Mapping[str, Any] | None = None,
         requested_order_id: str | None = None,
         _switch_confirmation_id: str | None = None,
+        renew_confirmation_id: str | None = None,
         identity_review: Mapping[str, Any] | None = None,
         first_meal_date: str | None = None,
     ) -> dict[str, Any]:
@@ -2805,6 +2862,14 @@ class OrderOperations:
             payment_preference = deepcopy(state["checkout_payment"])
             checkout_payment = deepcopy(payment_preference)
             current_pending = state.get("pending_checkout")
+            if renew_confirmation_id is not None and (
+                    not isinstance(current_pending, Mapping)
+                    or current_pending.get("confirmation_id") != renew_confirmation_id
+                    or current_pending.get("status") != "awaiting_confirmation"
+                    or current_pending.get("recovery") or current_pending.get("occurrence")
+                    or current_pending.get("scheduler_context") or current_pending.get("automatic_checkout")
+                    or current_pending.get("order_change") != state.get("order_change")):
+                raise HouseholdError("renew only the exact original manual, undispatched checkout review")
             inherited_occurrence = (
                 current_pending.get("occurrence")
                 if occurrence is None
@@ -2821,7 +2886,7 @@ class OrderOperations:
                 if isinstance(occurrence_record, dict):
                     occurrence_record["status"] = "started"
                     occurrence_record["at"] = self._now().isoformat()
-            if expired_awaiting_confirmation(current_pending, self._now()):
+            if renew_confirmation_id is None and expired_awaiting_confirmation(current_pending, self._now()):
                 state["pending_checkout"] = None
             if self._unresolved_scheduled_effects(state):
                 raise HouseholdError("reconcile the original scheduled delivery effect before preparing checkout")
@@ -3201,6 +3266,7 @@ class OrderOperations:
                 if state["checkout_payment"] != payment_preference:
                     raise HouseholdError("payment preference changed while preparing checkout; prepare a new summary")
                 state["pending_checkout"] = {
+                    **({"renewed_from": renew_confirmation_id} if renew_confirmation_id else {}),
                     **({"independent_cart": True} if independent_cart else {}),
                     "checkout_payment": checkout_payment,
                     **({"payment_preference": payment_preference} if checkout_payment != payment_preference else {}),
@@ -4383,6 +4449,15 @@ class OrderOperations:
                  "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
                  "status": "awaiting_confirmation", "order_id": order_id,
                  "browser_review": review, "dietary_assessment": assessment}
+        if previous is None:
+            child["restore_recovery"] = None
+        elif previous.get("status") == "awaiting_confirmation":
+            if "restore_recovery" in previous:
+                child["restore_recovery"] = deepcopy(previous["restore_recovery"])
+        else:
+            # Keep one exact dispatched child. Older dispatches have their
+            # own protected receipts; avoid recursively copying review chains.
+            child["restore_recovery"] = {k:deepcopy(v) for k,v in previous.items() if k != "restore_recovery"}
         if same_order_probe:
             child["payment_action"] = "same_order_payment"
         source_attempt = previous if isinstance(previous, Mapping) else pending
@@ -4580,6 +4655,11 @@ class OrderOperations:
                         expected = (vipps_dispatched or vipps_prepared or dispatched) if dispatch_claimed else pending
                         if canonical(current) == canonical(expected):
                             current.pop("recovery")
+                if dispatch_claimed and not isinstance(exc, RecoveryClickNotDispatchedError):
+                    exc.outcome_unknown = True
+                raise
+            except HouseholdError as exc:
+                exc.outcome_unknown = dispatch_claimed
                 raise
             if vipps_request_sent:
                 return {
@@ -4628,7 +4708,7 @@ class OrderOperations:
             with self.store.locked() as state:
                 if canonical(state.get("pending_checkout")) == canonical(pending):
                     state["pending_checkout"] = None
-            raise HouseholdError("checkout confirmation expired")
+            raise HouseholdError("checkout confirmation expired; prepare a fresh review before confirming")
         price_review = self._delivery_price_review(pending["summary"], pending.get("order_change"))
         if price_review is not None:
             if price_review != pending["summary"].get("delivery_change"):
@@ -4639,13 +4719,9 @@ class OrderOperations:
                         "next": "The new full total exceeds the original and any authorized price limit. Obtain one approval of this exact window, difference and total, then confirm this ID with delivery_price_approved=true."}
         elif (request or {}).get("delivery_price_approved"):
             raise HouseholdError("Delivery price approval cannot authorize a different checkout operation")
-        try:
-            reprepared = self._revalidate_checkout_delivery(pending, deadline=deadline)
-        except HouseholdError:
-            with self.store.locked() as state:
-                if canonical(state.get("pending_checkout")) == canonical(pending):
-                    state["pending_checkout"] = None
-            raise
+        # No payment effect is possible here. Keep the original expiry and
+        # require the same complete revalidation on the next explicit confirm.
+        reprepared = self._revalidate_checkout_delivery(pending, deadline=deadline)
         if reprepared is not None:
             return reprepared
         cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {}, deadline=deadline)
@@ -4670,6 +4746,8 @@ class OrderOperations:
                 raise HouseholdError("order change changed; show a new summary")
             if (pending.get("cart_plan") is not None or pending.get("independent_cart")) and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                 raise HouseholdError("cart plan changed; show a new summary")
+        dispatch_started = False
+        submission_returned = False
         try:
             with self._browser_operation(deadline):
                 with self.store.locked() as state:
@@ -4689,6 +4767,7 @@ class OrderOperations:
                     self._pending_scheduler_guard(state, pending)
                     mp.require_calendar_eligible(state, pending.get("menu") or {})
                     state["pending_checkout"]["status"] = "clicking"
+                    dispatch_started = True
                     if (self.provider in {"oda", "mathem"}
                             and (not pending_change.get("requested_delivery") or price_review["payable_ore"] > 0)
                             and (pending_change.get("requested_delivery") or pending["checkout_payment"]["method"] == "saved_card")):
@@ -4843,6 +4922,7 @@ class OrderOperations:
                         **({"before_vipps_request": before_vipps_request, "on_vipps_gateway": on_vipps_gateway}
                            if pending["checkout_payment"]["method"] == "vipps" else {}),
                     )
+                submission_returned = True
                 if self.provider == "meny" and isinstance(submit_result, Mapping) and submit_result.get("awaiting_user_payment") is True:
                     requested_at = self._now()
                     with self.store.locked() as state:
@@ -4901,17 +4981,35 @@ class OrderOperations:
                             state["pending_checkout"].pop("authentication_unresolved", None)
                         state["pending_checkout"].update(evidence)
                 return self._checkout_reconcile_unlocked(deadline)
-        except CheckoutPreconditionError:
+        except CheckoutPreconditionError as exc:
+            if submission_returned:
+                exc.outcome_unknown = True
+                raise
             with self.store.locked() as state:
-                current_pending = state.get("pending_checkout")
-                if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser_review") == pending.get("browser_review"):
+                current = state.get("pending_checkout")
+                if canonical(current) == canonical({**pending, "status": "clicking"}):
+                    self._store_protected_result(state, confirmation_id, "checkout", {
+                        "confirmation_id": confirmation_id, "confirmed": False,
+                        "status": "not_dispatched", "retry_allowed": False,
+                        "next": "Prepare a fresh checkout. For standing authorization, use a new intent key.",
+                    })
                     state["pending_checkout"] = None
             raise
-        except HouseholdError:
-            with self.store.locked() as state:
-                current_pending = state.get("pending_checkout")
-                if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser_review") == pending.get("browser_review"):
-                    state["pending_checkout"]["status"] = "uncertain"
+        except HouseholdError as exc:
+            if dispatch_started:
+                exc.outcome_unknown = True
+            try:
+                with self.store.locked() as state:
+                    current = state.get("pending_checkout")
+                    if current and current.get("confirmation_id") == confirmation_id and current.get("status") == "clicking":
+                        exc.outcome_unknown = True
+                        current["status"] = "uncertain"
+            except (HouseholdError, OSError):
+                if not dispatch_started:
+                    raise
+                # The local callback already established possible dispatch.
+                # A failed journal reread cannot reverse that fact.
+                raise exc
             raise
 
     def _purchase_delivery(self, state, order_id):

@@ -143,6 +143,20 @@ class RecoveryTests(unittest.TestCase):
     def prepare(self):
         return self.call("prepare", recovery=True)
 
+    def test_discard_unsubmitted_recovery_restores_original_once_across_restart(self):
+        review = self.call("prepare", recovery=True, checkout_payment={"method": "saved_card"})
+        token = review["confirmation_id"]
+        with self.assertRaises(HouseholdError):
+            self.call("discard_review", confirmation_id="original")
+        receipt = self.call("discard_review", confirmation_id=token)
+        self.assertEqual(receipt["active_confirmation_id"], "original")
+        self.assertEqual(self.app.store.read()["pending_checkout"]["status"], "uncertain")
+        self.assertNotIn("recovery", self.app.store.read()["pending_checkout"])
+        self.app = Application(StateStore(self.temp.name, self.settings), self.merchant, self.browser)
+        self.assertEqual(self.call("discard_review", confirmation_id=token), {**receipt, "idempotent": True})
+        self.assertEqual(self.call("confirm", confirmation_id=token), {**receipt, "idempotent": True})
+        self.assertEqual(self.browser.clicks, 0)
+
     def prepare_saved_card_to_vipps_recovery(self):
         with self.app.store.locked() as state:
             state["checkout_payment"] = {"method": "saved_card"}

@@ -1,25 +1,33 @@
 """General shopping lists over the same requirements used by product preparation."""
 from copy import deepcopy
-from fractions import Fraction
 from typing import Mapping
 
 from core import HouseholdError
 import menu_planning as mp
 from product_planner import canonical, menu_requirements
-from recipe_quantities import read_quantity, quantity_json
+from recipe_quantities import read_quantity, quantity_json, display_amount
+from stock_check import build_stock_check, stock_check_page, stock_answer_decisions
+
+
+class StockDecisionConflict(HouseholdError):
+    """Preparation supplied a different decision for an already answered position."""
 
 
 _AUTO = object()
 
 def effective_ingredient_decisions(state, menu, supplied=None, *, reference=_AUTO):
-    """Current recorded stock wins over a repeated, older preparation request."""
+    """A fresh conflicting answer needs an explicit update of the saved stock review."""
     saved = state.get('menu_ingredient_decisions') or {}
     reference = mp.menu_ref(menu) if reference is _AUTO else reference
     if reference is None or saved.get('menu_ref') != reference:
         return supplied, None
     menu_requirements(mp.shopping_menu(menu), ingredient_decisions=supplied)
     merged = {canonical(d['source']): d for d in supplied or []}
-    merged.update({canonical(d['source']): deepcopy(d) for d in saved['decisions']})
+    for decision in saved['decisions']:
+        key = canonical(decision['source'])
+        if key in merged and merged[key] != decision:
+            raise StockDecisionConflict('ingredient decision differs from saved stock; read the shopping list and record_stock with its current stock_ref')
+        merged[key] = deepcopy(decision)
     return list(merged.values()), mp.digest(saved['decisions'])
 
 
@@ -115,16 +123,26 @@ def build_list(state):
         elif baseline[key] != fingerprint:
             changes['changed'].append(key)
     return {'menu_ref': reference, 'scope': scope, 'list_ref': mp.digest({'menu_ref': reference, 'rows': rows, 'annotations': annotations}),
+            'stock_check': build_stock_check(state),
+            'display_language': (menu or {}).get('output_language') or 'nb',
             'items': rows, 'changes': changes, 'fingerprints': fingerprints,
             'cart_changed': False, 'provider': state.get('provider', 'oda'),
             'note': 'List checks and personal extras do not change pantry facts, product plans or carts. Changed quantities reopen checked rows. Record stock explicitly before preparing an order.'}
 
 
 def _page(value, request):
+    language = request.get('language') or value.get('display_language') or 'nb'
+    from recipe_languages import language_tag
+    from recipes import RecipeError
+    try:
+        language_tag(language)
+    except RecipeError as exc:
+        raise HouseholdError(str(exc)) from exc
     offset, limit = request.get('offset', 0), request.get('limit', 12)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise HouseholdError('shopping list pages require offset >= 0 and limit from 1 to 20')
-    result = {key: deepcopy(child) for key, child in value.items() if key not in {'items', 'fingerprints', 'changes', 'scope'}}
+    result = {key: deepcopy(child) for key, child in value.items() if key not in {'items', 'fingerprints', 'changes', 'scope', 'stock_check'}}
+    result['stock_check'] = stock_check_page(value.get('stock_check'), offset=offset, limit=limit, language=language)
     result['changes'] = {key: {'count': len(ids), 'ids': ids[offset:offset + limit]} for key, ids in value['changes'].items()}
     result['changes_next_offset'] = (offset + limit if any(
         len(ids) > offset + limit for ids in value['changes'].values()) else None)
@@ -137,25 +155,43 @@ def _page(value, request):
                   next_offset=offset + limit if offset + limit < len(value['items']) else None)
     lines = []
     for row in rows:
-        quantity = row.get('quantity')
-        if isinstance(quantity, Mapping):
-            number = Fraction(quantity['numerator'], quantity['denominator'])
-            quantity = str(number.numerator) if number.denominator == 1 else str(float(number))
-        measure = ' '.join(str(part) for part in (quantity, row.get('unit')) if part is not None)
+        measure = display_amount(row.get('quantity'), row.get('unit'), language)
+        if measure is not None:
+            row['display_amount'] = measure
+        elif row.get('quantity') is None and row.get('unit'):
+            measure = str(row['unit'])
         lines.append(f"[{'x' if row['checked'] else ' '}] {row['item']}" + (f' — {measure}' if measure else ''))
     result['text'] = '\n'.join(lines)
+    result['display_language'] = language
     return result
 
 
 def handle_shopping_list(app, request):
     action = request.get('action', 'get')
-    if action not in {'get', 'update', 'refresh', 'match'}:
+    if action not in {'get', 'update', 'refresh', 'match', 'record_stock'}:
         raise HouseholdError('unknown shopping_list action')
     current = build_list(app.store.read())
     # Validate pagination before any local write or provider call.
     _page(current, request)
     if action == 'get':
         return _page(current, request)
+    if action == 'record_stock':
+        with app.product_plan_lock, app.store.locked() as state:
+            if state.get('pending_checkout') or state.get('order_change'):
+                raise HouseholdError('finish the existing checkout before changing menu shopping requirements')
+            decisions = stock_answer_decisions(state, request.get('stock_ref'), request.get('stock_answers'))
+            reference = mp.menu_ref(state['menu'])
+            previous = state.get('menu_ingredient_decisions') or {}
+            merged = {canonical(d['source']): d for d in previous.get('decisions', [])} if previous.get('menu_ref') == reference else {}
+            merged.update({canonical(d['source']): deepcopy(d) for d in decisions})
+            menu_requirements(mp.shopping_menu(state['menu']), ingredient_decisions=list(merged.values()))
+            updated = {'menu_ref': reference, 'decisions': list(merged.values())}
+            if updated != previous:
+                state['menu_ingredient_decisions'] = updated
+                state.pop('product_plan_completion', None)
+                app._clear_persisted_product_plan(state.get('cart_plan'))
+            result = _page(build_list(state), request)
+        return {**result, 'recorded': True, 'recorded_sources': len(decisions), 'cart_changed': False}
     if request.get('list_ref') != current['list_ref']:
         raise HouseholdError('shopping list changed; read it again before updating or matching')
     if action in {'update', 'refresh'}:
@@ -193,7 +229,7 @@ def handle_shopping_list(app, request):
     arguments = {'operation': 'products', 'action': 'prepare', 'menu_ref': current['menu_ref'],
                  'include_recurring': False, 'response_view': 'agent', 'price_mode': request.get('price_mode', 'estimate'),
                  'offset': request.get('offset', 0), 'limit': request.get('limit', 8)}
-    for key in ('candidate_approvals', 'product_plan_ref', 'continuation_mode'):
+    for key in ('candidate_approvals', 'product_plan_ref', 'continuation_mode', 'stock_ref'):
         if request.get(key) is not None:
             arguments[key] = request[key]
     try:

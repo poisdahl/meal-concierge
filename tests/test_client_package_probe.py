@@ -89,7 +89,7 @@ class CartRecoveryFixtureTests(unittest.TestCase):
         self.assertLessEqual(len(result.stdout), INSPECT_OUTPUT_LIMIT)
         return json.loads(result.stdout)
 
-    def test_cli_recovers_one_effect_after_controlled_restart(self):
+    def test_cli_retains_one_unacknowledged_effect_after_controlled_restart(self):
         prepared = subprocess.run([sys.executable, "-I", "-B", str(HERE), "--prepare", str(self.root),
                                    "--case", "cart-recovery"], capture_output=True, timeout=30)
         self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
@@ -104,12 +104,18 @@ class CartRecoveryFixtureTests(unittest.TestCase):
             self.assertEqual(cart["items"][0]["quantity"], 1)
             self.assertNotIn("_fixture", cart)
             failed = self.cli("change", operations=[{"product_id": "10", "quantity": 1}], expected=1)
-            self.assertEqual(failed, {"ok": False, "error": "Provider reply unavailable; cart change outcome is unknown."})
-            for action in ("get", "reconcile_change"):
-                self.assertIn("temporarily unavailable", self.cli(action, expected=1)["error"])
+            self.assertEqual(failed, {"ok": False, "error": "Provider reply unavailable; cart change outcome is unknown.",
+                "status": "outcome_unknown", "outcome": "unknown",
+                "recovery": "Read status and reconcile the original attempt/ref/key before any further write; do not repeat the mutation."})
+            self.assertIn("temporarily unavailable", self.cli("get", expected=1)["error"])
+            self.assertEqual(self.cli("reconcile_change", expected=1)["outcome"], "unknown")
             pending = self.inspect()
             self.assertEqual(pending["starts"][0]["pid"], first.pid)
-            self.assertEqual(pending["pending_cart_change"], {
+            journal = pending["pending_cart_change"]
+            self.assertRegex(journal["operation_id"], r"^[a-f0-9]{32}$")
+            self.assertRegex(journal["request_digest"], r"^[a-f0-9]{64}$")
+            self.assertEqual(journal, {
+                "operation_id": journal["operation_id"], "request_digest": journal["request_digest"],
                 "provider": "mathem", "before": {"10": 1}, "expected": {"10": 2},
                 "order_change": None, "operations": [{"productId": 10, "quantity": 1}]})
             self.assertEqual([row["event"] for row in pending["dispatches"]],
@@ -129,14 +135,13 @@ class CartRecoveryFixtureTests(unittest.TestCase):
             before = self.cli("get")["result"]
             self.assertTrue(before["cart_write_pending"])
             self.assertEqual(before["items"][0]["quantity"], 2)
-            reconciled = self.cli("reconcile_change")["result"]
-            self.assertTrue(reconciled["reconciled"])
-            self.assertFalse(reconciled["cart_write_pending"])
+            self.assertEqual(before["operation_id"], journal["operation_id"])
+            self.assertEqual(self.cli("reconcile_change", expected=1)["outcome"], "unknown")
             final_cart = self.cli("get")["result"]
-            self.assertNotIn("cart_write_pending", final_cart)
+            self.assertTrue(final_cart["cart_write_pending"])
             self.assertEqual([(row["product_id"], row["quantity"]) for row in final_cart["items"]], [(10, 2)])
             final = self.inspect()
-            self.assertIsNone(final["pending_cart_change"])
+            self.assertEqual(final["pending_cart_change"], journal)
             for key in ("cart_mutation_requests", "provider_attempts", "effects"):
                 self.assertEqual(final["counts"][key], 1)
             self.assertEqual(final["fixture"]["effect_count"], 1)

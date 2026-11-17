@@ -321,10 +321,29 @@ recovery. Installation does not perform provider login or prompt for payment
 configuration. Oda and MENY require the private `vipps_phone_number` in their
 config before a Vipps checkout can dispatch.
 
-JSON and SQLite migrations run offline. Clean state is v13; existing v6
+JSON and SQLite migrations run offline. Clean state is v14; existing v6
 households gain `delivery.strategy="keep_selected"`, while new installations
 use `"cheapest"`. Preserve original operation identities and latest outcome
 journals. Do not restore old journals over possible external effects.
+
+An error response during shopping can carry `outcome: "unknown"` when an
+unresolved cart, checkout, cancellation or order-change journal remains. MCP and
+CLI expose `status: "outcome_unknown"`; read status and reconcile the original
+attempt before another write. The error does not clear or retry that journal.
+
+Oda and Mathem preparation defaults to estimate mode through the service as
+well as MCP. Within an explicitly approved scope, known regular single-product
+covering packs can be compared by dietary fit and merchandise cost even when
+deposits are unknown. Every scoped candidate must be observable; final payable
+costs remain unknown. Fixed coverage over twice the need and explicitly chosen
+extra packages carry `quantity_warnings` for the agent to review, without
+changing the canonical need or inventing stock.
+
+Current clients use the health probe's service monotonic clock to attach an
+admission deadline. A request that expires while waiting for a service operation
+lock is rejected before it starts. Once admitted, journal writes and required
+reconciliation finish even if the caller disconnects; a timeout never proves
+that an admitted mutation failed. Older clients retain their existing protocol.
 
 New installations use `"confirmation_policy": "fresh"`: Hermes prepares the
 exact checkout or cancellation summary and asks once before dispatch. An owner
@@ -758,7 +777,7 @@ in command arguments, state, SQLite, logs, MCP traffic, fixtures or Git. After
 the provider-specific adapter is installed, use the interactive local helper:
 
 ```sh
-meal_concierge_home="${MEAL_CONCIERGE_HOME:-${HERMES_HOME:-$HOME/.hermes}/meal-concierge}"
+meal_concierge_home="${MEAL_CONCIERGE_HOME:-$HOME/.local/share/meal-concierge}"
 python3 recipe_library_setup.py --config "$meal_concierge_home/config.json" --home "$meal_concierge_home" \
   add --library-id family-mealie --provider mealie --base-url https://recipes.example --read-only
 python3 recipe_library_setup.py --config "$meal_concierge_home/config.json" --home "$meal_concierge_home" \
@@ -1169,7 +1188,9 @@ summary cannot establish readiness. Compact discovery uses `projection=summary`,
 pages enumerate active entries before drafts. Default full discovery remains
 compatible. The `convert` action binds a client-assisted schema-2 recipe to the
 source `discovery_ref`, `recipe_digest` and `source_schema_version`, preserves
-attribution and rejects newly asserted source/user quantity evidence. Exact
+attribution and rejects newly asserted source/user quantity evidence. With
+`changes` instead of `recipe`, the service applies [bounded conversion changes](recipe-contract.md#bounded-conversion-changes)
+itself and keeps untouched source amounts. Exact
 source/version transforms are cached within existing snapshot lifetime/bounds;
 accepted estimates can be reused after restart without creating personal entries. Candidate revisions, frozen discovery
 content digests, the complete bounded recipe-usage history, the complete current
@@ -1349,6 +1370,8 @@ TheMealDB uses its official V1 API; a private key can be supplied only through
 attribution, upstream recipe links where supplied, and separate image credits.
 Copyright and trademark notices are retained; API resale requires separate
 permission under the [TheMealDB Terms of Use](https://www.themealdb.com/terms_of_use.php).
+Wikibooks queries filter a bounded category-title browse; they do not translate
+queries or search the complete recipe text. A blank query browses titles.
 Wikibooks Cookbook recipes pass a strict ingredients-plus-procedure gate and
 are stored with CC BY-SA 4.0 attribution, the exact permanent revision URL, a
 content hash and a change statement. Images are never copied. Selected
@@ -1646,6 +1669,11 @@ Slot metadata uses the additive v8→v9 migration, with
 one private atomic `state-v8.backup.json` before upgrading an existing v8 file.
 Direct v7 upgrades retain their own `state-v7.backup.json`. Backups are 0600,
 never overwritten; migration is atomic/idempotent and newer versions fail closed.
+V13→v14 atomically preserves `state-v13.backup.json` before adding empty
+recipe-source preference lists. Older runtimes reject v14; rollback requires the
+pre-update backup and reconciliation of any later external outcomes. Unsaved
+planner proposals must be generated again after this profile migration; saved
+menus remain unchanged.
 V12→v13 atomically backs up `state-v12.backup.json` before adding the durable
 prepared-replan store, so restoring that backup supports rollback to v12 code.
 Planning metadata is bounded to 2,000 menus; reaching the bound stops new
@@ -2035,6 +2063,24 @@ strict complete-price requirements. `budget_ore` rejects a known minimum above
 the budget, including every known deposit; unknown totals stay unverified. It
 excludes delivery and cart fees. Checkout always reads the final provider total.
 
+A complete product review includes menu requirements and the due standing
+goods unless the request specifies `include_recurring=false`. Each included
+occurrence must match one current observed SKU, availability, quantity and price.
+Follow `recurring_review_arguments` and `recurring_issues_arguments` to page the due items and their issues separately from menu ingredients. For a saved
+menu, pass its exact `menu_ref`, `recurring_review_ref` and `occurrence_ref` to
+`recurring review_occurrence`. Select `decision=include`, `skip` or `substitute`
+and supply an exact replacement SKU, name and package count for a substitution. Prepare the
+menu again to review changed quantities, prices and digest. The choice covers
+only that menu and occurrence. An unavailable good remains in scope until the
+household explicitly chooses a substitute or skips it.
+
+`merchandise_budget_review` compares the selected merchandise subtotal with
+the cap. In estimate mode its comparison is advisory. A verified minimum above
+the cap blocks the plan. Missing deposit or price facts leave the payable budget
+unverified. A product review covers the proposed shopping list. Extra goods
+already in the retailer cart, delivery, fees and discounts enter the final
+retailer checkout review.
+
 An incomplete preparation with reviewed selected lines may return digest-bound
 `partial_apply_arguments`. Partial apply rereads every selection accumulated by
 this and earlier partial applies before syncing them, excludes recurring goods,
@@ -2055,6 +2101,45 @@ arguments instead of hiding the remaining work. Resolve the listed
 `candidate_approvals` or `price_mode` issues and prepare the entire same menu
 again with its unchanged binding; product preparation has no supported menu
 requirement-scope reduction.
+
+Review suggestions identify exact available candidates with observed covering
+packages. The household agent reviews culinary suitability and each returned
+approval. Unapproved suggestions leave the plan incomplete. Continuation work
+retains provider, query, page, menu, ingredient and household context with a
+five-minute review window. Apply performs a fresh validation cycle and binds its
+prewrite checks to current menu, product, profile and cart evidence. Oda batches
+up to eight bounded product searches and retries failing queries individually.
+For public dietary details, an entry with a strong entity tag can reuse its
+bounded parsed facts only after the same retailer product page confirms the
+same tag. A changed response is parsed again, expiry or restart discards the
+cache, and retrieval failures produce unknown evidence. Dietary assessments are
+recomputed against the current profile and cart. OAuth transport ownership is
+per household and provider. Each transport session negotiates credentials
+inside that owner lock, waits briefly for contention under the caller deadline,
+and closes at the end of the operation. Bulk reads amortize negotiation without
+sharing mutable sessions across different operations or credential refreshes.
+
+A managed Oda or Mathem write retains its original operation identity, menu
+revision, exact deltas and expected cart. When the response is uncertain,
+`cart reconcile_change` reads the original operation without dispatching it
+again. The transport can positively identify a local refusal before the cart
+tool was entered. A timeout or generic merchant error leaves the original
+operation pending even if another edit later produces the expected cart. An
+operation-bound ending and matching readback are required to release that
+write. The retail MCP cart tool returns the resulting grouped cart, as described
+in the [Oda tool manifest](https://oda.com/mcp/manifest/). Queue acknowledgements
+leave the operation pending. A terminal response received by the service before a caller disconnects
+is recorded and can be reconciled after restart. A lost provider response
+requires a terminal receipt from the original provider invocation. If a completed batch has visible partial
+additions with ambiguous ownership, `ownership_review.maximum_adoptable`
+shows the bounded quantities the owner may choose to assign to the menu.
+Use `cart reconcile` with the exact digest, `keep_current` and approved
+`adopt_quantities`; all other unattributed quantities retain household ownership.
+
+An unsubmitted checkout review can be discarded with `checkout discard_review`
+and its exact confirmation ID. Discarding an unsubmitted recovery review restores
+the original pending attempt and its evidence. A dispatched payment, cancellation
+or removal continues through its existing reconciliation path.
 
 Cart sync and reconcile require the current `menu_ref` (menu_id, revision, digest),
 and product approval is invalidated by changed requirements even during external
@@ -2228,10 +2313,13 @@ Provider explanations: [Oda additions](https://hjelp.oda.com/no/article/100639),
 
 Each supplemental cart write is journalled before dispatch; MENY uses bounded
 verified batches. An interrupted write blocks later writes and checkout across
-restart. `cart reconcile_change` only reads and closes the journal when the exact
-expected quantities are observed; it never sends the delta again. A native MENY
-stop proven to precede every click can close after reading the preserved cart;
-a partial batch still requires the exact result of its earlier clicks. Workflow status
+restart. `cart reconcile_change` reads without dispatch. A recorded terminal
+response and matching quantities verify the intended result. A different cart
+after a recorded terminal response requires review before attribution. If the
+provider response was lost, the original invocation needs terminal evidence
+even when another edit produced the expected cart. A verified MENY stop before
+its first click releases the fence. A stopped prefix requires readback of the
+earlier acknowledged clicks. Workflow status
 surfaces this recovery step. A changed Oda/Mathem addition cart must be reviewed and
 rebound; `orders change_abort(retain_cart=true)` preserves its goods.
 
@@ -2296,9 +2384,10 @@ Delivery list retains per-date full/unavailable/selectable counts. If any checke
 date has no selectable slots, Oda inspects `/no/checkout/delivery/` in a separate
 inspection tab under the browser lock, only without pending cart, checkout,
 cancellation or order changes. The browser account and exact cart must match the
-provider, including an explicitly requested address. The reader waits for the
-observed visible stock-delay banner; absent/loading/unrecognized evidence stays
-`restriction_status=unknown`, never proof of unrestricted delivery. This optional
+provider, including an explicitly requested address. A visible stock-delay banner gives
+`restriction_status=observed`. A fully loaded delivery page with a visible, enabled
+time-window control and no such banner gives `not_observed` for that inspection.
+Loading pages and unrecognized controls give `unknown`. This optional
 read cannot choose delivery, change goods or pay. Failure preserves the slot
 response; a changed cart/address instead marks `availability_stale=true` and
 requires a fresh list. Dates outside the requested range remain unverified.
@@ -2314,3 +2403,25 @@ Oda's displayed `Vektreservasjon` is retained as its own entry in `other_fees`.
 The temporary weight reservation contributes to the amount being authorized;
 it is not a promise of the final settled charge. Its presence and exact value
 are frozen with every other checkout amount and checked again before submission.
+
+
+A planned replacement includes `plan.current_menu_ref` from the planning
+snapshot. Send it as `menu_ref` with the chosen `save_ref` as `planner_ref`.
+A concurrent edit still requires refreshing the plan or reviewing the current
+menu. Repeated planning with identical inputs can reuse one in-memory ranking
+result. Candidate versions, profile, history, feedback and the commit-time
+comparison remain part of validation.
+
+For a manual checkout review delayed in chat, call `checkout renew_review`
+with its original `confirmation_id` before trying to confirm. It reads the
+current merchant summary, issues a fresh confirmation, and records the prior
+review ID. Review the returned terms again. A possible dispatch or recovery
+must use its existing reconciliation path. If confirmation already retired an
+expired review, use ordinary checkout preparation.
+
+After recording new pantry answers, use `products prepare` with
+`continuation_mode=refresh_stock`, the original `product_plan_ref` and the new
+`stock_ref`. The service carries forward choices for unchanged requirements,
+drops shared choices if a group member changed, and checks current product
+observations before returning a new review. The superseded reference cannot
+apply the new cart.

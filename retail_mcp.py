@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import argparse
 from contextlib import contextmanager
+from copy import deepcopy
+from threading import Lock
 from datetime import date, datetime, timedelta
 import fcntl
 import hashlib
@@ -22,8 +24,12 @@ import time
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from core import HouseholdError, cart_summary, validate_delivery_slot
+from core import HouseholdError, cart_contents, cart_summary, validate_delivery_slot
 from product_observations import _mathem_ore, normalize_retail_product_search, normalize_retail_product_search_batch
+
+
+class RetailPreDispatchError(HouseholdError):
+    """A local stop before entering the retailer transport for this call."""
 
 
 ODA_ENDPOINT = "https://oda.com/mcp"
@@ -253,7 +259,27 @@ def _json_value(value: Any) -> Any:
 class RetailMcpClient:
     def product_dietary_evidence(self, reference, *, deadline=None):
         from dietary_assessment import read_retail_product_evidence
-        return read_retail_product_evidence(reference, deadline, provider=self.provider)
+        key = (self.provider, str(reference))
+        with self._detail_cache_lock:
+            retained = self._detail_cache.get(key)
+            if retained is not None and not 0 <= time.monotonic() - retained[0] <= 300:
+                retained = None
+                self._detail_cache.pop(key, None)
+        validator = {"if_none_match": retained[1]} if retained else {}
+        result = read_retail_product_evidence(reference, deadline, provider=self.provider,
+                                              previous=retained[2] if retained else None, validator=validator)
+        if result.get("unavailable") or not validator.get("etag"):
+            with self._detail_cache_lock:
+                if self._detail_cache.get(key) is retained:
+                    self._detail_cache.pop(key, None)
+        else:
+            with self._detail_cache_lock:
+                # Limit the per-household public facts held in memory. A lost
+                # process or discarded entry only causes a fresh complete read.
+                if len(self._detail_cache) >= 256 and key not in self._detail_cache:
+                    self._detail_cache.pop(next(iter(self._detail_cache)))
+                self._detail_cache[key] = (time.monotonic(), validator["etag"], deepcopy(result))
+        return result
 
     def __init__(self, token_directory: Path | str, *, provider: str = "oda"):
         if provider not in {"oda", "mathem"}:
@@ -263,6 +289,8 @@ class RetailMcpClient:
         self.endpoint = MATHEM_ENDPOINT if provider == "mathem" else ODA_ENDPOINT
         self.server_name = "mathem-weekly" if provider == "mathem" else SERVER_NAME
         self.token_directory = Path(token_directory)
+        self._detail_cache = {}
+        self._detail_cache_lock = Lock()
 
     def probe(self) -> dict[str, Any]:
         return self._run(None, {}, 90.0)
@@ -284,7 +312,7 @@ class RetailMcpClient:
             raise HouseholdError(f"{self.label} tool is missing")
         timeout = 90.0 if deadline is None else deadline - time.monotonic()
         if timeout <= 0:
-            raise HouseholdError(f"{self.label} operation deadline reached")
+            raise RetailPreDispatchError(f"{self.label} operation deadline reached")
         provider_arguments = dict(arguments)
         translated_query = (
             self.provider == "mathem" and tool == "product_search"
@@ -304,10 +332,14 @@ class RetailMcpClient:
 
     def _run(self, tool: str | None, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
         if not self.token_directory.is_dir():
-            raise HouseholdError(f"{self.label} login is required")
-        with self._lock():
+            raise RetailPreDispatchError(f"{self.label} login is required")
+        deadline = time.monotonic() + timeout
+        with self._lock(deadline=deadline):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RetailPreDispatchError(f"{self.label} operation deadline reached")
             try:
-                return asyncio.run(self._run_async(tool, arguments, timeout))
+                return asyncio.run(self._run_async(tool, arguments, remaining))
             except HouseholdError:
                 raise
             except Exception as exc:
@@ -323,57 +355,67 @@ class RetailMcpClient:
                 raise HouseholdError(f"{self.label} MCP is unavailable") from None
 
     async def _run_async(self, tool: str | None, arguments: dict[str, Any], timeout: float, *, auth=None) -> dict[str, Any]:
+        # Session negotiation, authentication and discovery can contact the
+        # provider, but cannot dispatch the requested merchant tool. Once
+        # call_tool begins, even a transport teardown failure is ambiguous.
+        entered_tool = False
         try:
-            import httpx2 as httpx
-            from mcp import ClientSession
-            from mcp.client.streamable_http import streamable_http_client
-            from provider_oauth import build_auth
-        except ImportError as exc:
-            raise HouseholdError("Meal Concierge MCP runtime is unavailable") from exc
+            try:
+                import httpx2 as httpx
+                from mcp import ClientSession
+                from mcp.client.streamable_http import streamable_http_client
+                from provider_oauth import build_auth
+            except ImportError as exc:
+                raise HouseholdError("Meal Concierge MCP runtime is unavailable") from exc
 
-        provider = auth or build_auth(self.token_directory, self.server_name, self.label, self.endpoint)
-        async def reject_redirect(response: Any) -> None:
-            # httpx response hooks run before next_request is populated. Never
-            # forward credential-bearing POST bodies to a redirect destination.
-            if response.is_redirect:
-                raise HouseholdError(f"{self.label} MCP redirect is unsupported")
+            provider = auth or build_auth(self.token_directory, self.server_name, self.label, self.endpoint)
+            async def reject_redirect(response: Any) -> None:
+                # httpx response hooks run before next_request is populated. Never
+                # forward credential-bearing POST bodies to a redirect destination.
+                if response.is_redirect:
+                    raise HouseholdError(f"{self.label} MCP redirect is unsupported")
 
-        async with httpx.AsyncClient(
-            auth=provider,
-            follow_redirects=False,
-            timeout=httpx.Timeout(timeout, read=min(60.0, timeout)),
-            event_hooks={"response": [reject_redirect]},
-        ) as client:
-            async with streamable_http_client(self.endpoint, http_client=client, terminate_on_close=False) as streams:
-                async with ClientSession(streams[0], streams[1], read_timeout_seconds=timeout) as session:
-                    async with asyncio.timeout(timeout):
-                        initialized = await session.initialize()
-                        tools: list[Any] = []
-                        cursor: str | None = None
-                        for _ in range(10):
-                            page = await (session.list_tools(cursor=cursor) if cursor else session.list_tools())
-                            tools.extend(page.tools)
-                            cursor = getattr(page, "next_cursor", getattr(page, "nextCursor", None))
-                            if not cursor:
-                                break
-                        names = {str(getattr(item, "name", "")) for item in tools}
-                        missing = sorted(REQUIRED_TOOLS - names)
-                        if missing:
-                            raise HouseholdError(f"{self.label} MCP lacks required operations: " + ", ".join(missing))
-                        server_info = _json_value(getattr(initialized, "server_info", None))
-                        protocol = str(getattr(initialized, "protocol_version", ""))
-                        status = {
-                            "status": "ready",
-                            "protocol_version": protocol,
-                            "server": server_info,
-                            "tool_count": len(names),
-                            "tools": sorted(names),
-                        }
-                        if tool is None:
-                            return status
-                        if tool not in names:
-                            raise HouseholdError(f"{self.label} does not expose {tool}")
-                        result = await session.call_tool(tool, arguments)
+            async with asyncio.timeout(timeout):
+                async with httpx.AsyncClient(
+                    auth=provider,
+                    follow_redirects=False,
+                    timeout=httpx.Timeout(timeout, read=min(60.0, timeout)),
+                    event_hooks={"response": [reject_redirect]},
+                ) as client:
+                    async with streamable_http_client(self.endpoint, http_client=client, terminate_on_close=False) as streams:
+                        async with ClientSession(streams[0], streams[1], read_timeout_seconds=timeout) as session:
+                            initialized = await session.initialize()
+                            tools: list[Any] = []
+                            cursor: str | None = None
+                            for _ in range(10):
+                                page = await (session.list_tools(cursor=cursor) if cursor else session.list_tools())
+                                tools.extend(page.tools)
+                                cursor = getattr(page, "next_cursor", getattr(page, "nextCursor", None))
+                                if not cursor:
+                                    break
+                            names = {str(getattr(item, "name", "")) for item in tools}
+                            missing = sorted(REQUIRED_TOOLS - names)
+                            if missing:
+                                raise HouseholdError(f"{self.label} MCP lacks required operations: " + ", ".join(missing))
+                            server_info = _json_value(getattr(initialized, "server_info", None))
+                            protocol = str(getattr(initialized, "protocol_version", ""))
+                            status = {
+                                "status": "ready",
+                                "protocol_version": protocol,
+                                "server": server_info,
+                                "tool_count": len(names),
+                                "tools": sorted(names),
+                            }
+                            if tool is None:
+                                return status
+                            if tool not in names:
+                                raise HouseholdError(f"{self.label} does not expose {tool}")
+                            entered_tool = True
+                            result = await session.call_tool(tool, arguments)
+        except Exception as exc:
+            if tool == "manipulate_cart" and not entered_tool:
+                raise RetailPreDispatchError(f"{self.label} cart operation stopped before tool dispatch") from exc
+            raise
         if bool(getattr(result, "is_error", getattr(result, "isError", False))):
             raise HouseholdError(f"{self.label} rejected the operation")
         structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
@@ -383,6 +425,20 @@ class RetailMcpClient:
     def _normalize_result(self, tool, arguments, value):
         if not isinstance(value, dict):
             raise HouseholdError(f"{self.label} returned no structured result")
+        if tool == "manipulate_cart":
+            # Both retail manifests return an updated grouped cart. A transport
+            # admission or bare success flag cannot establish that ending.
+            cart = value.get("result") if set(value) == {"result"} else value
+            if (not isinstance(cart, dict) or not isinstance(cart.get("groups"), list)
+                    or type(cart.get("productQuantityCount")) is not int
+                    or not isinstance(cart.get("totalGrossAmount"), str)
+                    or any(key in cart for key in ("status", "queued", "pending", "accepted", "success", "error"))):
+                raise HouseholdError("retailer cart operation returned no concluded cart")
+            lines = cart_contents(cart)["items"]
+            if (cart["productQuantityCount"] != sum(row["quantity"] for row in lines)
+                    or any(not row["product_id"].isdecimal() for row in lines)):
+                raise HouseholdError("retailer cart result has inconsistent product quantities")
+            return cart
         if tool == "get_delivery_slots":
             return normalize_retail_delivery_slots(value, provider=self.provider)
         if tool == "product_search":
@@ -397,14 +453,24 @@ class RetailMcpClient:
         return value
 
     @contextmanager
-    def _lock(self):
+    def _lock(self, *, deadline=None):
         path = self.token_directory / f".{self.provider}-household.lock"
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise HouseholdError(f"another {self.label} operation is active") from exc
+            # Interactive login/explicit owners retain nonblocking acquisition.
+            # A provider call may absorb short-lived contention within its deadline.
+            until = min(deadline, time.monotonic() + 2.0) if deadline is not None else time.monotonic()
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    remaining = until - time.monotonic()
+                    if remaining <= 0:
+                        raise RetailPreDispatchError(f"another {self.label} operation is active") from exc
+                    time.sleep(min(0.025, remaining))
+                except OSError as exc:
+                    raise RetailPreDispatchError(f"{self.label} operation lock unavailable") from exc
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)

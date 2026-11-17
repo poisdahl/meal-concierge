@@ -391,8 +391,8 @@ class LegacyMigrationRecoveryTests(unittest.TestCase):
         self.assertEqual(len(store.search('')), 1)
         self.assertEqual((backup.stat().st_ino, backup.read_bytes()), before)
         with closing(sqlite3.connect(path)) as connection:
-            self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], '6')
-            connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'"); connection.commit()
+            self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], '8')
+            connection.execute("UPDATE metadata SET value='99' WHERE key='schema_version'"); connection.commit()
         with self.assertRaisesRegex(RecipeError, 'newer'): store.search('')
 
 
@@ -512,8 +512,10 @@ class NativeRetirementTests(unittest.TestCase):
                 self.assertNotEqual(saved['portions'], 999)
                 self.assertIsNone(saved['source_provider'])
                 self.assertEqual(saved['schema_version'], 2)
+                self.assertTrue(saved['external_snapshot']['fetched_at'].startswith('20'))
                 self.assertEqual(self.native, before)
                 frozen = migration.Migration(self.app).load(plan['plan_id'])['items'][0]['frozen']
+                self.assertEqual(saved['external_snapshot']['fetched_at'], frozen['source_fetched_at'])
                 identity = frozen['source_context']['identity']
                 self.assertTrue(identity.startswith('import:v1:'))
                 self.assertEqual(self.app.recipes.source_entry(identity)['id'], saved['id'])
@@ -521,6 +523,22 @@ class NativeRetirementTests(unittest.TestCase):
                 self.assertNotIn('SYNTHETIC_RETIREMENT_TOKEN', json.dumps(result))
                 self.assertNotIn(original['authenticated_user']['id'], json.dumps(result))
         self.assertTrue(all(method == 'GET' or method == 'POST' and path == '/compat/v2/recipes/getRecipes' for method, path, _ in self.calls))
+
+    def test_legacy_undispatched_plan_uses_verified_reread_time(self):
+        self.configure('mealie')
+        plan = self.prepare()
+        with self.app.recipes._connection() as connection:
+            frozen = json.loads(connection.execute(
+                "SELECT frozen FROM migration_items WHERE plan_id=?", (plan['plan_id'],)).fetchone()[0])
+            del frozen['source_fetched_at']
+            connection.execute("UPDATE migration_items SET frozen=? WHERE plan_id=?",
+                               (json.dumps(frozen), plan['plan_id']))
+        result = self.execute(plan)
+        self.assertEqual(result['status'], 'complete', result)
+        saved = self.app.recipes.get(result['items'][0]['destination_ref']['recipe_id'])
+        progress = migration.Migration(self.app).load(plan['plan_id'])['items'][0]['progress']
+        self.assertTrue(progress['source_fetched_at'].startswith('20'))
+        self.assertEqual(saved['external_snapshot']['fetched_at'], progress['source_fetched_at'])
 
     def test_native_binding_version_and_favorite_drift_block_copy(self):
         for change in ('binding', 'version', 'favorite'):

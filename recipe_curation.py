@@ -60,7 +60,18 @@ def clean(text):
     return ' '.join(text.split()).strip(' .')
 
 
+class InvalidSourceMeasure(ArithmeticError):
+    """A sealed measurement is unreadable and must be held for review."""
+
+
 def fraction(text):
+    try:
+        return _fraction(text)
+    except (ValueError, ZeroDivisionError) as exc:
+        raise InvalidSourceMeasure("invalid source fraction") from exc
+
+
+def _fraction(text):
     if ' ' in text:
         whole, part = text.split()
         return Fraction(whole) + Fraction(part)
@@ -557,10 +568,14 @@ def apply_amendment(recipe, credit, amendments, *, source_payload_hash=None):
         credit['original_yield']=deepcopy(recipe['yield'])
     recipe.update(deepcopy(changes))
     if 'notes' not in changes and not reviewed:
-        recipe['notes']='Meal Concierge editorial adaptation: '+amendment['note']
+        note = 'Meal Concierge editorial adaptation: ' + amendment['note']
+        recipe['notes'] = '\n\n'.join(filter(None, (recipe.get('notes'), note)))
     if set(amendment.get('resolved_issues',[]))!=set(credit.get('normalization_issues',[])):
         raise ValueError('editorial resolution must account for every current source issue')
-    credit['resolved_normalization_issues']=credit.pop('normalization_issues',[])
+    prior = credit.get('resolved_normalization_issues', [])
+    credit['resolved_normalization_issues'] = list(dict.fromkeys([*prior, *credit.pop('normalization_issues', [])]))
+    if credit.get('editorial_adaptation'):
+        credit.setdefault('editorial_history', []).append(credit['editorial_adaptation'])
     credit['editorial_adaptation']=amendment['note']
     if amendment.get('omit_cover'):
         credit['image_omission']='Original cover no longer represents the adapted recipe.'

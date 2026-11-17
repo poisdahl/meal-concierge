@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +123,12 @@ def prepared(menu_value: dict, candidates: list[dict], *, max_excess: dict | Non
 
 
 class ProductObservationTests(unittest.TestCase):
+    def test_retailer_product_name_is_a_single_line(self):
+        for name in ("Grønne\nbønner", "Grønne\u202ebønner"):
+            batch = {"query": "bønner", "hasMore": False, "products": [{"id": 700011, "name": name}]}
+            with self.subTest(name=name), self.assertRaisesRegex(HouseholdError, "product observation text"):
+                normalize_retail_product_search({"result": [batch]}, observed_at=OBSERVED_AT)
+
     def test_meny_onion_label_preserves_piece_count_and_total_mass(self):
         self.assertEqual(parse_package("Gul 2stk 450g Strømpe", provider="meny"), {
             "quantity": {"numerator": 450, "denominator": 1},
@@ -944,6 +951,24 @@ class ProductPlannerTests(unittest.TestCase):
         self.assertEqual(requirements[0]["quantity"], {"numerator": 10, "denominator": 1})
         self.assertEqual(requirements[0]["confirmed_pantry_quantity"], {"numerator": 140, "denominator": 1})
 
+    def test_source_stock_decisions_preserve_unanswered_units_without_double_counting(self):
+        value = menu({"item": "garlic", "quantity": 100, "unit": "g"},
+                     {"item": "garlic", "quantity": 100, "unit": "g"},
+                     {"item": "garlic", "quantity": 30, "unit": "ml"})
+        value["available_ingredients"] = [{"item": "garlic", "quantity": 70, "unit": "g"}]
+        source = {"collection": "dishes", "recipe_index": 0}
+        for position, action, fields, expected in (
+            (2, "include", {}, {"g": 130, "ml": 30}),
+            (0, "have_quantity", {"quantity": 40, "unit": "g"}, {"g": 130, "ml": 30}),
+            (0, "include", {}, {"g": 130, "ml": 30}),
+            (0, "have_all", {}, {"g": 100, "ml": 30}),
+        ):
+            with self.subTest(position=position, action=action):
+                rows, issues = menu_requirements(value, ingredient_decisions=[
+                    {"source": {**source, "ingredient_index": position}, "action": action, **fields}])
+                self.assertEqual(issues, [])
+                self.assertEqual({r["unit"]: r["quantity"]["numerator"] for r in rows}, expected)
+
     def test_fresh_form_is_not_erased_for_yeast_pasta_or_herbs(self):
         for fresh, plain in (("fersk gjær", "gjær"), ("fersk pasta", "pasta"), ("fersk koriander", "koriander")):
             with self.subTest(fresh=fresh):
@@ -985,6 +1010,21 @@ class ProductPlannerTests(unittest.TestCase):
         budgeted = build_product_plan(**arguments, price_mode="estimate", budget_ore=10_000)
         self.assertEqual(budgeted["status"], "prepared")
         self.assertEqual(budgeted["budget_status"], "unverified")
+
+    def test_advisory_estimate_ceiling_and_measured_practical_surplus(self):
+        value = menu({"item": "brus", "quantity": 450, "unit": "ml"})
+        req = menu_requirements(value)[0][0]
+        priced = {"package_count":1, "price_kind":"estimate", "estimated_merchandise_ore":2200,
+                  "mandatory_deposit_ore":None, "offer_kind":"regular", "eligibility":"confirmed"}
+        for cap, comparison in [(2199, "above"), (2200, "at"), (2201, "below")]:
+            plan = build_product_plan(provider="oda", binding={}, menu=value, budget_ore=cap, price_mode="estimate",
+                observations={req["requirement_id"]:observation("brus",[product("10","Brus",3000,"ml",[priced])])},
+                candidate_approvals=[{"requirement_id":req["requirement_id"], "candidate_refs":["10"],
+                                      "package_count":1, "quantity_basis":"one six-pack"}])
+            self.assertEqual(plan["budget_status"], "unverified")
+            self.assertEqual(plan["merchandise_budget_review"]["comparison"], comparison)
+            self.assertIsNone(plan["totals"]["total_payable_ore"])
+            self.assertIn("oversized_package", [r["reason"] for r in plan["requirements"][0]["selection"]["quantity_warnings"]])
 
     def test_estimated_line_cannot_hide_exact_budget_floor_violation(self):
         value = menu(
@@ -2092,12 +2132,8 @@ class ProductRuntimeTests(unittest.TestCase):
             }],
         })
         original_prepare = self.app._prepare_products
-        prepare_calls = 0
-
         def drift_before_full_validation(**kwargs):
-            nonlocal prepare_calls
-            prepare_calls += 1
-            if prepare_calls == 3:
+            if kwargs.get("work") is not None:
                 apple["purchase_options"][0].update(
                     merchandise_ore=400, total_payable_ore=400,
                 )
@@ -2221,6 +2257,49 @@ class ProductRuntimeTests(unittest.TestCase):
             [[item["quantity"] for item in batch] for batch in batches], [[2], [1]]
         )
         self.assertEqual(provider.cart["items"][0]["quantity"], 3)
+
+    def test_managed_meny_lost_reply_fences_late_batch_across_restart(self):
+        provider = MenyFixtureProvider()
+        reference = provider.milk["product_ref"]
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {"instance": "test", "household": "Test", "provider": "meny"})
+            menu_value = {**self.menu, "dishes": [{"shopping_requirements": [{
+                "item": "Lettmelk", "quantity": 4, "unit": "l", "scalable": True}]}]}
+            with store.locked() as state:
+                state["menu"] = deepcopy(menu_value)
+            browser = mock.Mock()
+            provider.verify_order_change = browser.verify_order_change
+            app = Application(store, provider, browser)
+            requirement, = menu_requirements(menu_value)[0]
+            prepared = app.handle({"operation": "products", "action": "prepare",
+                "menu_ref": app._cart_menu_ref(menu_value), "candidate_approvals": [
+                    {"requirement_id": requirement["requirement_id"], "candidate_refs": [reference]}]})
+            original = provider.call
+            attempted = []
+            def delayed(tool, args, **kwargs):
+                if tool == "manipulate_cart":
+                    attempted.append(deepcopy(args))
+                    if len(attempted) == 2:
+                        raise HouseholdError("response lost before observation")
+                return original(tool, args, **kwargs)
+            provider.call = delayed
+            request = {"operation": "products", **prepared["apply_arguments"], "cart_change_requested": True}
+            result = app.handle(request)
+            self.assertTrue(result["outcome_unknown"])
+            journal = store.read()["pending_cart_change"]
+            self.assertEqual(journal["acknowledged"], {reference: 2})
+            self.assertEqual(journal["expected"], {reference: 4})
+            app = Application(store, provider, browser)
+            self.assertEqual(app.handle(request)["operation_id"], journal["operation_id"])
+            with self.assertRaises(HouseholdError):
+                app.handle({"operation": "cart", "action": "reconcile_change"})
+            self.assertEqual(store.read()["pending_cart_change"], journal)
+            original("manipulate_cart", attempted[1])
+            with self.assertRaisesRegex(HouseholdError, "still uncertain"):
+                app.handle({"operation": "cart", "action": "reconcile_change"})
+            self.assertEqual(store.read()["pending_cart_change"], journal)
+            self.assertEqual(journal["acknowledged"], {reference: 2})
+            self.assertEqual(len(attempted), 2)
 
     def test_meny_apply_stops_remaining_batches_on_intermediate_cart_change(self):
         provider = MenyFixtureProvider()

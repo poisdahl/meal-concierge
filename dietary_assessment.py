@@ -9,6 +9,26 @@ from core import HouseholdError
 
 KINDS = {'allergy', 'sensitivity', 'preference', 'never_buy', 'allergy_or_sensitivity'}
 
+# Literal food names only, not a stemmer, substring rule or clinical taxonomy.
+# A specific term stays specific: a walnut rule does not become a general nut rule.
+_MILK_NAMES = ('milk', 'melk', 'mjölk', 'helmelk', 'lettmelk', 'skummetmelk',
+               'kremfløte', 'matfløte', 'melkepulver', 'melkeprotein', 'melkefett', 'melkesjokolade')
+_WALNUT_NAMES = ('valnøtt', 'valnøtter', 'walnut', 'walnuts')
+_EGG_NAMES = ('egg', 'eggs', 'ägg', 'eggeplomme', 'eggeplommer', 'eggehvite', 'eggehviter', 'eggepulver')
+_SHRIMP_NAMES = ('reke', 'reker', 'shrimp', 'shrimps', 'prawn', 'prawns')
+LITERAL_EQUIVALENTS = {
+    **{term: _MILK_NAMES for term in ('milk', 'melk', 'mjölk')},
+    **{term: ('nøtt', 'nøtter', 'nut', 'nuts', *_WALNUT_NAMES) for term in ('nøtt', 'nøtter', 'nut', 'nuts')},
+    **{term: _WALNUT_NAMES for term in _WALNUT_NAMES},
+    **{term: _EGG_NAMES for term in ('egg', 'eggs', 'ägg')},
+    **{term: _SHRIMP_NAMES for term in _SHRIMP_NAMES},
+}
+_FREE_PREFIXES = {
+    **{term: r'(?<!\w)(?:melkefri|mjölkfri|milk[- ]free)(?!\w)' for term in ('milk', 'melk', 'mjölk')},
+    **{term: r'(?<!\w)(?:eggfri|äggfri|egg[- ]free)(?!\w)' for term in ('egg', 'eggs', 'ägg')},
+    **{term: r'(?<!\w)(?:nøttefri|nut[- ]free)(?!\w)' for term in ('nøtt', 'nøtter', 'nut', 'nuts')},
+}
+
 
 def text(value):
     return ' '.join(unicodedata.normalize('NFC', str(value)).casefold().split())
@@ -67,13 +87,15 @@ def observation(raw):
     return result
 
 
-def matches(term, value, *, milk_ambiguity=False):
+def matches(term, value, *, milk_ambiguity=False, free_prefix=None):
     values = value if isinstance(value, list) else [value]
     for part in values:
         normalized = text(part)
         for match in re.finditer(r'(?<!\w)' + re.escape(text(term)) + r'(?!\w)', normalized):
             before = normalized[max(0, match.start() - 35):match.start()]
             after = normalized[match.end():match.end() + 12]
+            if free_prefix and re.search(free_prefix + r'\s*$', before):
+                continue  # A qualified alternative is not positive evidence of the named food.
             # An explicitly plant-qualified dairy alternative is not positive
             # evidence of cream itself. Other matches/label fields still count;
             # this does not establish allergen absence or nutritional suitability.
@@ -87,14 +109,17 @@ def matches(term, value, *, milk_ambiguity=False):
                     clause = re.split(r'[,;.!?]', prefix[:plant.start()])[-1]
                     if not re.search(r'\b(?:not|ikke|inte|ej)\b|\bnon[- ]*$', clause):
                         continue
+            # The plant word must be a word of its own: "lakris melk" ends in "ris".
             if milk_ambiguity and re.search(
-                r'(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
-                r'|(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$',
+                r'(?<!\w)(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
+                r'|(?<!\w)(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$',
                 before,
             ):
                 continue
+            # The negation must be a word of its own: "gluten egg" ends in
+            # "uten" and "cappuccino melk" in "no", and neither denies anything.
             if re.search(
-                r'(?:does not contain|contains no|without|no|uten|utan|fri for|fri från|inneholder ikke|innehåller inte)'
+                r'(?<!\w)(?:does not contain|contains no|without|no|uten|utan|fri for|fri från|inneholder ikke|innehåller inte)'
                 r'(?:\s+(?:added|tilsatt|tillsatt|traces? of|spor av|spår av))?\s*$',
                 before,
             ) or re.match(r'[- ]?(?:free|fri|fritt)\b', after):
@@ -103,23 +128,22 @@ def matches(term, value, *, milk_ambiguity=False):
     return False
 
 
-def title_allergen_negated(term, value):
-    """Return whether the whole product title explicitly negates this allergen."""
-    normalized_term = text(term)
-    if normalized_term in {'milk', 'melk', 'mjölk'}:
-        allergen_words = r'(?:milk|melk|mjölk)'
-    elif normalized_term in {'peanut', 'peanuts', 'peanøtt', 'peanøtter', 'jordnöt', 'jordnötter'}:
-        allergen_words = r'(?:peanut|peanuts|peanøtt|peanøtter|jordnöt|jordnötter)'
-    elif normalized_term in {'egg', 'ägg'}:
-        allergen_words = r'(?:egg|ägg)'
-    else:
-        return False
-    return re.search(
-        r'\b(?:does\s+not\s+contain|contains\s+no|without|no|uten|utan|fri\s+for|fri\s+från|inneholder\s+ikke|innehåller\s+inte)'
-        r'(?:\s+(?:added|tilsatt|tillsatt|traces?\s+of|spor\s+av|spår\s+av))?\s+'
-        + allergen_words + r'\b',
-        text(value),
-    ) is not None
+def _title_evidence(term, value):
+    # A named food can be an explicitly qualified imitation (egg noodles
+    # without egg). Only remove the immediately qualified food phrase. Other
+    # clauses and independently listed ingredients remain positive evidence.
+    aliases = {
+        'milk': (r'(?:milk chocolate|melkesjokolade|mjölkchoklad)', r'(?:milk|melk|mjölk)'),
+        'egg': (r'(?:egg noodles|ägg nudlar|eggnudler|äggnudlar)', r'(?:egg|ägg)'),
+        'peanut': (r'(?:peanut butter|peanøttsmør|jordnötssmör)', r'(?:peanuts?|peanøtt(?:er)?|jordnöt(?:ter)?)'),
+    }
+    family = {'melk': 'milk', 'mjölk': 'milk', 'ägg': 'egg', 'peanuts': 'peanut',
+              'peanøtt': 'peanut', 'peanøtter': 'peanut', 'jordnöt': 'peanut', 'jordnötter': 'peanut'}.get(text(term), text(term))
+    value = text(value)
+    if family in aliases:
+        food, allergen = aliases[family]
+        value = re.sub(r'\b' + food + r'\s+(?:without|uten|utan)\s+' + allergen + r'\b', ' ', value)
+    return value
 
 
 def title_positive_match(term, value):
@@ -141,17 +165,19 @@ def title_positive_match(term, value):
     }
     normalized_term = text(term)
     pattern = patterns.get(normalized_term)
-    normalized_value = text(value)
-    if pattern is None or title_allergen_negated(term, value):
+    normalized_value = _title_evidence(term, value)
+    if pattern is None:
         return False
     for match in re.finditer(pattern, normalized_value):
         before = normalized_value[max(0, match.start() - 35):match.start()]
+        if (prefix := _FREE_PREFIXES.get(normalized_term)) and re.search(prefix + r'\s*$', before):
+            continue
         if normalized_term in {'milk', 'melk', 'mjölk'} and re.search(
-            r'(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
-            r'|(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$', before
+            r'(?<!\w)(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
+            r'|(?<!\w)(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$', before
         ):
             continue
-        if re.search(r'(?:without|no|uten|utan)\s*$', before):
+        if re.search(r'(?<!\w)(?:does not contain|contains no|without|no|uten|utan|fri for|fri från|inneholder ikke|innehåller inte)(?:\s+(?:added|tilsatt|tillsatt|traces? of|spor av|spår av))?\s*$', before) or re.match(r'[- ]?(?:free|fri|fritt)\b', normalized_value[match.end():]):
             continue
         return True
     return False
@@ -167,7 +193,7 @@ def assess(profile, item, *, recipe=False):
                    'red meat': ['beef', 'pork', 'lamb', 'storfe', 'svin', 'lam', 'oksekjøtt'],
                    'white rice': ['white rice', 'hvit ris', 'vit ris'],
                    'dry whole legumes': ['dried beans', 'dry beans', 'dried chickpeas', 'dry chickpeas', 'dried lentils', 'dry lentils', 'dried peas', 'dry peas', 'tørre bønner', 'tørkede bønner', 'tørkede kikerter', 'tørre kikerter', 'tørkede linser', 'tørre linser', 'tørkede erter', 'tørre erter']}
-        terms = aliases.get(text(term), [term])
+        terms = list(dict.fromkeys([*aliases.get(text(term), [term]), *LITERAL_EQUIVALENTS.get(text(term), ())]))
         # This packaging category appears in retail names without the rule's
         # optional category noun. Keep matching and negation checks literal.
         if re.fullmatch(r'boil[- ]in[- ]bag(?: produkter| products)?', text(term)):
@@ -178,8 +204,9 @@ def assess(profile, item, *, recipe=False):
         # retailer evidence and must never be ignored by product authorization.
         rule_evidence = {**evidence, 'product_name': item.get('name', '')}
         present = any(
-            not (field == 'product_name' and title_allergen_negated(term, rule_evidence.get(field, '')))
-            and matches(t, rule_evidence.get(field, ''), milk_ambiguity=text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'})
+            matches(t, _title_evidence(term, rule_evidence[field]) if field == 'product_name' else rule_evidence.get(field, ''),
+                        milk_ambiguity=field in {'ingredients', 'product_name'} and text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'},
+                        free_prefix=_FREE_PREFIXES.get(text(term)) if field in {'ingredients', 'product_name'} else None)
             for field in ('ingredients', 'allergens', 'may_contain', 'product_name') for t in terms
         )
         if not present and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity', 'never_buy'}:
@@ -237,7 +264,7 @@ def read_oda_product_evidence(reference, deadline=None):
     return read_retail_product_evidence(reference, deadline, provider='oda')
 
 
-def read_retail_product_evidence(reference, deadline=None, *, provider):
+def read_retail_product_evidence(reference, deadline=None, *, provider, previous=None, validator=None):
     """Unauthenticated public detail, bound to one provider product ID and origin."""
     import http.client
     import threading
@@ -248,6 +275,21 @@ def read_retail_product_evidence(reference, deadline=None, *, provider):
     if not re.fullmatch(r'[1-9][0-9]{0,19}', str(reference)):
         raise HouseholdError(f'{provider} dietary detail needs an exact product ID')
     url = f'https://{host}/{region}/products/{reference}/'
+    if previous is not None:
+        # The retained location was bound to this exact numeric identity on
+        # the previous fetch. Revalidate its bytes even on a warm checkout.
+        url = previous["source_url"]
+        if deadline is not None and time.monotonic() + TIMEOUT > deadline:
+            return {"source_url": url, "unavailable": "detail_time_budget_exhausted"}
+        try:
+            raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024, public_product_validator=validator)
+            if validator.get("unchanged"):
+                return deepcopy(previous)
+            if content_type == "text/html":
+                return parse_retail_product_page(raw, url, provider=provider)
+        except (OSError, http.client.HTTPException, RecipeImportSourceError, ValueError, HouseholdError):
+            pass
+        return {"source_url": url, "unavailable": "exact_public_product_detail_unavailable"}
     if deadline is not None and time.monotonic() + 2 * TIMEOUT > deadline:
         return {'source_url': url, 'unavailable': 'detail_time_budget_exhausted'}
     connection = _PinnedConnection(host, 443, tls=True, public_only=True)
@@ -270,7 +312,7 @@ def read_retail_product_evidence(reference, deadline=None, *, provider):
         response.close()
         connection.close()
         timer.cancel()
-        raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024)
+        raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024, public_product_validator=validator)
         if content_type != 'text/html':
             raise HouseholdError('Product detail is not HTML')
         return parse_retail_product_page(raw, url, provider=provider)

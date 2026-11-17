@@ -388,7 +388,7 @@ def _menu_plan_projection(plan: dict[str, Any]) -> dict[str, Any]:
         "work_limits", "discovery", "issues",
     }
     projected = {
-        key: plan[key] for key in ("status", "save_ref")
+        key: plan[key] for key in ("status", "save_ref", "current_menu_ref")
         if key in plan
     }
     if "selection" in plan:
@@ -769,7 +769,12 @@ def _status_view(result: dict[str, Any], offset: int, limit: int, section: str) 
     view.update(_fields(result, ("household", "configuration_status", "menu_phase", "menu_id",
                                  "cart_plan_status", "pending_checkout_status", "pending_cancellation_status",
                                  "order_change_status", "confirmation_policy", "auto_checkout", "currency", "build", "capacity_warnings")))
+    # The service states why a store is unavailable in "message"; without it the
+    # agent can only say that the store does not work.
     view["integration"] = _fields(result.get("integration"), ("status", "provider", "reason"))
+    message = (result.get("integration") or {}).get("message")
+    if isinstance(message, str) and message:
+        view["integration"]["message"] = _display_text(message, 400)
     server = (result.get("integration") or {}).get("server")
     if isinstance(server, dict):
         view["integration"]["server"] = _fields(server, ("name", "version"))
@@ -804,11 +809,11 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     view = {"projection": "agent", "operation": "cart", "action": action}
     view.update(_fields(result, ("status", "reason", "next", "cart_digest", "cart_write_pending",
                                  "cleared", "ensured", "reconciled", "synced", "stopped", "idempotent",
-                                 "changed", "outcome_unknown", "cart_reconciliation_required", "decision",
+                                 "changed", "outcome_unknown", "operation_id", "cart_observation", "cart_reconciliation_required", "decision",
                                  "product_plan_stale", "menu_binding_stale", "order_id", "applied_operations",
                                  "excluded_product_ids", "accepted_missing_product_ids", "default_suggestion")))
     if isinstance(result.get("cart_plan"), dict):
-        view["cart_plan"] = _fields(result["cart_plan"], ("provider", "status", "menu_ref", "cart_digest", "approved"))
+        view["cart_plan"] = _fields(result["cart_plan"], ("provider", "status", "menu_ref", "cart_digest", "approved", "ownership_review"))
         view["cart_plan"]["items"] = _cart_plan_items(result["cart_plan"], offset, limit)
     cart = result.get("cart") if isinstance(result.get("cart"), dict) else result
     try:
@@ -831,7 +836,7 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
         view["line_count"] = len(lines)
     if isinstance(result.get("meal_concierge_cart_plan"), dict):
         view["meal_concierge_cart_plan"] = _fields(result["meal_concierge_cart_plan"],
-                                                   ("provider", "status", "menu_ref", "cart_digest", "approved"))
+                                                   ("provider", "status", "menu_ref", "cart_digest", "approved", "ownership_review"))
         view["meal_concierge_cart_plan"]["items"] = _cart_plan_items(
             result["meal_concierge_cart_plan"], offset, limit)
     return view
@@ -915,9 +920,13 @@ def _orders_view(action: str, result: dict[str, Any], offset: int, limit: int, s
     return view
 
 
-def _recipe_ingredient(item: Any, index: int, *, provenance: bool = False) -> dict[str, Any]:
+def _recipe_ingredient(item: Any, index: int, *, provenance: bool = False, language: str | None = None) -> dict[str, Any]:
     value = {"index": index, **_fields(item, ("item", "quantity", "unit", "amount", "original_text",
                                               "optional", "pantry", "notes"))}
+    from recipe_quantities import display_amount
+    shown = display_amount(item.get("quantity"), item.get("unit"), language) if isinstance(item, dict) else None
+    if shown is not None:
+        value["display_amount"] = shown
     evidence = item.get("evidence") if isinstance(item, dict) else None
     if isinstance(evidence, dict):
         fields = ("basis", "input", "assumptions", "conversion", "calculation", "acceptance", "project_review") if provenance else ("basis", "assumptions")
@@ -965,6 +974,8 @@ def _recipe_candidates_view(result: dict[str, Any]) -> dict[str, Any]:
         rows.append(row)
     view["recipes"] = rows
     view["next"] = "Shortlist candidates, then read ingredients and steps with recipes get for an exact recipe/library ref, or discovery resolve/detail for a discovery_ref. Summaries do not establish dietary fit."
+    if result.get("next_cursor") and result.get("projection") != "summary":
+        view["next"] += " Continue the local bank with next_cursor unchanged and the same query/week; this does not repeat optional source searches."
     return view
 
 
@@ -988,13 +999,16 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
     view["original_portions"] = recipe.get("scaled_from_portions", recipe.get("portions"))
     view["source"] = _fields(recipe.get("source"), ("kind", "publisher", "title", "author", "url",
                                                    "external_id", "relationship", "original"))
+    if recipe.get("label_review"):
+        view["label_review"] = recipe["label_review"]
     view["source_provider"] = recipe.get("source_provider")
     view["rights"] = _fields(recipe.get("rights"), ("storage", "credit", "license", "license_url"))
     if "recipe_digest" not in view:
         view["recipe_digest"] = recipe.get("recipe_digest")
     if action != "adapt":
         view["original_digest"] = view["recipe_digest"]
-    ingredients = [_recipe_ingredient(item, index, provenance=section == "provenance")
+    language = (recipe.get("presentation") or {}).get("resolved_language") or recipe.get("language")
+    ingredients = [_recipe_ingredient(item, index, provenance=section == "provenance", language=language)
                    for index, item in enumerate(recipe.get("ingredients", []))]
     steps = [{"index": index, "text": step}
              for index, step in enumerate(recipe.get("steps", []))]
@@ -1047,7 +1061,7 @@ def _project_agent_result_once(operation: str, action: str | None, result: dict[
         return _orders_view(action or "list", result, offset, limit, section)
     if operation == "recipes" and action in {None, "search", "discover"} and isinstance(result.get("recipes"), list):
         return _recipe_candidates_view(result)
-    if operation == "recipes" and action in {"get", "resolve", "detail", "adapt"}:
+    if operation == "recipes" and action in {"get", "resolve", "detail", "adapt", "convert"}:
         return _recipe_view(action, result, offset, limit, section)
     return result
 

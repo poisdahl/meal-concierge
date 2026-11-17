@@ -137,7 +137,7 @@ def _source_script(order_id, provider="oda"):
 def _ui_script(order_id, items, stage, product_id=None, provider="oda"):
     """Tag exactly one observed native control; never dispatch merchant actions in JS."""
     spec = _spec(provider)
-    return r"""(() => {
+    script = r"""(() => {
       // order-removal-ui
       const orderId = ORDER_ID, items = ITEMS, stage = STAGE, productId = PRODUCT_ID, spec = SPEC;
       const norm = x => String(x || '').replace(/\s+/g,' ').trim();
@@ -184,7 +184,12 @@ def _ui_script(order_id, items, stage, product_id=None, provider="oda"):
         return tag(all('button',dialogs[0]).filter(e=>norm(e.textContent)===spec.button));
       }
       return answer(false);
-    })()""".replace("ORDER_ID", json.dumps(order_id)).replace("ITEMS", json.dumps(items)).replace("STAGE", json.dumps(stage)).replace("PRODUCT_ID", json.dumps(product_id)).replace("SPEC", json.dumps(spec, ensure_ascii=False))
+    })()"""
+    # One pass: an inserted product name such as "SPECIAL K" is never searched
+    # for a later placeholder.
+    values = {"ORDER_ID": json.dumps(order_id), "ITEMS": json.dumps(items), "STAGE": json.dumps(stage),
+              "PRODUCT_ID": json.dumps(product_id), "SPEC": json.dumps(spec, ensure_ascii=False)}
+    return re.sub("ORDER_ID|PRODUCT_ID|ITEMS|STAGE|SPEC", lambda match: values[match[0]], script)
 
 
 def _control(browser, pending, stage, product_id=None, *, click=True):
@@ -263,24 +268,56 @@ def _delivery(source, provider="oda"):
     return {key: delivery[key] for key in ("delivery_address", "delivery_time")}
 
 
+def _terminal_delivery(app, pending, deadline):
+    order_id = pending["order_id"]
+    tracking = app.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
+    require_provider_identity(tracking, order_id, tracking=True)
+    if str(tracking.get("status") or "").casefold() != "delivered":
+        return None
+    order = app.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
+    require_provider_identity(order, order_id)
+    expected = pending["before"]["binding"]
+    if app.browser.read_order_binding(order_id, order, deadline=deadline, expected_binding=expected) != expected:
+        raise HouseholdError("Removal account changed during terminal order reconciliation")
+    with app.store.locked() as state:
+        _guard(state, pending)
+        result = {**_view(pending), "status": "delivered", "removed": None,
+                  "confirmation_required": False, "retry_allowed": False, "tracking_status": "delivered",
+                  "payment_resolution": {"refund": "unknown"},
+                  "next": "The order is delivered. The original reduction and refund could not be verified."}
+        app._store_protected_result(state, pending["confirmation_id"], "order_reduction", result,
+                                    target_id=order_id, intent_signature=_digest(pending["items"]))
+        state["order_change"] = None
+    return result
+
+
 def _reconcile(app, pending, deadline):
-    current = _read(app, pending["order_id"], deadline, pending["before"]["binding"])
+    try:
+        current = _read(app, pending["order_id"], deadline, pending["before"]["binding"])
+    except HouseholdError:
+        terminal = _terminal_delivery(app, pending, deadline)
+        if terminal:
+            return terminal
+        raise
     before = pending["before"]
-    expected = {pid: r["uncredited_quantity"] for pid, r in _items(before["eligibility"], app.provider).items()}
-    for item in pending["items"]:
-        expected[item["product_id"]] = item["quantity"]
-    observed = {pid: r["uncredited_quantity"] for pid, r in _items(current["eligibility"], app.provider).items()}
-    quantities_match = {k:v for k,v in expected.items() if v} == {k:v for k,v in observed.items() if v}
+    observed = {pid: row["uncredited_quantity"] for pid, row in _items(current["eligibility"], app.provider).items()}
+    # Read the independently account-bound target lines. Unrelated lines,
+    # delivery fees and discounts do not establish the amount refunded.
+    quantities_match = all(observed.get(item["product_id"]) == item["quantity"] for item in pending["items"])
     summary = current["details"]["summary"]
     total = money_cents(summary["gross_amount"])
-    matched = (quantities_match and total == pending["total_ore"] - pending["credit_ore"]
-               and _delivery(current, app.provider) == _delivery(before, app.provider))
+    matched = quantities_match and _delivery(current, app.provider) == _delivery(before, app.provider)
+    if not matched:
+        terminal = _terminal_delivery(app, pending, deadline)
+        if terminal:
+            return terminal
     with app.store.locked() as state:
         if canonical(state.get("order_change")) != canonical(pending):
             raise HouseholdError("The pending removal changed during reconciliation")
         if matched:
             result = {**_view(pending), "status": "removed", "removed": True, "confirmation_required": False,
-                      "new_total_ore": total, "credit_ore": pending["total_ore"] - total,
+                      "new_total_ore": total, "credit_ore": pending["credit_ore"] if pending["total_ore"] - total == pending["credit_ore"] else None,
+                      "order_total_change_ore": pending["total_ore"] - total,
                       "cart_unchanged": current["cart"] == before["cart"],
                       "payment_resolution": {"refund": "unknown", "source": "merchant_order_summary"}}
             app._store_protected_result(state, pending["confirmation_id"], "order_reduction", result,
@@ -289,7 +326,7 @@ def _reconcile(app, pending, deadline):
             return result
         state["order_change"]["status"] = "uncertain"
         return {**_view(state["order_change"]), "removed": False, "reconciliation_required": True,
-                "message": "The exact quantity and order-total change is not verified; do not repeat removal"}
+                "message": "The reviewed target quantities and delivery are not verified; do not repeat removal"}
 
 
 def orders_remove(app, request):
@@ -389,17 +426,34 @@ def orders_remove(app, request):
         fresh_cart = cart_summary(app.provider_client.call("get_cart", {}, deadline=deadline))
         if fresh_cart != current["cart"]:
             raise HouseholdError("Cart changed while preparing the removal confirmation")
-        _control(app.browser, pending, "confirm", click=False)
         with app.store.locked() as state:
             _guard(state, pending)
             state["order_change"]["status"] = "clicking"
             pending = deepcopy(state["order_change"])
+        # This validation only tags a control. Failure here is authoritative
+        # local proof that the click-capable browser call was never entered.
+        try:
+            _control(app.browser, pending, "confirm", click=False)
+        except HouseholdError:
+            with app.store.locked() as state:
+                _guard(state, pending)
+                result = {**_view(pending), "status": "not_dispatched", "removed": False,
+                          "confirmation_required": False, "retry_allowed": False,
+                          "next": "Prepare the order removal again with a new intent key."}
+                app._store_protected_result(state, token, "order_reduction", result,
+                                            target_id=pending["order_id"], intent_signature=_digest(pending["items"]))
+                state["order_change"] = None
+            return result
         try:
             app.browser._invoke("click", '[data-meal-remove-control="true"]')
             app.browser._settle(.25)
             return _reconcile(app, pending, deadline)
         except Exception:
-            with app.store.locked() as state:
-                if state.get("order_change") == pending:
-                    state["order_change"]["status"] = "uncertain"
-            raise HouseholdError(f"{spec['label']} removal result is uncertain; use remove_reconcile without another click") from None
+            error = HouseholdError(f"{spec['label']} removal result is uncertain; use remove_reconcile without another click")
+            error.outcome_unknown = True
+            try:
+                with app.store.locked() as state:
+                    if state.get("order_change") == pending:
+                        state["order_change"]["status"] = "uncertain"
+            finally:
+                raise error from None

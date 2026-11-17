@@ -7,6 +7,7 @@ import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -32,6 +33,8 @@ import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+_REQUEST_ADMISSION_DEADLINE = ContextVar("meal_concierge_admission_deadline", default=None)
 
 from oda_browser import MathemBrowser, OdaBrowser, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
 from browser_prerequisites import validate_browser_paths
@@ -167,7 +170,7 @@ from delivery_operations import DeliveryOperations
 _RECIPE_PACK_ARCHIVE_ID = re.compile(r"[0-9a-f]{64}\.zip\Z")
 
 
-from build_identity import read as read_build_identity
+from build_identity import at_start as read_build_identity
 BUILD_IDENTITY = read_build_identity(Path(__file__).resolve().parent)
 
 class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOperations, DeliveryOperations):
@@ -209,6 +212,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self.email_provider_clients = {**dict(email_provider_clients or {}), self.provider: provider_client}
         self.confirmation_policy = str(store.config.get("confirmation_policy") or "fresh").casefold()
         self.browser = provider_client if self.provider == "meny" else browser
+        self._planner_result_cache = None
         self.browser_lock = threading.Lock()
         self.email_automation_profile = str(store.config.get("email_automation_profile") or "").strip()
         self.external_recipe_sources = dict({
@@ -306,6 +310,12 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             status = "awaiting_login" if "login" in str(exc).casefold() else "unavailable"
             self.integration = {"status": status, "provider": self.provider, "message": str(exc)}
 
+    def _admit_request(self):
+        deadline = _REQUEST_ADMISSION_DEADLINE.get()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise HouseholdError("request expired while waiting for service ownership; no new operation was started")
+        _REQUEST_ADMISSION_DEADLINE.set(None)
+
     @contextmanager
     def _browser_operation(self, deadline: float | None = None, *, allow_pending_cart: bool = False):
         if deadline is None:
@@ -316,6 +326,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         if not acquired:
             raise HouseholdError("provider browser deadline reached")
         try:
+            # The provider owner is now held. Preserve this admitted operation's
+            # journal/reconciliation even when its original caller leaves.
+            self._admit_request()
             if not allow_pending_cart and self.store.read().get("pending_cart_change"):
                 raise HouseholdError("reconcile_change before using the provider; a cart write is uncertain")
             yield
@@ -368,8 +381,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         temporary: Path | None = None
         try:
             try:
+                # Non-blocking, so a named pipe placed in the shared inbox is
+                # rejected below instead of holding this open and its locks forever.
                 source_descriptor = os.open(
-                    archive_id, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=inbox_descriptor
+                    archive_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=inbox_descriptor
                 )
                 source_info = os.fstat(source_descriptor)
             except OSError as exc:
@@ -442,15 +457,18 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             if fields != common:
                 raise HouseholdError("recipe-pack inspect accepts only archive_id")
             with self._staged_recipe_pack(archive_id) as (archive, _digest, _bytes):
-                from recipe_portable import PUBLISHER_RECIPE_PACK_IDS, inspect_local_archive
-                return inspect_local_archive(
+                from recipe_portable import PUBLISHER_RECIPE_PACK_IDS, inspect_local_archive, withdrawal_preview
+                descriptor = inspect_local_archive(
                     archive, reserved_pack_ids=PUBLISHER_RECIPE_PACK_IDS
                 )
+                return {**descriptor, "withdrawals": withdrawal_preview(
+                    archive, self.store.directory, str(self.store.config["household"]), descriptor)}
         expected_sha256 = self._recipe_pack_expected_sha256(
             request.get("expected_sha256"), archive_id
         )
         if action == "import":
-            if fields != common | {"expected_sha256", "allow_recipe_removals"}:
+            required = common | {"expected_sha256", "allow_recipe_removals"}
+            if fields != required and fields != required | {"withdrawal_review"}:
                 raise HouseholdError("recipe-pack import needs archive_id, expected_sha256 and allow_recipe_removals")
             allow_removals = request.get("allow_recipe_removals")
             if not isinstance(allow_removals, bool):
@@ -458,12 +476,15 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             with self._staged_recipe_pack(archive_id, expected_sha256) as (archive, _digest, _bytes):
                 from recipe_portable import (
                     PUBLISHER_RECIPE_PACK_IDS, apply_archive, inspect_local_archive,
-                    preflight_archive,
+                    preflight_archive, withdrawal_preview,
                 )
                 descriptor = inspect_local_archive(
                     archive, reserved_pack_ids=PUBLISHER_RECIPE_PACK_IDS
                 )
                 preflight_archive(archive, descriptor)
+                review = withdrawal_preview(archive, self.store.directory, str(self.store.config["household"]), descriptor)
+                if (review["count"] or "withdrawal_review" in fields) and review["review"] != request.get("withdrawal_review"):
+                    raise HouseholdError("inspect the current withdrawals and confirm the exact withdrawal_review")
                 return apply_archive(
                     archive, self.store.directory, str(self.store.config["household"]),
                     descriptor, allow_removals=allow_removals,
@@ -484,6 +505,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")
+        if {"_include_recurring", "_reviewed_recurring_scope", "_reviewed_product_digest", "_expected_menu_ref",
+                "_expected_product_context", "_allow_empty_requirements", "_before_cart_write"}.intersection(request):
+            raise HouseholdError("managed product review arguments are internal-only")
         if "_restore_missing_cart_digest" in request:
             raise HouseholdError("_restore_missing_cart_digest is internal-only")
         if "_native_cart_binding" in request:
@@ -512,48 +536,68 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             view_fields.add("response_view")
         if view_fields.intersection(request):
             request = {key: value for key, value in request.items() if key not in view_fields}
+        def dispatch():
+            deadline = _REQUEST_ADMISSION_DEADLINE.get()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise HouseholdError("request expired while waiting for service ownership; no new operation was started")
+            # Commerce paths take the browser owner inside _handle. Keep their
+            # admission pending until that final domain lock has been acquired.
+            # Other operations are admitted under their outer domain lock.
+            pending = deadline if (operation in {"cart", "products", "checkout", "orders", "delivery"}
+                                   or operation == "menu" and action == "save") else None
+            token = _REQUEST_ADMISSION_DEADLINE.set(pending)
+            try:
+                return self._handle(request)
+            finally:
+                _REQUEST_ADMISSION_DEADLINE.reset(token)
+
         try:
             if operation == "products" and action == "lowest_cost":
                 with self._recipe_planner_operation(), self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "products":
                 with self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "cart" and action != "get":
                 with self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif (
                 operation == "profile" and action in {"update", "reset", "review_pantry"}
             ) or (
                 operation == "setup" and action == "apply"
             ) or (
-                operation == "recurring" and action in {"add", "remove", "substitute"}
+                operation == "recurring" and action in {"add", "remove", "substitute", "review_occurrence"}
+            ) or (
+                operation == "shopping_list" and action == "record_stock"
             ):
                 with self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "menu" and action in {"add_slot", "edit_slots", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"}:
                 with self._recipe_planner_operation(), self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "menu" and action in {"save", "clear"}:
-                if action == "save" and (
+                if action == "clear":
+                    with self.product_plan_lock:
+                        result = dispatch()
+                elif (
                     request.get("planner_handoff") is not None or request.get("planner_ref") is not None
                 ):
                     with self._recipe_planner_operation():
-                        result = self._handle(request)
+                        result = dispatch()
                 else:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "recipe_pack":
                 with self._recipe_planner_operation(), self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation in {"recipes", "feedback", "migration"} or (
                 operation == "menu" and (
                     action in {"plan", "resolve_handoff"}
                 )
             ):
                 with self._recipe_planner_operation():
-                    result = self._handle(request)
+                    result = dispatch()
             else:
-                result = self._handle(request)
+                result = dispatch()
         except HouseholdError as exc:
             alternate_oda_email = (
                 request.get("operation") == "email" and request.get("provider") == "oda"
@@ -589,15 +633,33 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
 
     def _handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         operation = request.get("operation")
-        if self.store.read().get("pending_cart_change") and (
+        pending_cart = self.store.read().get("pending_cart_change")
+        if pending_cart and (
             (operation == "cart" and request.get("action", "get") not in {"get", "reconcile_change"})
             or (operation == "products" and request.get("action") == "apply")
             or operation == "checkout"
             or (operation == "orders" and request.get("action") not in {None, "list", "get"})
         ):
-            raise HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
+            if (operation == "products" and request.get("action") == "apply" and pending_cart.get("managed_menu")
+                    and pending_cart.get("product_plan_digest") and pending_cart["product_plan_digest"] in
+                    (request.get("product_plan_digest"), request.get("partial_product_plan_digest"))):
+                return {"applied": False, "status": "outcome_unknown", "outcome_unknown": True,
+                        "cart_write_pending": True, "cart_reconciliation_required": True, "synced": None,
+                        "operation_id": pending_cart["operation_id"], "menu_ref": pending_cart["managed_menu"],
+                        "product_plan_digest": pending_cart["product_plan_digest"],
+                        "next": "Read and reconcile the original cart change without another dispatch."}
+            error = HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
+            error.outcome_unknown = pending_cart.get("request_digest") == mp.digest({k:v for k,v in request.items() if not k.startswith("_")})
+            raise error
+        if operation == "maintenance_health":
+            state = self.store.read()
+            return {"ok": True, "source_sha256": BUILD_IDENTITY.get("source_sha256"),
+                    "installed_runtime_sha256": BUILD_IDENTITY.get("installed_runtime_sha256"),
+                    "email_work_pending": any(job.get("status") in {"pending", "claimed", "sending", "uncertain", "outcome_unknown"}
+                                              for job in state.get("email_jobs", []))}
         if operation == "health":
-            return {"ok": True, "integration": self.integration, "build": deepcopy(BUILD_IDENTITY)}
+            return {"ok": True, "integration": self.integration, "build": deepcopy(BUILD_IDENTITY),
+                    "admission_deadline_clock": time.monotonic()}
         if operation == "status":
             state = self.store.read()
             if self.provider in {"oda", "mathem"} and self.integration.get("status") != "ready":
@@ -664,7 +726,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         ):
             raise HouseholdError("No store is connected. Use shopping_list for a general list; connect a store for product matching or ordering.")
         email_due_requires_meny = (
-            operation == "email" and action in {"due", "reconcile"}
+            operation == "email" and action in {"due", "review_catch_up", "reconcile"}
             and (request.get("provider") is None or request.get("provider") == "meny")
         )
         meny_read = self.provider == "meny" and (
@@ -733,6 +795,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     "due_recurring_items": self._due_recurring(state, self._household_today(state)),
                     "pantry_review": pantry_review(state["profile"], self._household_today(state)),
                     "recipe_delivery": {key: deepcopy(state["recipe_delivery"][key]) for key in ("preferences", "paused")},
+                    "recipe_source_overview": self._recipe_source_overview(state),
                     "email_recipient": mask_email(state.get("email_recipient")),
                     "checkout_payment": deepcopy(state["checkout_payment"]),
                     "confirmation_policy": self.confirmation_policy,
@@ -764,13 +827,16 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             paths = request.get("paths")
             if paths is not None and (not isinstance(paths, list) or not all(isinstance(item, str) for item in paths)):
                 raise HouseholdError("reset paths must be strings")
-            return {"profile": self.store.reset_profile(paths)}
+            return self.store.reset_profile(paths, include_previous=True)
         if action == "set_email":
             supplied_email = request.get("email")
             email = supplied_email.strip() if isinstance(supplied_email, str) else ""
             if not valid_email_address(email):
                 raise HouseholdError("email address is invalid")
             with self.store.locked() as state:
+                binding = state["recipe_delivery"].get("sender_binding")
+                if binding and email != binding["recipient"]:
+                    raise HouseholdError("A recipe email sender is configured. Change its recipient with email_sender configure; existing pending deliveries retain their original recipient.")
                 state["email_recipient"] = email
             return {"email_recipient": mask_email(email)}
         raise HouseholdError("unknown profile action")
@@ -868,6 +934,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             },
             "recipe_sources": deepcopy(profile["recipes"]["sources"]),
             "web_search": deepcopy(profile["recipes"]["web_search"]),
+            "recipe_source_overview": self._recipe_source_overview(state),
             "web_search_provider": search_status(self.store.config),
             "payment_note": {
                 "oda": "For new orders, prepare automatically selects the configured existing method. Vipps may require completing a step on the original Oda/Vipps page and approval on your phone. Selecting a method never submits payment. Resolve saved-card ambiguity once with card_last4 in setup.",
@@ -898,7 +965,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         result = {
             "during_preferences": "Choose meals for any dates or number of dinners, batch cooking or a grocery-only order. Weekly automation is optional and starts off. Tell me about dietary needs, cooking time and ingredients to use up.",
             "during_diet": "Explain the actual saved dietary goal and its dietary_guidance. New/reset defaults use a concrete editable Norwegian starter preset with adult whole-diet reference amounts; offer keep/change/remove. Existing customized or cleared goals stay as saved. Another country or eating pattern is welcome; never infer it from the retailer or conversation language.",
-            "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists.",
+            "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists. recipe_source_overview lists every source with whether it is on and its preference. Any source can be marked preferred (considered first) or occasional (considered after the others); the rest stay normal. Own recipes and collections share the bank's one switch.",
             "during_equipment": "At first setup ask: Would you like to record your kitchen equipment? 1. List equipment. 2. Skip for now. Examples: hand blender, blender, food processor or air fryer. Show the current saved equipment and allow corrections. Save explicit answers with profile update meals.equipment, preserving other items unless removal is requested. Skipping leaves equipment unchanged and does not block setup or planning; keeping defaults does not confirm example appliances.",
             "during_pantry": "You can keep a short accepted list of basics such as salt, pepper and cooking oil. Ordinary amounts need no repeated question; we check occasionally during shopping whether anything needs restocking.",
             "after_setup": "Ask for a meal plan, swap any dish, request full ingredients and steps, use ingredients you already have, or explore meals around suitable current store offers. Recipes can arrive after confirmed purchase by your chosen supported channel; email needs a separate connection and consent.",
@@ -939,7 +1006,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError("setup apply needs keep_current true or false and an optional changes object")
         if keep_current and changes:
             raise HouseholdError("keep_current cannot be combined with setup changes")
-        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources", "checkout_payment", "web_search"}
+        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources", "recipe_source_preferences", "checkout_payment", "web_search"}
         if not set(changes).issubset(allowed):
             raise HouseholdError("setup changes contain unknown fields")
         requested_provider = str(changes.get("provider") or self.provider).casefold()
@@ -991,6 +1058,19 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 if not isinstance(settings, Mapping) or set(settings) - {"enabled", "broad", "sites"}:
                     raise HouseholdError("web_search accepts enabled, broad and sites")
                 profile["recipes"]["web_search"].update(deepcopy(dict(settings)))
+            if "recipe_source_preferences" in changes:
+                preferences = changes["recipe_source_preferences"]
+                if (not isinstance(preferences, Mapping) or not preferences or set(preferences) - {"preferred", "occasional"}
+                        or any(not isinstance(value, list) for value in preferences.values())):
+                    raise HouseholdError("recipe_source_preferences accepts preferred and occasional lists of source ids")
+                # Each supplied list replaces the saved one; a source in neither list is normal.
+                for level, value in preferences.items():
+                    profile["recipes"][level + "_sources"] = deepcopy(value)
+                    other = "occasional" if level == "preferred" else "preferred"
+                    if other not in preferences:
+                        # Moving a source to one level takes it out of the other.
+                        profile["recipes"][other + "_sources"] = [
+                            group for group in profile["recipes"][other + "_sources"] if group not in value]
             validate_profile(profile)
             finalize_recurring_profile_write(
                 previous_profile,
@@ -1062,8 +1142,51 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                             **({'due_on': period} if item['schedule']['unit'] == 'days' else {})})
         return due
 
+    def _menu_recurring_scope(self, state, *, preview_binding=None):
+        menu_ref = self._cart_menu_ref(state.get("menu")) if preview_binding is None else None
+        due = self._due_recurring(state, self._household_today(state))
+        saved = state.get("menu_recurring_decisions") or {}
+        decisions = saved.get("decisions", {}) if menu_ref and saved.get("menu_ref") == menu_ref else {}
+        rows = []
+        for item in due:
+            identity = mp.digest(item)
+            decision = decisions.get(identity) or {"action": "include"}
+            resolved = {**item, **decision.get("replacement", {})}
+            if decision["action"] == "substitute":
+                resolved["original_product_id"] = item.get("original_product_id", item["product_id"])
+            rows.append({"occurrence_ref": identity, "decision": decision["action"], "item": resolved})
+        return mp.digest({"provider": self.provider, "menu_ref": menu_ref, "preview_binding": preview_binding, "rows": rows}), rows
+
     def _recurring(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
+        if action == "review_occurrence":
+            with self.store.locked() as state:
+                reference = self._cart_menu_ref(state.get("menu"))
+                if (not reference or reference != request.get("menu_ref") or state.get("pending_checkout")
+                        or state.get("order_change") or state.get("pending_cart_change")):
+                    raise HouseholdError("review the current saved menu after resolving any pending operation")
+                scope, rows = self._menu_recurring_scope(state)
+                key, choice = request.get("occurrence_ref"), request.get("decision")
+                if (scope != request.get("recurring_review_ref") or not isinstance(key, str)
+                        or key not in {r["occurrence_ref"] for r in rows} or choice not in {"include", "skip", "substitute"}):
+                    raise HouseholdError("recurring occurrence changed; prepare the exact current menu again")
+                decision = {"action": choice}
+                raw = request.get("replacement")
+                if choice == "substitute":
+                    if not isinstance(raw, Mapping) or set(raw) != {"product_id", "product_name", "quantity"}:
+                        raise HouseholdError("substitution requires the exact replacement and package count")
+                    decision["replacement"] = put_item([], {**raw, "product_id": self._product_id(raw["product_id"])})[0]
+                elif raw is not None:
+                    raise HouseholdError("only substitute accepts a replacement")
+                old = state.get("menu_recurring_decisions") or {}
+                valid = {r["occurrence_ref"] for r in rows}
+                previous = old.get("decisions", {}) if old.get("menu_ref") == reference else {}
+                state["menu_recurring_decisions"] = {"menu_ref": reference, "decisions": {
+                    **{k:v for k,v in previous.items() if k in valid}, key: decision}}
+                state.pop("product_plan_completion", None)
+                self._clear_persisted_product_plan(state.get("cart_plan"))
+                state["managed_product_apply_fence"] = {"menu_ref": reference, "started_at": self._now().isoformat()}
+            return {"recorded": True, "cart_changed": False, "next": "Prepare and review the updated product plan before applying."}
         if action == "substitute":
             original = self._product_id(request.get("product_id"))
             raw = request.get("replacement")
@@ -1103,6 +1226,40 @@ from runtime_ownership import ownership, listener_ownership
 MAX_RPC_CONNECTIONS = 32
 RPC_FRAME_TIMEOUT = 10.0
 RPC_WRITE_TIMEOUT = 10.0
+
+
+def _unrepresentable_response(request, response, reason):
+    from rpc_client import merchant_mutation
+    fallback = {"ok": False, "error": reason}
+    if response.get("outcome") == "unknown":
+        fallback["outcome"] = "unknown"
+    result = response.get("result")
+    if (not isinstance(request, Mapping) or not response.get("ok")
+            or not merchant_mutation(request.get("operation"), request.get("action"))):
+        return fallback
+    if not isinstance(result, Mapping):
+        return {**fallback, "outcome": "unknown"}
+    # Carry only bounded service-owned identities and outcome flags. Never
+    # turn a large successful write or an uncertain dispatch into a rejection.
+    summary = {k: result[k] for k in ("confirmed", "cancelled", "removed", "applied", "partial_applied",
+               "cleared", "ensured", "synced", "stopped", "awaiting_user_payment", "outcome_unknown",
+               "cart_write_pending", "cart_reconciliation_required", "retry_allowed") if type(result.get(k)) is bool}
+    for k in ("operation_id", "confirmation_id", "order_id", "product_plan_digest", "partial_product_plan_digest"):
+        value = result.get(k)
+        if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,160}", value):
+            summary[k] = value
+    menu = result.get("menu_ref")
+    if (isinstance(menu, Mapping) and isinstance(menu.get("menu_id"), str)
+            and re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", menu["menu_id"])
+            and type(menu.get("revision")) is int and 0 < menu["revision"] < 2 ** 63
+            and isinstance(menu.get("digest"), str) and re.fullmatch(r"[a-f0-9]{64}", menu["digest"])):
+        summary["menu_ref"] = {k: menu[k] for k in ("menu_id", "revision", "digest")}
+    if not any(summary.get(k) for k in ("confirmed", "cancelled", "removed", "applied", "cleared",
+               "ensured", "synced", "stopped", "awaiting_user_payment", "outcome_unknown", "cart_write_pending")):
+        return {**fallback, "outcome": "unknown"}
+    summary["details_omitted"] = True
+    summary["next"] = "Read the current result for this original attempt before any further write."
+    return {"ok": True, "contract": 1, "result": summary}
 
 
 class Server:
@@ -1166,6 +1323,7 @@ class Server:
                 connection.settimeout(None)
             except OSError:
                 return
+            request = None
             try:
                 line, separator, _remainder = data.partition(b"\n")
                 if not separator or len(line) > MAX_REQUEST:
@@ -1175,17 +1333,29 @@ class Server:
                     raise HouseholdError("request must be an object")
                 if request.get("contract", 1) != 1:
                     raise HouseholdError("incompatible bridge/core contract; update the client package to this service release")
-                response = {"ok": True, "contract": 1, "result": self.app.handle(request)}
+                deadline = request.pop("request_not_after", None)
+                if deadline is not None:
+                    if type(deadline) not in {int, float} or not math.isfinite(deadline):
+                        raise HouseholdError("request deadline must be finite")
+                    from rpc_client import rpc_timeout
+                    deadline = min(deadline, time.monotonic() + rpc_timeout(request.get("operation"), request))
+                token = _REQUEST_ADMISSION_DEADLINE.set(deadline)
+                try:
+                    response = {"ok": True, "contract": 1, "result": self.app.handle(request)}
+                finally:
+                    _REQUEST_ADMISSION_DEADLINE.reset(token)
             except (HouseholdError, TypeError, ValueError, OverflowError, UnicodeError, RecursionError) as exc:
                 response = {"ok": False, "error": str(exc)}
+                if isinstance(exc, HouseholdError) and getattr(exc, "outcome_unknown", False) is True:
+                    response["outcome"] = "unknown"
                 if isinstance(exc, MenyBrowserError) and exc.provider_failure:
                     response["provider_failure"] = exc.provider_failure
             try:
                 encoded = (json.dumps(response, ensure_ascii=True, allow_nan=False) + "\n").encode()
                 if len(encoded) > MAX_REQUEST:
-                    encoded = (json.dumps({"ok": False, "error": "response exceeds the meal concierge size limit"}) + "\n").encode()
-            except (TypeError, ValueError, UnicodeError):
-                encoded = (json.dumps({"ok": False, "error": "response contains an invalid JSON value"}) + "\n").encode()
+                    encoded = (json.dumps(_unrepresentable_response(request, response, "response exceeds the meal concierge size limit")) + "\n").encode()
+            except (TypeError, ValueError, UnicodeError, RecursionError):
+                encoded = (json.dumps(_unrepresentable_response(request, response, "response contains an invalid JSON value")) + "\n").encode()
             try:
                 connection.settimeout(RPC_WRITE_TIMEOUT)
                 connection.sendall(encoded)
@@ -1269,6 +1439,8 @@ def main() -> None:
     validate_browser_prerequisites(args, settings)
     browser_owner = (None, None, None, None, None, None) if settings["provider"] == "none" else (args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid)
     with ownership(args.state, *browser_owner):
+        if args.maintenance and args.maintenance.exists():
+            raise SystemExit("offline update is incomplete; repair it before starting the service")
         run(args, settings)
 
 
@@ -1287,6 +1459,9 @@ def validate_browser_prerequisites(args, settings) -> None:
 
 
 def run(args, settings=None) -> None:
+    # Mark the attempt before provider/library adapter setup can begin.
+    from runtime_rollback import note_runtime_open
+    note_runtime_open(args.state)
     if settings is None:
         settings = config(args.config)
         validate_browser_prerequisites(args, settings)

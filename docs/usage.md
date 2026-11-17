@@ -19,6 +19,11 @@ On first use, review the household, portions, dietary preferences, meal plan
 and recipe sources. Keep the suggested settings or describe what you want to
 change. Ask to review your setup again at any time.
 
+Reset only the settings you name. For agent tools, profile `reset` requires
+explicit `paths` such as `["meals.portions"]`; `["*"]` resets the entire profile,
+including saved dietary exclusions. The response includes the affected previous
+values. An omitted or empty list does not reset anything.
+
 The agent gives a short guide as you make the relevant choices. Ask at any time:
 "Show everything Meal Concierge can do and all my settings and preferences."
 That overview includes meal and purchasing preferences, recurring groceries,
@@ -50,6 +55,24 @@ list. Checking an item does not update pantry stock or a shopping cart.
 Changed quantities reopen checked rows; a new independent menu starts fresh
 checks. Personal extras remain until you remove them. Explicit replanning keeps
 unchanged checks within the same shopping task.
+
+The list also returns one `stock_check` for the whole menu, with grouped total
+needs, the remaining amount, pantry/optional flags and recorded-answer status.
+Its counts cover every item; follow its bounded pages before asking one combined
+stock question. Answer through `shopping_list record_stock` with the current
+`stock_ref` and `stock_answers` by `requirement_id`: `have_all`, `have_quantity`,
+`include`, or `omit` for optional ingredients. A partial answer is the total stock
+available for that ingredient, allocated once across dishes, not an additional
+amount on top of an earlier answer. Unknown optional amounts remain unresolved
+unless explicitly covered or omitted. Saved answers take precedence over older
+preparation requests.
+
+An edit carries answers only for the same stable preparation source with an
+unchanged recipe snapshot and shopping amount. Changed, removed or historical
+sources are reported as `stock_answers_dropped` and need a new answer; unrelated
+menus and legacy preparations without stable source identity inherit none.
+Recording stock is local and changes no retailer cart or purchase. After changing
+stock, prepare a fresh product review for the current menu before applying it.
 
 Ask explicitly for product suggestions from the connected Oda, Mathem or MENY
 catalog to tailor the menu ingredients to that store. A store connection is
@@ -147,6 +170,16 @@ quantities stay visible. Ask to edit, favorite or archive a saved recipe.
 - “Save this recipe and mark it as a favorite.”
 - “Show my favorite vegetarian recipes.”
 - “Use only my saved recipes for this menu.”
+- “Which recipe sources are on, and which do you use first?”
+- “Prefer my own cookbooks, and use the store's recipes only occasionally.”
+
+Recipes come from your own saved recipes, any installed collections, your
+store, recipe websites and two open English-language databases. Each source can
+be switched on or off, and marked as **preferred** (considered first) or
+**occasional** (considered after the others). Everything else is normal. A
+preference decides between comparable dishes; it never overrides your dietary
+rules or a dish you ask for by name. Your own recipes and installed
+collections share one on/off switch.
 
 Store recipes may have store-specific usage restrictions and may not be suitable
 for shopping at another retailer. Source links and credits remain attached.
@@ -260,3 +293,5 @@ their store binding and use the existing schema-2 format.
 An explicit request to empty the cart uses its freshly observed digest. The menu
 is retained, earlier product completion is invalidated, and an uncertain removal
 is reconciled before another write. An empty cart is not a cancelled order.
+
+Ask “Which recipe sources are on?” to see saved recipes, collections, the selected retailer and recipe websites with their current priority. “Prefer my family collection and use store recipes occasionally” changes selection priority while both sources stay enabled. The planner rotates through active recipes as planning dates and saved history change, and keeps dietary and availability checks in force.

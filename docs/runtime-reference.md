@@ -84,7 +84,10 @@ are checked against the native Unix limit before staging. Use shorter explicit
 | `runtime.json` | Exact installation paths, owner and selected/previous code release |
 
 Household JSON commits sync the temporary file, atomically replace the destination,
-then sync its parent directory before reporting success. Directory open or sync
+then sync its parent directory before reporting success. On macOS, regular-file
+`F_FULLFSYNC` barriers run before replacement and again after the directory sync
+using the same still-open file descriptor, so drive-cache writes are flushed in
+that order. Unsupported or failed barriers are errors. Directory open or sync
 errors are propagated, including on filesystems that do not support directory
 sync. An error after replacement can leave the new journal visible: it does not
 mean the old state survived or that an external action is safe to repeat. Preserve
@@ -428,8 +431,8 @@ store before the other fails; do not manually remove the maintenance marker and
 start old code. Repair the cause and retry, or inspect a private offline restore.
 
 Code rollback is separate from data recovery. Never replace current journals with
-a pre-order/pre-send backup after possible external effects. This installer does
-not offer an automatic data rollback or downgrade. Preserve latest outcomes and
+a pre-order/pre-send backup after possible external effects. An explicit stopped rollback requires the durable evidence of a never-used update,
+its intact pre-update backup and a matching current household. Preserve latest outcomes and
 reconcile their original identities before any recovery decision.
 
 ## Complete private data backup and relocated restore
@@ -827,3 +830,18 @@ Oda retry discount labels are descriptive data, not a promotion grammar. The
 parser reads signed itemized amounts from the bound summary, checks full bill
 arithmetic and freezes the exact rows for submission. Unknown/malformed money,
 changed rows and inconsistent totals still reject submission.
+
+
+A completed legacy setup with no saved web-search settings reopens setup review
+with web search disabled. An existing household payment preference takes
+precedence over the installation configuration. Upgrades validate the configured
+payment method only when the household has no stored preference.
+
+Provider login `--status` reports the exchange kind and recovery action.
+For `explicit_login`, use the provider login command above with the original
+provider and token directory. A fresh interactive grant preserves a secret-free
+receipt of the superseded uncertain exchange. A ready exchange finishes local
+publication on the next authenticated operation. Neither
+[Oda's connection guide](https://oda.com/mcp?lang=en) nor
+[Mathem's guide](https://www.mathem.se/mcp?lang=en) documents a replay or
+reconciliation contract for a lost refresh response.

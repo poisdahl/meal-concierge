@@ -17,6 +17,7 @@ from unittest import mock
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 from email_sender import EmailSender
+from core import HouseholdError
 from email_transports import GmailTransport, NotSent, SMTPTransport, check_message, capability
 from menu_planning import menu_ref
 from test_recipe_delivery import fixture, SMTPHandler
@@ -97,19 +98,37 @@ class SenderTests(unittest.TestCase):
 
     def test_lost_provider_response_reconciles_original_message(self):
         self.mailbox.failure = "after"
-        self.assertEqual("unknown", self.send()["outcome"])
+        result = self.send()
+        self.assertEqual("unknown", result["outcome"])
+        self.assertFalse(result["retry_allowed"])
         self.assertTrue(self.send(self.new_runner(), "reconcile")["sent"])
         self.assertEqual(1, len(self.mailbox.messages))
         self.assertEqual("accepted", self.rpc("recipe_delivery", action="get", job_id="menu-1")["parts"][0]["status"])
 
     def test_definite_failure_requires_explicit_same_occurrence_retry(self):
         self.mailbox.failure = "before"
-        self.assertEqual("not_sent", self.send()["outcome"])
+        result = self.send()
+        self.assertEqual("not_sent", result["outcome"])
+        self.assertTrue(result["retry_allowed"])
+        self.assertIn('use retry with delivery_requested=true', result['next'])
         self.mailbox.failure = None
         self.assertEqual("not_sent", self.send()["outcome"])
         self.assertTrue(self.send(action="retry")["sent"])
         self.assertEqual(1, len(self.mailbox.messages))
         self.assertEqual(1, self.rpc("recipe_delivery", action="status")["job_count"])
+
+    def test_legacy_recipient_setter_does_not_report_a_false_sender_change(self):
+        before = self.app.store.read()
+        with self.assertRaisesRegex(HouseholdError, 'email_sender configure'):
+            self.rpc('profile', action='set_email', email='new-recipient@example.test')
+        after = self.app.store.read()
+        self.assertEqual(after['email_recipient'], before['email_recipient'])
+        self.assertEqual(after['recipe_delivery']['sender_binding'], before['recipe_delivery']['sender_binding'])
+        # The supported setup changes the binding and legacy field together.
+        self.runner.execute({'action': 'configure', 'recipient': 'new-recipient@example.test', 'timing': 'both'})
+        after = self.app.store.read()
+        self.assertEqual(after['email_recipient'], 'new-recipient@example.test')
+        self.assertEqual(after['recipe_delivery']['sender_binding']['recipient'], after['email_recipient'])
 
     def test_pre_export_interruption_can_retry_without_claiming_foreign_token(self):
         with mock.patch("email_sender.export_part", side_effect=OSError("disk unavailable")):
@@ -386,6 +405,8 @@ class OrderSenderTests(EmailSchedulerTests):
         result = runner.execute({**request, "action": "reconcile_order"})
         self.assertEqual("not_sent", result["outcome"])
         self.assertTrue(result["acknowledged"])
+        self.assertTrue(result['retry_allowed'])
+        self.assertIn('retry_order', result['next'])
         self.assertTrue(runner.execute({**request, "action": "retry_order", "delivery_requested": True})["sent"])
 
 

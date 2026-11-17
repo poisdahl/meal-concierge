@@ -361,6 +361,8 @@ class RecipeAssetBankTests(unittest.TestCase):
             for key in ("entry_origin", "pack", "locally_modified"):
                 replay.pop(key, None)
             connection.execute("UPDATE idempotency SET response_json=?", (json.dumps(replay),))
+            connection.execute("DROP TABLE pack_deletions")
+            connection.execute("DROP TABLE recipe_pack_status")
             connection.execute("DROP TABLE recipe_entry_metadata")
             connection.execute("UPDATE metadata SET value='5' WHERE key='schema_version'")
         reopened = RecipeStore(self.bank.path, "Synthetic")
@@ -370,7 +372,7 @@ class RecipeAssetBankTests(unittest.TestCase):
         self.assertEqual(len(reopened.search(entry_origin="unknown", limit=1)), 1)
         with sqlite3.connect(self.bank.path) as connection:
             self.assertEqual(connection.execute("SELECT document FROM recipes").fetchone()[0], original)
-            self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], "6")
+            self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], "8")
 
     def test_relocated_native_backup_keeps_origins_history_and_assets_after_deletion(self):
         first = self.pack()["recipe"]

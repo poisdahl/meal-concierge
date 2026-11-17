@@ -227,18 +227,40 @@ host environment. The validated update environment takes precedence and any
 missing entries from the existing service `PATH` are retained, so an npm adapter
 can keep finding Node without discarding previously available helper locations.
 
-After the check passes, inspect active shopping, payment, delivery and email work.
+After the check passes, stage the selected program and its dependencies while
+the current service is available. Keep the returned exact preparation ID:
+
+```sh
+./install.sh prepare-program --home /absolute/data-home
+```
+
+Preparation downloads dependencies and rehearses the candidate's normal JSON and
+recipe-bank migrations on private disposable copies, without stopping or changing
+the installed household. The SQLite copy is coherent within that bank; this is
+not a cross-store backup or proof of future external outcomes. A failed download
+or compatibility check leaves the existing program available. The receipt binds
+the exact staged source/dependency identity and installation baseline. Changed
+candidate bytes or an intervening program update require fresh preparation.
+If the stopped apply is interrupted, retain its markers and follow the existing
+stopped-update recovery procedure from the same pinned checkout.
+The rehearsal checks the normal JSON/SQLite migration path, including stored
+image references. It does not copy or inspect media bytes, validate browser
+sessions, contact a retailer, or certify the household's recipe content.
+
+Inspect active shopping, payment, delivery and email work.
 Wait for it to finish and resolve uncertain results before maintenance. For a
 native installation, retain the same home and run:
 
 ```sh
 ./install.sh stop --home /absolute/data-home
-./install.sh update --home /absolute/data-home
+./install.sh update --home /absolute/data-home --prepared-program PREPARATION_ID
 ./install.sh start --home /absolute/data-home
 ./install.sh attach --home /absolute/data-home
 ```
 
-The update makes an offline backup of state and configuration before migration.
+The prepared update performs no dependency download while stopped. It repeats
+the compatibility rehearsal under the existing offline ownership checks, then
+makes an offline backup of state and configuration before migration.
 It preserves recipes, local edits, favorites, saved menus, settings and existing
 login paths. It does not import or refresh the optional collection. Refresh the
 client package or skill using your agent's guide and start a new conversation.
@@ -246,6 +268,51 @@ Verify the same household and saved data, and compare the
 [running build](maintenance.md#identifying-the-running-build) with the target commit.
 Selecting an older tag is not a supported shortcut for undoing state migrations;
 use the recovery guidance below for an interrupted update.
+
+### Technical status, rollback and retention
+
+The installer verifies each downloaded wheel against the SHA-256 hashes for its
+pinned PyPI release. The installation requires a matching wheel for every
+dependency on the selected architecture. The prepared identity binds the lock,
+installed distributions, interpreter, staged source and runnable bytecode. The
+installed Python disables new bytecode writes during ordinary launches. Preparation or final
+validation fails when covered bytes change.
+
+An interrupted update resumes the same staged release and verifies the original
+backup. The migration process records the migrated household while it owns the
+data. An update interrupted under an older installer can finish forward. Missing
+pre-update evidence or later changes keep the original backup private and disable
+automatic rollback.
+
+Run `./install.sh doctor --home /absolute/data-home` for manager and marker
+status, selected and running build identity, verification of installed runtime
+files, browser executable availability and socket health. A running core can
+report whether email work is pending as a boolean. A down or older core reports
+unknown. This command has no log, recipient, message, order or provider fields.
+
+An explicitly stopped installation can use `./install.sh rollback --home
+/absolute/data-home` after a completed update with an intact pre-use receipt.
+The installer verifies the prior release, backup, configuration and post-update
+household bytes. Opening the updated household runtime durably fences rollback
+before the first application operation. A changed household, missing legacy
+evidence or possible use requires forward recovery with the original journals.
+The prior service stays stopped. After an interrupted rollback, repeat the
+same command with the original home and backup.
+
+While the owner is stopped, review cleanup with
+
+```sh
+./install.sh retention-preview --home /absolute/data-home --older-than-days 30
+./install.sh retention-apply --home /absolute/data-home --older-than-days 30 --retention-review REVIEW
+```
+
+The returned manifest identifies exact stale preparations, interrupted staging
+copies, superseded program releases and duplicate complete backups. Unique
+backup contents, including possible-effect journals, retain an exact copy.
+Current, previous, recoverable and referenced program files stay protected.
+The installer rechecks each candidate, quarantines the reviewed object under
+its original filesystem and persists cleanup progress. Retry interrupted cleanup
+with the original review ID. Changed candidates require a new preview.
 
 ### Recover an interrupted attempt
 
@@ -315,6 +382,35 @@ operation; if detached, inspect that same execution before retrying. Once an
 import has exited (including an error), restore the service through its owner
 when no update/recovery marker prevents starting it. Do not claim a partial import
 completed. See [preparation and recovery details](runtime-reference.md#versioned-recipe-package-integration).
+
+#### Resolve an explicit local recipe conflict
+
+A `locally_modified` conflict preserves the household's exact recipe. After
+reviewing that recipe and the prepared publisher version, choose one disposition
+for its reported pack recipe ID and current bank revision:
+
+```sh
+./install.sh resolve-recipe-conflict --home /absolute/data-home \
+  --prepared PREPARED_ID --pack-recipe-id PACK_RECIPE_ID \
+  --expected-revision CURRENT_REVISION --resolution keep_local
+```
+
+Use `adopt_publisher` instead to accept the exact verified publisher content.
+Run while idle and stopped through the existing owner. The command re-verifies
+the prepared archive and binds the disposition to its whole SHA-256 and the
+current recipe revision. It preserves the stable recipe ID, previous revisions,
+favorites and genuine local status choices. Adopting publisher content otherwise
+follows its ready/draft status. It does not change other recipes or household
+settings. Retry the same prepared import to finish the collection sync, then
+restart through the same owner when recovery markers permit.
+
+`keep_local` accepts that exact local revision for that exact archive, so an
+unchanged retry completes without erasing the edit. A new local revision or
+different archive conflicts again and needs a new decision. This is a scoped
+maintenance receipt, preserved by full installation backups. Private recipe-only
+exports omit the receipt; a restored local edit remains intact and asks again
+on its next sync. A disposition never overrides authoritative publisher
+withdrawals or creates permanent permission to ignore future changes.
 
 For an independently approved **local** collection archive that is not on the
 publisher channel, use the applicable reviewed import path for that pack. A

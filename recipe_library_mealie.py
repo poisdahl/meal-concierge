@@ -27,6 +27,7 @@ from recipe_libraries import (
     validate_library_id,
     validate_library_recipe_ref,
 )
+from core import contains_line_controls
 from recipes import RecipeError, evidence_inputs, normalize_recipe, normalize_source_url, source_ingredient, source_yield, recipe_evidence_fields
 
 
@@ -79,14 +80,23 @@ def _canonical(value: Any) -> str:
 def _text(value: Any, field: str, maximum: int, *, required: bool = True) -> str | None:
     if value is None and not required:
         return None
-    if not isinstance(value, str):
+    if not isinstance(value, str) or contains_line_controls(value):
         raise RecipeLibraryError(f"Mealie {field} is invalid")
     result = value.strip()
-    if required and not result:
-        raise RecipeLibraryError(f"Mealie {field} is invalid")
-    if len(result) > maximum or any(ord(character) < 32 or 0xD800 <= ord(character) <= 0xDFFF for character in result):
+    if (required and not result) or len(result) > maximum:
         raise RecipeLibraryError(f"Mealie {field} is invalid")
     return result or None
+
+
+def _body(value: Any, field: str, maximum: int) -> str:
+    """Bounded recipe prose may contain ordinary line breaks and tabs."""
+    if not isinstance(value, str) or len(value) > maximum or any(
+        (ord(character) < 32 and character not in "\n\r\t")
+        or ord(character) == 127 or 0xD800 <= ord(character) <= 0xDFFF
+        for character in value
+    ):
+        raise RecipeLibraryError(f"Mealie {field} is invalid")
+    return value.strip()
 
 
 def _provider_id(value: Any) -> str:
@@ -663,7 +673,11 @@ class MealieAdapter(RecipeLibraryAdapter):
             if not isinstance(item, Mapping):
                 raise RecipeLibraryError(f"Mealie {field} is incompatible")
             candidate = item.get("originalText") or item.get("display") or item.get("note") if field == "ingredients" else item.get("text")
-            result.append(_text(candidate, f"recipe {field}", 4_000) or "")
+            if candidate is None:
+                continue  # An empty native editor row is not an ingredient or step.
+            text = _body(candidate, f"recipe {field}", 4_000)
+            if text:
+                result.append(text)
         return result
 
     def _native_matches(
@@ -767,7 +781,7 @@ class MealieAdapter(RecipeLibraryAdapter):
                 raise RecipeLibraryError("Mealie recipe notes are incompatible")
             for note in notes:
                 if note.get("text"):
-                    note_values.append(_text(note.get("text"), "recipe note", 4_000) or "")
+                    note_values.append(_body(note.get("text"), "recipe note", 4_000))
             native_times = {
                 key: raw.get(field)
                 for key, field in (
@@ -797,8 +811,8 @@ class MealieAdapter(RecipeLibraryAdapter):
         try:
             if stored is None:
                 candidate["schema_version"] = 2
-                if raw.get("orgURL"):
-                    candidate["source"]["original"] = {"url": raw["orgURL"]}
+                if source.get("url"):
+                    candidate["source"]["original"] = {"url": source["url"]}
                 if rights["storage"] == "full":
                     candidate["ingredients"] = [
                         source_ingredient(text, language=candidate["language"])

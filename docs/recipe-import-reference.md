@@ -20,6 +20,10 @@ recipes. Text fallback returns the bounded page; the host submits `interpretatio
 with page-1 quotes on a second URL read, and the service verifies those quotes
 against the newly fetched text. Caller replacement source text is rejected.
 Native reads use the exact configured `library_recipe_ref`.
+Quote matching accepts NFC-equivalent letters and ignores soft hyphens and
+zero-width spaces inserted by page layout; the supplied source pages still
+determine the import's content digest. Steps and combined notes are bounded to
+4,000 characters, matching stored recipes.
 
 The result contains `recipe`, `recipe_digest`, `discovery_ref`, `import_report`,
 readiness and shopping requirements. Unknown amounts and estimates remain
@@ -37,6 +41,14 @@ and reports a conflict rather than overwriting them. A legacy unqualified source
 identity requires explicit reconciliation. Original attribution and private
 provider restrictions remain independent from this duplicate identity.
 
+After reviewing a `source_changed` conflict on an imported recipe, explicitly
+update using its `recipe_id`, `expected_revision`, corrected `discovery_ref` and
+a stable idempotency key. The service checks that the frozen discovery belongs
+to that saved source identity and retains its trusted source evidence. Do not
+resend the source recipe as caller-authored JSON to assert new source evidence.
+If you request a separate save after that update, use a new save key: replaying
+the earlier conflict's key returns that original conflict receipt.
+
 Native snapshots retain their exact source revision in existing
 `external_snapshot` metadata. Ordinary get/search never fetches image URLs.
 
@@ -47,6 +59,14 @@ checked against the upstream
 and [recipe converter](https://github.com/julianpoy/recipesage/blob/v4.0.6/packages/util/server/src/general/jsonLD.ts).
 It preserves the title, original ingredient lines, ordered steps and section
 headings, literal yield wording, notes, categories, timing text and attribution.
+RecipeSage bracketed ingredient headings such as `[Sauce]` annotate following
+ingredients through each row's `notes`; they never become shopping goods.
+Empty or trailing headings remain in recipe notes. Original ingredient wording
+and quantity evidence are preserved independently of this component association.
+Native Mealie/RecipeSage imports report non-URL original-source text as an
+unsupported field instead of letting it replace safe attribution. Malformed or
+credential-bearing HTTP(S) attribution URLs still reject explicitly. Empty Mealie
+editor rows are omitted and reported; structured food/amount rows remain data.
 Image URLs remain inert candidates pending managed-asset import. Source rating,
 nutrition and unrecognized fields are explicitly reported as unsupported.
 Neither rating nor a tag is automatically interpreted as a favorite.
@@ -60,8 +80,22 @@ explicitly. These offline readers parse supplied bytes; the service read and hos
 workflow use the separate boundaries described below.
 
 Both readers return an extraction report with original fields, inert image
-candidates and unsupported fields. `source_candidate` then uses the shared
-schema-2 ingredient/yield parsers. Unknown servings remain unknown; two loaves
+candidates and unsupported fields. The public webpage preview tolerates empty
+ingredient editor strings and a single comment object. It omits
+invalid/relative/signed optional image URLs and untyped numeric times with an
+`unsupported_fields` entry; it never fetches those URLs or guesses time units.
+Integer source IDs remain exact strings. Missing method text still requires
+host interpretation rather than promoting a step heading to a complete
+instruction.
+
+`source_candidate` uses the shared
+schema-2 ingredient/yield parsers. For these household imports the ingredient
+parser also reads a metric unit written against its number (`600g carrots`),
+and a yield naming persons (`4 personer`) establishes person servings. A bare
+count, container or cup is not an exact amount and stays unresolved until the
+host supplies a labelled estimate. So does a number that could be thousands or
+decimals (`1,200 g`) and a line with two amounts (`1 dl + 2 ss`): neither is
+read as an exact source amount. Unknown servings remain unknown; two loaves
 are not two people. The service must establish trusted source context separately
 before accepting evidence, and must preserve the extraction report when showing
 unresolved fields. There is no legacy-schema fallback when those parsers are
@@ -110,7 +144,16 @@ One unauthenticated HTTPS GET returns the shared `read_webpage` envelope:
 `{mode: structured|text, recipes: [...], text, requires_interpretation, ...}`.
 Every structured recipe has the offline extraction fields plus `candidate`
 (schema 2) and `source_context`. A text fallback requires the host agent's
-interpretation. Invalid JSON-LD fails explicitly. No embedded URL is fetched.
+interpretation. If structured extraction fails, the result includes an explicit
+`structured_error`, no structured recipe candidates, and bounded visible text
+for a separate host interpretation. It never treats malformed data as an absent
+recipe or silently saves a partial extraction. The exact fetched bytes are bound
+by `source_sha256`; a host-interpreted preview retains that hash in its frozen
+`external_snapshot`. If visible recipe text is unavailable, supply text or a
+readable attachment. No embedded URL is fetched.
+Redirects are refused, not followed. When the same site moved the page to
+another HTTPS address (for example its `www` host), the error names that
+address so the caller can request it explicitly.
 
 Public DNS results must all be public addresses. Connections use an already
 validated numeric sockaddr, with TLS chain/hostname verification for the
@@ -281,8 +324,9 @@ the canonical image URL/attribution contract.
 The plain HTML fallback preserves paragraph/list/table-cell separation and
 contiguous inline text. It ignores script/style/template and explicitly hidden
 content, supports common omitted head/paragraph/list/table end tags, limits
-nesting to 128 elements and output to 64 KiB, and rejects malformed structured
-JSON-LD instead of silently falling back. It is a text extractor, not a browser
+nesting to 128 elements and output to 64 KiB. Malformed structured JSON-LD is
+reported as `structured_error` when visible text is offered for interpretation.
+The strict offline JSON-LD reader still rejects it. It is a text extractor, not a browser
 renderer: CSS layout, external resources and scripts are not interpreted.
 The host agent must still identify the recipe and report ambiguity or missing
 fields before the shared import/save workflow.
@@ -349,7 +393,9 @@ does not establish its role. Missing categories map only exact known tag aliases
 unknown roles remain empty. Classification is visible in the preview and saved
 with the same discovery snapshot.
 
-An ingredient may add `estimated_amount: {quantity, unit, assumptions}`; a yield
+An ingredient may add `estimated_amount: {quantity, unit, assumptions}` and, with
+it, `item` naming the ingredient the estimate measures (`1 can chopped tomatoes`
+as 400 g of `chopped tomatoes`); the quote remains the evidence. A yield
 selection may add `estimated_portions: {quantity, assumptions}`. These values
 always remain labeled estimates, independently of the physical yield. Usable
 estimates with stated assumptions can be planned without separate acceptance. The
@@ -357,6 +403,10 @@ input cannot supply evidence, acceptance, rights, provider, managed image or
 trusted source-context assertions. Optional attribution permits only URL,
 publisher, title and author; known store attribution retains effective binding.
 Full private recipe storage does not imply a redistribution license.
+
+After import, [bounded conversion changes](recipe-contract.md#bounded-conversion-changes)
+translate the recipe or fill remaining amounts in one `convert` call, including
+for structured web pages that accept no interpretation.
 
 The result contains the candidate, source/page context, unreadable-page issues
 and selected excerpts. Its source digest is stable for the same ordered pages
@@ -439,7 +489,7 @@ references retain the same digest.
 `export_private_archive(destination, store)` exports one coherent recipe snapshot
 from an explicit `RecipeStore`. Its caller holds the installation's offline
 ownership locks throughout the database and asset reads. It opens SQLite directly
-in read-only mode and checks the exact household and schema 6 internally. It
+in read-only mode and checks the exact household and bank schema 6 or 7 internally. It
 does not migrate, clean up or checkpoint the source. The current rollback-journal
 bank is supported; WAL mode or a nonempty journal fails explicitly because a
 read-only WAL connection can create source-side shared-memory files.
@@ -468,8 +518,8 @@ The private manifest has exactly `format: meal-concierge-recipes`,
 `format_version: 1`, `kind: private`, `private_schema_version`, `recipes_count`,
 `records_count` and `files`. Private schema 1 remains readable for archives with
 the original user/bundled/unknown origins. The writer emits private schema 2
-when any entry has collection origin; older runtimes must be updated before
-restoring that archive. Each canonical revision retains its own recipe schema 1
+when any entry has collection origin, or schema 3 when a pack entry carries
+status provenance; older runtimes must be updated before restoring those archives. Each canonical revision retains its own recipe schema 1
 or 2, so there is no single recipe schema version in the manifest. Members are
 `records.jsonl` and managed `assets/<sha256>.jpg` only; shared ZIP framing,
 inventory and path checks still apply.
@@ -482,7 +532,10 @@ Each recipe occupies one contiguous group in the JSONL stream:
   `recipe_id`, `revision`, `status`, `document` and `created_at`.
 
 `pack` is null or `{pack_id, recipe_id, version, baseline_hash}` for bundled or
-collection entries. `favorite` is null if there was never a favorite row; otherwise it holds
+collection entries. In private schema 3, a tracked pack also carries
+`status_provenance: {applied_revision, local_status}`. This distinguishes publisher
+status changes from local status decisions across export and restore.
+`favorite` is null if there was never a favorite row; otherwise it holds
 `is_favorite`, `favorite_revision`, `created_at` and `updated_at`. An explicit
 false favorite retains its revision. The exact stored source key survives,
 including migration identities. The final revision must match the entry's head,
@@ -663,3 +716,81 @@ The returned handoff freezes the combined exact references; save/replay does
 not repeat search. Bounded web search never establishes exhaustive absence for
 automatic AI fallback. Link-only content and webpage instructions must not be
 used as a route around these restrictions.
+
+### Collection status provenance
+
+Recipe bank schema 7 adds importer-owned status provenance without changing any
+stored recipe or revision. Publisher-only active/draft changes no longer become
+local decisions and block later publisher changes. Local status changes after
+the last imported revision remain durable, including across content upgrades.
+Legacy histories without provenance cannot distinguish who made a status-only
+revision: their existing conservative local-intent interpretation is retained.
+The first successful import records provenance for subsequent changes. This does
+not automatically repair previously ambiguous local/publisher decisions. Older
+runtimes reject schema 7; use the pre-update installation backup for a rollback.
+
+Collection withdrawal reports include the removed recipe's saved name and whether
+it was a favorite, in addition to stable identities and the publisher's reason.
+Prepare the publisher archive first. Its withdrawal preview reports names,
+favorite and edit counts, bounded details and a review ID. Supply
+`--withdrawal-review REVIEW` with the exact prepared import when entries would
+be removed. The stopped installer recomputes the affected revisions and favorite
+state before applying the archive. For a local authoritative collection, use
+`inspect-recipe-pack` to obtain the review and supply the normal digest and
+removal authorization as well. In a managed inbox, inspect the staged ZIP and
+pass its returned withdrawal review to the import tool.
+A regular Finder `.DS_Store` directly inside `pack-metadata` is ignored and left
+in place. Unexpected directories, symlinks and other metadata still block
+maintenance with an actionable name in the error.
+
+For a quoted transcript ingredient, `choice` selects one of two named source
+alternatives sharing the same explicit amount and unit, such as `smør` in
+`2 ss olje eller smør`. The original quote remains attached. For a bare integer
+and a recognized whole egg, onion or carrot, set `whole_count=true` to keep the
+piece count. A can with no stated capacity still needs a labeled estimate to
+convert it to mass or volume. A later use of leftover marinade can refer to
+marinade explicitly reserved in an earlier selected step.
+
+URL-only bookmarks show the supplied host as their display label. Legacy schema
+1 retains its historical path-only URL identity. Use schema 2 for new recipes
+where query parameters distinguish recipes. Export checks still apply to every
+revision. A replayed file import reports conflicting implicit keys by record
+and continues with the other records. Supply a fresh `--import-intent` only
+when deliberately starting a new import, and reuse it on retry.
+
+A translated ingredient is displayed only when its complete identity matches
+the canonical one directly or through a reviewed language mapping. Other labels
+fall back to the source item. Quantities come from the canonical recipe. Older
+text-only translation bindings remain readable; review against the source and
+revision to enable translated presentation.
+
+Bank schema 8 retains explicit household deletions of collection entries. An
+ordinary sync, a new publisher revision or a withdrawal preserves the deletion.
+The import reports `kept_deleted` and a deletion ID. To intentionally allow a
+specific entry to return, use the stopped installation and import again.
+
+```sh
+python import_recipes.py --installation-home HOME --allow-pack-reintroduction PACK_ID ENTRY_ID DELETION_ID
+```
+
+Private archive schema 4 carries these deletions when present. A restore that
+finds a different deletion or a current entry reports a conflict and preserves
+the local choice. Older private formats remain readable. Direct upgrades from
+bank schemas 6 and 7 retain a verified private pre-migration SQLite backup.
+
+An unsafe historical URL can be reviewed with
+`import_recipes.py --installation-home HOME --preview-private-url-remediation`.
+The diagnostic identifies the recipe and revision using safe identifiers and
+hashes. It shows no URL values. After reviewing the transformation, use
+
+```sh
+python import_recipes.py --installation-home HOME --export-private NEW_ARCHIVE --redact-reviewed-urls REVIEW --backup NEW_PRIVATE_DB
+```
+
+The reviewed derivative removes URL user information and recognized credential parameters
+while preserving other parameters, original recipe and revision identities,
+attribution and history. The supplied backup retains the original bank. The
+working bank and frozen operation records keep their original bytes. The
+ordinary full archive verifier checks the completed derivative. A private
+`NEW_ARCHIVE.audit.json` records the archive hash, source bank hash, every
+changed revision and the before/after text bindings of reviewed translations.

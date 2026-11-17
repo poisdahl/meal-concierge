@@ -406,6 +406,40 @@ class EmailSchedulerTests(unittest.TestCase):
         self.assertEqual(replacement["invocation"]["occurrence_id"], plan["invocation"]["occurrence_id"])
         self.ack(replacement)
 
+    def test_missed_occurrence_requires_fresh_same_job_catch_up(self):
+        self.provider.delivery = "2020-01-01"
+        self.call("schedule", delivery_date=self.provider.delivery)
+        invocation = self.active()
+        review = self.call("review_catch_up", scheduler=invocation)
+        self.assertEqual(review, self.call("due", scheduler=invocation))
+        self.assertEqual(review["reason"], "missed delivery date")
+        self.assertFalse(review["send"])
+        with self.assertRaisesRegex(HouseholdError, "explicit delivery intent"):
+            self.call("due", scheduler=invocation, catch_up_ref=review["catch_up_ref"])
+        with self.store.locked() as state:
+            state["email_jobs"][0]["menu_snapshot"]["dishes"][0]["name"] = "Updated soup"
+        with self.assertRaisesRegex(HouseholdError, "current review"):
+            self.call("due", scheduler=invocation, delivery_requested=True, catch_up_ref=review["catch_up_ref"])
+        fresh = self.call("due", scheduler=invocation)
+        claim = self.call("due", scheduler=invocation, delivery_requested=True, catch_up_ref=fresh["catch_up_ref"])
+        begun = self.call("begin_send", scheduler=invocation, claim_token=claim["claim_token"])
+        self.assertTrue(begun["dispatch"])
+        self.assertFalse(self.call("due", scheduler=invocation, delivery_requested=True,
+                                   catch_up_ref=fresh["catch_up_ref"])["send"])
+
+    def test_legacy_delivery_moved_to_today_requires_schedule_update_before_claim(self):
+        tomorrow = self.app._household_today(self.store.read()).toordinal() + 1
+        from datetime import date
+        later = self.call("schedule", delivery_date=date.fromordinal(tomorrow).isoformat())
+        self.app.handle({"operation": "email", **later["automation_ack"]})
+        moved = self.call("due")
+        self.assertEqual(moved["reason"], "delivery moved")
+        self.assertTrue(moved["automation_update_required"])
+        self.assertNotIn("claim_token", moved)
+        self.assertEqual(self.store.read()["email_jobs"][0]["status"], "pending")
+        self.app.handle({"operation": "email", **moved["automation_ack"]})
+        self.assertTrue(self.call("due")["claim"])
+
     def test_active_delivery_changes_cannot_use_legacy_ack(self):
         for moved_by_provider in (False, True):
             with self.subTest(moved_by_provider=moved_by_provider):

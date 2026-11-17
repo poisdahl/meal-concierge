@@ -669,7 +669,10 @@ class EmailOperations:
             if self.email_automation_profile:
                 result["automation_environment"] = {"HERMES_WORKSPACE_AUTOMATION_PROFILE": self.email_automation_profile}
             return self._email_payload_within_transport(result)
-        if action == "due":
+        if action in {"due", "review_catch_up"}:
+            review_only = action == "review_catch_up"
+            if review_only and (requested_provider is None or request.get("catch_up_ref") is not None):
+                raise HouseholdError("missed email review requires its original provider and order")
             order_id = safe_order_id(request.get("order_id"))
             state = self.store.read()
             matching = matching_jobs(state, order_id, {"pending", "claimed", "sending"})
@@ -755,7 +758,29 @@ class EmailOperations:
                     automation_key = job.get("automation_key") or email_automation_key(job_provider, order_id)
                     job["automation_key"] = automation_key
                     local_today = self._household_today(state).isoformat()
-                    if delivery != local_today or ("scheduler" in job and delivery != job["delivery_date"]):
+                    catch_up = request.get("catch_up_ref")
+                    if delivery == job["delivery_date"] and delivery < local_today:
+                        binding = job.get("sender_binding")
+                        if (binding != state["recipe_delivery"].get("sender_binding")
+                                or recipient != (binding or {}).get("recipient", state.get("email_recipient"))):
+                            return {"send": False, "reason": "missed delivery; original recipient or sender has changed"}
+                        ref = hashlib.sha256(canonical([job, local_today, tracking]).encode()).hexdigest()
+                        if catch_up is None:
+                            return {"send": False, "reason": "missed delivery date", "delivery_date": delivery,
+                                    "provider": job_provider, "order_id": order_id, "menu": menu_delivery_title(menu),
+                                    "sender": mask_email(binding["sender"]) if binding else None,
+                                    "occurrence_id": self._email_occurrence(job), "recipient": mask_email(recipient),
+                                    "catch_up_ref": ref,
+                                    "next": "Review this original order email. To send it now, explicitly request delivery with this catch_up_ref."}
+                        if (request.get("delivery_requested") is not True or requested_provider != job_provider
+                                or not isinstance(catch_up, str) or catch_up != ref):
+                            raise HouseholdError("catch-up requires current review and explicit delivery intent")
+                        job["catch_up_day"] = local_today
+                    elif catch_up is not None:
+                        raise HouseholdError("the reviewed missed delivery has changed")
+                    elif delivery == job["delivery_date"] and delivery > local_today:
+                        return {"send": False, "reason": "delivery date has not arrived", "delivery_date": delivery}
+                    elif delivery != job["delivery_date"]:
                         job["delivery_date"] = delivery
                         job["automation_protocol"] = 0
                         if "scheduler" in job:
@@ -769,6 +794,12 @@ class EmailOperations:
                             "cron_prompt": email_automation_prompt(job_provider, order_id, delivery, automation_key),
                             "automation_ack": email_automation_ack(job_provider, order_id, delivery, automation_key),
                         }
+                if review_only:
+                    return {"send": False, "reason": "no missed delivery-day occurrence"}
+                if request.get("catch_up_ref") is None:
+                    job.pop("catch_up_day", None)
+                if request.get("catch_up_ref") is not None and job.get("trigger") == "after_purchase":
+                    raise HouseholdError("catch-up requires the original delivery-day occurrence")
                 claim_token = secrets.token_urlsafe(18)
                 job["status"] = "claimed"
                 job["claim_token"] = claim_token
@@ -810,6 +841,12 @@ class EmailOperations:
                     jobs[0].pop("claim_token", None)
                     jobs[0].pop("claim_expires_at", None)
                     raise HouseholdError("email claim expired before dispatch; request due again")
+                if jobs[0].get("catch_up_day"):
+                    binding = jobs[0].get("sender_binding")
+                    if (jobs[0]["catch_up_day"] != self._household_today(state).isoformat()
+                            or binding != state["recipe_delivery"].get("sender_binding")
+                            or jobs[0]["recipient_snapshot"] != (binding or {}).get("recipient", state.get("email_recipient"))):
+                        raise HouseholdError("catch-up review changed before dispatch")
                 menu = jobs[0].get("menu_snapshot")
                 recipient = jobs[0].get("recipient_snapshot")
                 if not isinstance(menu, Mapping) or menu.get("order_id") != order_id or not isinstance(recipient, str) or not recipient.strip():

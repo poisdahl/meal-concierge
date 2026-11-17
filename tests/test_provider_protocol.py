@@ -22,6 +22,22 @@ from core import HouseholdError
 
 
 class ProviderProtocolTests(unittest.TestCase):
+    def test_cart_tool_distinguishes_terminal_cart_from_queue_admission(self):
+        for merchant in ("oda", "mathem"):
+            client = RetailMcpClient("/unused", provider=merchant)
+            for reply in ({}, {"queued": True}, {"status": "pending", "items": []},
+                          {"success": True}, {"status": "success"}, {"groups": []},
+                          {"success": True, "accepted": True}, {"status": "unknown"}):
+                with self.subTest(merchant=merchant, reply=reply), self.assertRaises(HouseholdError):
+                    client._normalize_result("manipulate_cart", {}, reply)
+            terminal = {"groups": [], "productQuantityCount": 0, "totalGrossAmount": "0.00",
+                        "totalBreakdown": {}, "url": "https://example.invalid/cart"}
+            for payload in (terminal, {"result": terminal}):
+                self.assertEqual(client._normalize_result("manipulate_cart", {}, payload), terminal)
+            for invalid in ({**terminal, "productQuantityCount": 1}, {**terminal, "status": "queued"}):
+                with self.assertRaises(HouseholdError):
+                    client._normalize_result("manipulate_cart", {}, invalid)
+
     def test_handshake_and_negotiated_headers_reach_provider(self):
         negotiated = "2025-11-25"
         self.assertNotEqual(LATEST_PROTOCOL_VERSION, negotiated)

@@ -14,7 +14,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from core import DEFAULT_RECIPE_SOURCES, HouseholdError, RECIPE_SOURCE_IDS
-from recipes import RecipeError, normalize_recipe, normalize_source_url, source_ingredient, categories_from_tags
+from recipes import RecipeError, normalize_attribution_url, normalize_recipe, normalize_source_url, source_ingredient, categories_from_tags
 
 
 SOURCE_IDS = RECIPE_SOURCE_IDS
@@ -149,6 +149,8 @@ class TheMealDBSource:
         tags = []
         for candidate in (value.get("strCategory"), value.get("strArea"), value.get("strTags")):
             for tag in str(candidate or "").split(","):
+                if len(tags) == 50:
+                    break  # Only fifty are kept; a huge tag list is not searched further.
                 cleaned = _text(tag, maximum=80)
                 if cleaned and cleaned not in tags:
                     tags.append(cleaned)
@@ -179,7 +181,10 @@ class TheMealDBSource:
             },
         }
         if value.get("strSource"):
-            recipe["source"]["original"] = {"url": value["strSource"]}
+            try:
+                recipe["source"]["original"] = {"url": normalize_attribution_url(value["strSource"])}
+            except RecipeError:
+                pass  # A malformed attribution link is no reason to drop the recipe.
         return normalize_recipe(recipe)
 
 
@@ -279,6 +284,10 @@ class WikibooksSource:
         for member in members:
             title = _text(member.get("title") if isinstance(member, Mapping) else None, maximum=300)
             if title.startswith("Cookbook:") and title not in titles:
+                # cmstartsortkeyprefix is only a lower bound, not a search
+                # filter: a query for "laks" must not return Lamb or Lasagne.
+                if query and query.casefold() not in title.removeprefix("Cookbook:").replace("_", " ").casefold():
+                    continue
                 titles.append(title)
         titles = titles[:min(10, max(4, limit * 2))]
         results = []

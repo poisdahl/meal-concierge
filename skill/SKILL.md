@@ -187,6 +187,15 @@ before offering actions; a historical order date alone is not an active order.
    For that request, use profile `overview`, email sender/delivery status and the
    installed library/collection list; show effective values and explain how to
    change them. Translate these short explanations to the user's language.
+   For "which recipe sources are on, and which come first?", answer from
+   `recipe_source_overview` in setup `show` or profile `overview`: one line per
+   source with on/off, its preference and, for the bank, how many recipes it
+   holds. Offer to mark a source preferred or occasional, or switch it off;
+   own recipes and collections share one switch, so say that before turning
+   the bank off.
+   Save that with setup `apply`, `keep_current=false` and
+   `changes.recipe_source_preferences={preferred:[ids],occasional:[ids]}`;
+   a supplied list replaces the saved one, and `[]` clears it.
 2. Read the saved preferences, recent meals and suitable real recipes. Search
    the enabled bank and selected enabled store with useful local food words; for an
    ordinary open-ended plan, compare one bounded candidate page from each before
@@ -199,7 +208,12 @@ before offering actions; a historical order date alone is not an active order.
    active; for discoveries, verify returned cooking readiness and provider fit.
    Choose for dietary fit, practicality and variety, with
    source diversity as a tie-breaker, never a fixed quota. An all-external or
-   all-store plan can be the best fit. Empty results for one narrow query do not mean the catalog
+   all-store plan can be the best fit. Follow the household's saved source
+   preferences, returned as `source_preferences` with each candidate's
+   `source_group`: among recipes that fit comparably, take a preferred source
+   first, and use an occasional source only when the others offer no good fit.
+   The bank page already lists preferred groups first. A dish the user names
+   is not held back by a preference. Empty results for one narrow query do not mean the catalog
    is empty. Selected recipe websites are enabled by default: use a bounded
    search when better coverage or variety would help. For an unusual cuisine,
    specific dish or explicit website request, broader discovery may be more
@@ -375,7 +389,9 @@ This does not overwrite the source or create a personal bank entry; save
 separately when lasting reuse is wanted. Full schema-2 `recipe` remains available
 for complete adaptations, mutually exclusive with `changes`.
 `convert` converts representation while preserving source facts; it is not a
-way to disguise an adaptation. Never fabricate source evidence, calculation
+way to disguise an adaptation. Its bounded `changes` translate an imported
+recipe into the user's language and give unresolved lines an amount without
+resending the recipe. Never fabricate source evidence, calculation
 provenance or user acceptance. Usable labeled estimates need no separate
 acceptance ceremony; unresolved amounts need a practical estimate/adaptation
 before exact shopping can proceed.
@@ -388,6 +404,8 @@ size, availability and dietary facts. Mathem and MENY have no invented equivalen
 hints. Never invoke native bulk recipe-to-cart expansion without a supported
 preview. Read [recipe sources](references/recipe-sources.md) when importing text,
 photos, PDFs or a complex external source, or checking adaptation provenance.
+When the user pastes a recipe link or recipe text and wants to keep it, follow
+its "A link or text the user pasted" steps through to a saved recipe.
 
 ## Shopping lists
 
@@ -684,6 +702,12 @@ household preference is Vipps. This choice applies only to the reviewed change;
 Oda/Vipps delivery-only payment remains unsupported.
 Mathem amounts are SEK; Oda and MENY amounts are NOK.
 
+Review product selection's `quantity_warnings`: look for a smaller suitable
+pack or explain a concrete use for surplus before applying it. Extra packages
+must have a current household need; a lower unit price alone is not a reason
+to buy them. Estimate-mode merchandise comparisons do not establish final
+payable totals, deposits or delivery fees.
+
 ## Recipes, delivery and ongoing use
 
 In the first message presenting a saved plan, give dish names, short descriptions,
@@ -691,6 +715,8 @@ exact dates and portions (weekday only when verified), each recipe's actual sour
 and URL when available, and its known active and total cooking times. Say when a
 time is unknown. Label adaptations and distinguish a collection from the original
 author.
+Use Markdown links only when the current channel supports them. In plain-text
+channels, show the source title followed by its plain URL.
 Distinguish active work from elapsed time
 and per-dish time from a combined session; unknown times stay unknown. Use the
 contextual menu handoff above: full recipes are one option, not a mandatory

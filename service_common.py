@@ -292,10 +292,12 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         return f"{weekdays[parsed.weekday()]} {parsed.day}{'' if english else '.'} {months[parsed.month - 1]} {parsed.year}"
 
     def ingredients(values: Any) -> str:
+        from recipe_quantities import display_amount
         parts = []
         for value in values if isinstance(values, list) else []:
             if isinstance(value, Mapping):
-                amount = str(value.get("amount") or "").strip()
+                amount = (display_amount(value.get("quantity"), value.get("unit"), "en" if english else "nb")
+                          or str(value.get("amount") or "").strip())
                 item = str(value.get("display_item") or value.get("item") or value.get("name") or "").strip()
                 raw = str(value.get("raw") or "").strip()
                 if "display_item" in value:

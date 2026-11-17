@@ -430,12 +430,70 @@ class GroceryTopupTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "reconcile_change"):
             reopened.handle({"operation": "checkout", "action": "prepare"})
         self.assertEqual(len(queued), 1)
+        # An independent edit satisfies the target; the original delayed
+        # operation can still arrive. Neither matching read releases it.
         provider._mutate_cart(queued[0])
         provider.call = original
-        self.assertTrue(reopened.handle({"operation": "cart", "action": "reconcile_change"})["reconciled"])
-        self.assertTrue(self.ensure(reopened, product, 2)["idempotent"])
-        self.assertEqual(self.quantities(app, provider)[product], 2)
-        self.assertEqual(store.read()["cart_plan"]["supplemental_quantities"][product], 1)
+        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
+            reopened.handle({"operation": "cart", "action": "reconcile_change"})
+        provider._mutate_cart(queued[0])
+        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
+            reopened.handle({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(self.quantities(app, provider)[product], 3)
+        self.assertTrue(store.read()["pending_cart_change"])
+        self.assertEqual(len(queued), 1)
+
+    def test_completed_raw_batch_with_concurrent_edit_requires_review_after_restart(self):
+        store, provider, browser, app, product = self.household()
+        flow_fixture.CartPlanTests.sync(app, product, 1)
+        self.approve(app, provider)
+        original = provider.call
+        def concurrent_edit(tool, args, **kwargs):
+            result = original(tool, args, **kwargs)
+            if tool == "manipulate_cart":
+                provider._mutate_cart({"operations": [{"productId": 99, "quantity": 1}]})
+            return result
+        provider.call = concurrent_edit
+        with self.assertRaisesRegex(HouseholdError, "needs readback"):
+            self.ensure(app, product, 2)
+        pending = store.read()["pending_cart_change"]
+        self.assertTrue(pending["dispatch_finished"])
+        reopened = Application(StateStore(store.directory, store.config), provider, browser)
+        observed = reopened.handle({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(observed["operation_id"], pending["operation_id"])
+        self.assertFalse(observed["reconciled"])
+        self.assertEqual(observed["status"], "needs_input")
+        current = store.read()
+        self.assertFalse(current.get("pending_cart_change"))
+        self.assertEqual(current["cart_change_receipts"][pending["operation_id"]]["status"], "completed_with_cart_drift")
+        self.assertFalse(current["cart_plan"].get("supplemental_quantities"))
+
+    def test_terminal_managed_reply_survives_lost_readback_for_both_retailers(self):
+        for merchant in ("oda", "mathem"):
+            with self.subTest(merchant=merchant):
+                store, provider, browser, app, product = self.household(merchant)
+                original = provider.call
+                dispatched = False
+                def lose_read(tool, args, **kwargs):
+                    nonlocal dispatched
+                    if dispatched and tool == "get_cart":
+                        raise HouseholdError("synthetic read unavailable")
+                    result = original(tool, args, **kwargs)
+                    if tool == "manipulate_cart":
+                        dispatched = True
+                    return result
+                provider.call = lose_read
+                outcome = flow_fixture.CartPlanTests.sync(app, product, 2)
+                self.assertTrue(outcome["cart_write_pending"])
+                pending = store.read()["pending_cart_change"]
+                self.assertTrue(pending["dispatch_finished"])
+                provider.call = original
+                reopened = Application(StateStore(store.directory, store.config), provider, browser)
+                observed = reopened.handle({"operation": "cart", "action": "reconcile_change"})
+                self.assertTrue(observed["reconciled"])
+                self.assertEqual(observed["operation_id"], pending["operation_id"])
+                self.assertFalse(store.read().get("pending_cart_change"))
+                self.assertEqual(store.read()["cart_plan"]["status"], "needs_input")
 
     def test_existing_oda_order_counts_ordered_goods_and_real_editability(self):
         store, provider, _browser, app, _product = self.household()
@@ -493,16 +551,17 @@ class GroceryTopupTests(unittest.TestCase):
         store, provider, browser, app, product = self.household("meny")
         original = provider.call
         writes = []
+        read_lost = False
         def interrupted(tool, args, **kwargs):
+            nonlocal read_lost
             if tool == "manipulate_cart":
                 writes.append(deepcopy(args))
-                result = original(tool, args, **kwargs)
-                if len(writes) == 2:
-                    raise HouseholdError("second batch response lost")
-                return result
+            elif tool == "get_cart" and len(writes) == 2 and not read_lost:
+                read_lost = True
+                raise HouseholdError("second completed batch readback lost")
             return original(tool, args, **kwargs)
         provider.call = interrupted
-        with self.assertRaisesRegex(HouseholdError, "response lost"):
+        with self.assertRaisesRegex(HouseholdError, "needs readback"):
             self.ensure(app, product, 6)
         self.assertEqual(self.quantities(app, provider)[product], 5)
         reopened = Application(StateStore(store.directory, store.config), provider, browser)
@@ -589,6 +648,72 @@ class GroceryTopupTests(unittest.TestCase):
         with self.assertRaises(HouseholdError) as caught:
             client._change_cart({"operations": [{"productId": flow_fixture.MENY_PRODUCT, "quantity": 1}]})
         self.assertNotIsInstance(caught.exception, MenyCartStoppedError)
+
+    def test_changed_cart_before_first_managed_batch_requests_fresh_review_without_dispatch(self):
+        store, provider, _browser, app, product = self.household("meny")
+        original = app._cart_provider_call
+        reads = []
+        def changed(tool, arguments, *, deadline):
+            self.assertEqual(tool, "get_cart")
+            reads.append(tool)
+            if len(reads) == 3:
+                provider._mutate_cart({"operations": [{"productId": product, "quantity": 1}]})
+            if len(reads) > 3:
+                raise HouseholdError("later inspection unavailable")
+            return original(tool, arguments, deadline=deadline)
+        app._cart_provider_call = changed
+        result = flow_fixture.CartPlanTests.sync(app, product, 6)
+        self.assertEqual(result["reason"], "cart_changed_before_first_batch")
+        self.assertEqual(result["status"], "needs_input")
+        self.assertFalse(result["cart_write_pending"])
+        self.assertFalse(store.read().get("pending_cart_change"))
+        self.assertEqual(len(reads), 3)
+
+    def test_managed_meny_typed_stop_records_only_earlier_completed_batches(self):
+        from retail_mcp import RetailPreDispatchError
+        for stop_at in (1, 2):
+            with self.subTest(stop_at=stop_at):
+                store, provider, _browser, app, product = self.household("meny")
+                original = app._cart_provider_call
+                attempts = []
+                def stop(tool, arguments, *, deadline):
+                    if tool == "manipulate_cart":
+                        attempts.append(deepcopy(store.read()["pending_cart_change"]))
+                        if len(attempts) == stop_at:
+                            raise RetailPreDispatchError("deadline before dispatch")
+                    return original(tool, arguments, deadline=deadline)
+                app._cart_provider_call = stop
+                if stop_at == 1:
+                    with self.assertRaises(RetailPreDispatchError):
+                        flow_fixture.CartPlanTests.sync(app, product, 6)
+                else:
+                    stopped = flow_fixture.CartPlanTests.sync(app, product, 6)
+                    self.assertFalse(stopped["synced"])
+                    self.assertEqual(store.read()["cart_plan"]["added_quantities"], {product: 2})
+                self.assertFalse(store.read().get("pending_cart_change"))
+                receipt = store.read()["cart_change_receipts"][attempts[-1]["operation_id"]]
+                self.assertEqual(receipt["status"], "not_dispatched" if stop_at == 1 else "read_back")
+                self.assertEqual(len(attempts), stop_at)
+                self.assertEqual(self.quantities(app, provider)[product], 1 + 2 * (stop_at - 1))
+
+    def test_raw_meny_zero_click_proof_needs_no_post_stop_read(self):
+        from meny import MenyCartStoppedError
+        store, provider, _browser, app, product = self.household("meny")
+        original = provider.call
+        stopped = False
+        def stop(tool, args, **kwargs):
+            nonlocal stopped
+            if tool == "manipulate_cart":
+                stopped = True
+                raise MenyCartStoppedError("no enabled item control")
+            if tool == "get_cart" and stopped:
+                self.fail("a zero-click terminal disposition does not need a second cart read")
+            return original(tool, args, **kwargs)
+        provider.call = stop
+        result = self.ensure(app, product, 3)
+        self.assertEqual(result["status"], "not_dispatched")
+        self.assertFalse(store.read().get("pending_cart_change"))
+        self.assertIn(result["operation_id"], store.read()["cart_change_receipts"])
 
     def test_stopped_meny_batch_keeps_journal_until_earlier_click_is_read_back(self):
         from meny import MenyCartStoppedError

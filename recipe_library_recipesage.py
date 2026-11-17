@@ -27,6 +27,7 @@ from recipe_libraries import (
     validate_library_id,
     validate_library_recipe_ref,
 )
+from core import contains_line_controls
 from recipes import RecipeError, evidence_inputs, normalize_recipe, normalize_source_url, source_ingredient, source_yield, recipe_evidence_fields
 
 
@@ -151,17 +152,10 @@ def _canonical(value: Any) -> str:
 def _text(value: Any, field: str, maximum: int, *, required: bool = True) -> str | None:
     if value is None and not required:
         return None
-    if not isinstance(value, str):
+    if not isinstance(value, str) or contains_line_controls(value):
         raise RecipeLibraryError(f"RecipeSage {field} is invalid")
     result = value.strip()
-    if required and not result:
-        raise RecipeLibraryError(f"RecipeSage {field} is invalid")
-    if len(result) > maximum or any(
-        ord(character) < 32
-        or ord(character) == 127
-        or 0xD800 <= ord(character) <= 0xDFFF
-        for character in result
-    ):
+    if (required and not result) or len(result) > maximum:
         raise RecipeLibraryError(f"RecipeSage {field} is invalid")
     return result or None
 
@@ -1381,12 +1375,12 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         try:
             if stored is None:
                 candidate["schema_version"] = 2
-                candidate["source"]["original"] = {"url": raw.get("url") or None, "publisher": _body(raw.get("source"), "recipe source", 300) or None}
+                candidate["source"]["original"] = {"url": source.get("url"), "publisher": _body(raw.get("source"), "recipe source", 300) or None}
                 if rights["storage"] == "full":
-                    candidate["ingredients"] = [
-                        source_ingredient(text, language=candidate["language"])
-                        for text in candidate["ingredients"]
-                    ]
+                    from recipes import source_ingredient_sections
+                    candidate["ingredients"], empty_sections = source_ingredient_sections(
+                        candidate["ingredients"], language=candidate["language"])
+                    candidate["notes"] = "\n\n".join(part for part in (candidate["notes"], *empty_sections) if part) or None
                     yield_text = _body(raw.get("yield"), "recipe yield", 500)
                     candidate["yield"], candidate["portions"] = source_yield(yield_text)
                     candidate["portions_evidence"] = {"basis": "source" if candidate["portions"] is not None else "unknown", "input": yield_text or None}

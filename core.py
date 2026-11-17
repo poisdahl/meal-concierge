@@ -13,10 +13,21 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
+import unicodedata
 from typing import Any, Callable, Iterator, Mapping
 from zoneinfo import ZoneInfo
 from web_recipes import DEFAULT_WEB_SEARCH, validate_web_search
 from dietary_guidance import NORWEGIAN_PRESET
+
+
+def contains_line_controls(value: str) -> bool:
+    """Controls that cannot be part of a single-line name or identifier."""
+    return any(
+        unicodedata.category(ch) in {"Cc", "Cs", "Zl", "Zp"}
+        or unicodedata.bidirectional(ch) in {"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
+        for ch in value
+    )
 
 
 class HouseholdError(RuntimeError):
@@ -31,10 +42,34 @@ class CancellationPreconditionError(HouseholdError):
     """Cancellation stopped before the final provider control was dispatched."""
 
 
-STATE_VERSION = 13
+STATE_VERSION = 14
 
 RECIPE_SOURCE_IDS = ("internal", "oda", "meny", "mathem", "themealdb", "wikibooks")
 DEFAULT_RECIPE_SOURCES = {source: source != "mathem" for source in RECIPE_SOURCE_IDS}
+# What a household can prefer or use only occasionally. The bank is split into
+# its own saved recipes and each installed collection; "store" is the selected
+# store's recipes and "web" is recipe-website discovery.
+RECIPE_SOURCE_GROUP = re.compile(r"own|store|themealdb|wikibooks|web|collection:[^\x00-\x1f\x7f]{1,128}")
+
+
+def recipe_source_preference(recipes: Mapping[str, Any], group: str) -> str:
+    """preferred, normal or occasional for one source group of the saved profile."""
+    if group in recipes.get("preferred_sources", ()):
+        return "preferred"
+    return "occasional" if group in recipes.get("occasional_sources", ()) else "normal"
+
+
+def _validate_recipe_source_preferences(recipes: Mapping[str, Any]) -> None:
+    preferred, occasional = (recipes.get(field) for field in ("preferred_sources", "occasional_sources"))
+    for values in (preferred, occasional):
+        if (not isinstance(values, list) or len(values) > 16
+                or any(not isinstance(value, str) or RECIPE_SOURCE_GROUP.fullmatch(value) is None for value in values)
+                or len(set(values)) != len(values)):
+            raise HouseholdError("recipe source preferences must list distinct sources: own, store, web, themealdb, wikibooks or collection:<pack_id>")
+    if len(preferred) + len(occasional) > 16:
+        raise HouseholdError("recipe source preferences can name at most 16 sources in total")
+    if set(preferred) & set(occasional):
+        raise HouseholdError("a recipe source cannot be both preferred and occasional")
 
 RECURRING_DEFINITION_FIELDS = frozenset({
     "meal_mode",
@@ -131,6 +166,8 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "repeat_cooldown_weeks": 6,
         "sources": deepcopy(DEFAULT_RECIPE_SOURCES),
         "web_search": deepcopy(DEFAULT_WEB_SEARCH),
+        "preferred_sources": [],
+        "occasional_sources": [],
     },
 }
 
@@ -315,6 +352,7 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
             elif any(not isinstance(x, str) or not x.strip() or len(x) > 500 for x in value):
                 raise HouseholdError(f"profile {path} must contain bounded non-empty text")
     check(profile, DEFAULT_PROFILE, "")
+    _validate_recipe_source_preferences(profile["recipes"])
     pantry = profile["pantry"]
     if not 1 <= pantry["review_interval_days"] <= 366:
         raise HouseholdError("pantry review_interval_days must be from 1 to 366")
@@ -433,6 +471,12 @@ def recurring_schedule(value: Any, today: date) -> dict[str, Any]:
     return result
 
 
+def _flush_drive_cache(descriptor: int) -> None:
+    """Darwin fsync only reaches the drive queue; require its full barrier."""
+    if sys.platform == "darwin":
+        fcntl.fcntl(descriptor, fcntl.F_FULLFSYNC)
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     try:
         encoded = (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n").encode()
@@ -441,16 +485,14 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        try:
-            offset = 0
-            while offset < len(encoded):
-                written = os.write(descriptor, encoded[offset:])
-                if written <= 0:
-                    raise OSError("state write made no progress")
-                offset += written
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError("state write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        _flush_drive_cache(descriptor)
         # The file sync does not persist the directory entry changed by rename.
         # Linux and macOS support directory fsync; do not silently continue if
         # the filesystem rejects it. Open before replace so an open failure
@@ -461,6 +503,10 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             # If this fails, replacement may already be visible. Propagate the
             # error without restoring old state or allowing external dispatch.
             os.fsync(directory)
+            # Flush the device again after the rename's directory metadata.
+            # Keep the same regular-file descriptor; directories need not
+            # support F_FULLFSYNC. Unsupported barriers are errors, not success.
+            _flush_drive_cache(descriptor)
         finally:
             os.close(directory)
     except BaseException:
@@ -469,6 +515,8 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
+    finally:
+        os.close(descriptor)
 
 
 def _normalized_identity(value: Any) -> str:
@@ -731,11 +779,17 @@ def _migrate_state(
     before_v11: Callable[[Mapping[str, Any]], None] | None = None,
     before_v12: Callable[[Mapping[str, Any]], None] | None = None,
     before_v13: Callable[[Mapping[str, Any]], None] | None = None,
+    before_v14: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
+    original_profile = state.get("profile")
+    original_recipes = original_profile.get("recipes") if isinstance(original_profile, dict) else None
+    missing_web_settings = not isinstance(original_recipes, dict) or "web_search" not in original_recipes
+    missing_source_switches = not isinstance(original_recipes, dict) or "sources" not in original_recipes
+    reviewed_setup = isinstance(state.get("setup"), dict) and state["setup"].get("status") == "complete"
     version = state.get("version", 1)
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise HouseholdError("household state version is invalid")
-    if version > 13:
+    if version > STATE_VERSION:
         raise HouseholdError("household state is newer than this meal concierge")
     if version >= 6 and "favorites" in state:
         raise HouseholdError("household state contains the retired favorites key")
@@ -913,9 +967,20 @@ def _migrate_state(
             before_v13(state)
         planning["prepared"] = {}
         state["version"] = 13
+    if state["version"] == 13:
+        if before_v14 is not None:
+            before_v14(state)
+        profile = state.get("profile")
+        recipes = profile.get("recipes") if isinstance(profile, Mapping) else None
+        if not isinstance(recipes, dict):
+            raise HouseholdError("household recipe profile is invalid")
+        for field in ("preferred_sources", "occasional_sources"):
+            recipes.setdefault(field, [])
+        _validate_recipe_source_preferences(recipes)
+        state["version"] = 14
     # Additive migration: do not rewrite legacy settings, frozen email jobs or
     # receipts, and never enqueue an occurrence merely by opening old state.
-    state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment"), str(state.get("provider") or config.get("provider") or "oda").casefold())
+    state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment", config.get("checkout_payment")), str(state.get("provider") or config.get("provider") or "oda").casefold())
     delivery = state.setdefault("recipe_delivery", initial_recipe_delivery(
         legacy=True, legacy_email=valid_email_address(state.get("email_recipient"))))
     preferences = delivery.get("preferences") if isinstance(delivery, dict) else None
@@ -983,6 +1048,10 @@ def _migrate_state(
     if not isinstance(recipe_profile, dict):
         raise HouseholdError("household recipe profile is invalid")
     recipe_profile.setdefault("web_search", deepcopy(DEFAULT_WEB_SEARCH))
+    if missing_web_settings and reviewed_setup:
+        recipe_profile["web_search"]["enabled"] = False
+        state["setup"]["status"] = "needs_review"
+    _validate_recipe_source_preferences(recipe_profile)
     try:
         validate_web_search(recipe_profile["web_search"])
     except ValueError as exc:
@@ -991,6 +1060,9 @@ def _migrate_state(
     if isinstance(cooldown, bool) or not isinstance(cooldown, int) or not 0 <= cooldown <= 260:
         raise HouseholdError("repeat cooldown must be an integer from zero to 260 weeks")
     sources = recipe_profile.setdefault("sources", deepcopy(DEFAULT_RECIPE_SOURCES))
+    if missing_source_switches and reviewed_setup:
+        recipe_profile["sources"] = sources = {key: key == "internal" for key in RECIPE_SOURCE_IDS}
+        state["setup"]["status"] = "needs_review"
     if isinstance(sources, dict) and set(sources) == set(RECIPE_SOURCE_IDS) - {"mathem"}:
         sources["mathem"] = False
     if (
@@ -1063,6 +1135,8 @@ class StateStore:
         self.path = self.directory / "state.json"
         self.lock_path = self.directory / "state.lock"
         self.config = dict(config)
+        from runtime_rollback import note_runtime_open
+        note_runtime_open(self.directory)
         if not self.path.exists():
             _atomic_json(self.path, initial_state(self.config))
         configured_provider = str(self.config.get("provider") or "oda").casefold()
@@ -1128,6 +1202,12 @@ class StateStore:
                     if not backup.exists():
                         _atomic_json(backup, value)
 
+            def backup_v13(value: Mapping[str, Any]) -> None:
+                if source_version == 13:
+                    backup = self.directory / "state-v13.backup.json"
+                    if not backup.exists():
+                        _atomic_json(backup, value)
+
             _migrate_state(
                 state,
                 self.config,
@@ -1139,6 +1219,7 @@ class StateStore:
                 before_v11=backup_v10,
                 before_v12=backup_v11,
                 before_v13=backup_v12,
+                before_v14=backup_v13,
             )
             state_household = state.get("household")
             configured_household = str(self.config["household"])
@@ -1221,24 +1302,34 @@ class StateStore:
             state["profile"] = candidate
             return deepcopy(candidate)
 
-    def reset_profile(self, paths: list[str] | None = None) -> dict[str, Any]:
+    def reset_profile(self, paths: list[str] | None = None, *, include_previous: bool = False) -> dict[str, Any]:
+        if (not isinstance(paths, list) or not 1 <= len(paths) <= 100
+                or any(not isinstance(path, str) or not path or len(path) > 100 for path in paths)
+                or len(set(paths)) != len(paths) or ("*" in paths and paths != ["*"])):
+            raise HouseholdError("reset requires explicit profile paths; use ['*'] only to reset the whole profile")
+        reset_all = paths == ["*"]
         defaults = initial_state(self.config)["profile"]
         with self.locked() as state:
             previous = state["profile"]
             candidate = deepcopy(previous)
-            if not paths:
+            previous_values = {}
+            if reset_all:
                 candidate = defaults
+                previous_values["*"] = deepcopy(previous)
             else:
                 for path in paths:
                     parts = path.split(".")
                     source: Any = defaults
                     target: Any = candidate
+                    original: Any = previous
                     for part in parts[:-1]:
                         if not isinstance(source, dict) or part not in source or not isinstance(target, dict) or part not in target:
                             raise HouseholdError(f"unknown profile field: {path}")
                         source, target = source[part], target[part]
+                        original = original[part]
                     if not isinstance(source, dict) or parts[-1] not in source or not isinstance(target, dict):
                         raise HouseholdError(f"unknown profile field: {path}")
+                    previous_values[path] = deepcopy(original[parts[-1]])
                     target[parts[-1]] = deepcopy(source[parts[-1]])
             if candidate["pantry"]["assume"] != previous["pantry"]["assume"]:
                 candidate["pantry"]["assumptions_accepted"] = False
@@ -1248,12 +1339,13 @@ class StateStore:
                 previous,
                 candidate,
                 provided_meal_fields=(
-                    RECURRING_MEAL_FIELDS if not paths else
+                    RECURRING_MEAL_FIELDS if reset_all else
                     frozenset(path.removeprefix("meals.") for path in paths if path.startswith("meals."))
                 ),
             )
             state["profile"] = candidate
-            return deepcopy(candidate)
+            return ({"profile": deepcopy(candidate), "previous_values": previous_values}
+                    if include_previous else deepcopy(candidate))
 
 
 def mask_email(value: str | None) -> str | None:

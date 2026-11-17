@@ -130,7 +130,7 @@ def _probe(connection: Mapping[str, Any], credential: Mapping[str, Any]) -> dict
 
 def _restart_running_service() -> None:
     if os.uname().sysname == "Darwin":
-        label = os.environ.get("MEAL_CONCIERGE_LAUNCHD_LABEL", "com.hermes-agent.meal-concierge")
+        label = os.environ.get("MEAL_CONCIERGE_LAUNCHD_LABEL", "com.meal-concierge")
         target = f"gui/{os.getuid()}/{label}"
         status = subprocess.run(
             ["launchctl", "print", target],
@@ -310,7 +310,7 @@ def _retirement_inventory(state_directory: Path, library_ids: list[str], househo
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
             metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('household','schema_version')"))
-            if metadata.get("household") != household or metadata.get("schema_version") not in {"1", "2", "3", "4", "5", "6"}:
+            if metadata.get("household") != household or metadata.get("schema_version") not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
                 raise RecipeLibraryError("retirement inventory household or schema differs")
             version = int(metadata["schema_version"])
             for library, values in counts.items():
@@ -442,6 +442,8 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--provider", choices=("mealie", "recipesage"), required=True)
     add.add_argument("--base-url", required=True)
     add.add_argument("--display-name")
+    add.add_argument("--read-only", action="store_true", default=True,
+                     help="New external connections are always read-only (the default)")
     commands.add_parser("retire-external", help="Use builtin for new writes and retain external readers; requires a stopped installation")
     for action in ("test", "update-credential", "remove"):
         command = commands.add_parser(action)

@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import HouseholdError, StateStore
+from agent_views import _recipe_view
 from product_observations import parse_package
 from product_planner import build_product_plan, cart_requirements, menu_requirements
 from recipe_curation import batch_mass
@@ -16,6 +17,7 @@ from recipe_languages import display_recipe, source_text_digest
 from recipe_quantities import parse_measure, read_quantity
 from recipes import normalize_recipe, scale_recipe, source_ingredient
 from service import Application
+from service_common import menu_email_html
 from test_meal_concierge_products import FakeProvider, observation, option, product
 
 
@@ -131,9 +133,21 @@ class SourceUnitTests(unittest.TestCase):
         }}
         recipe = normalize_recipe(recipe)
         before = deepcopy(recipe)
-        displayed = display_recipe(scale_recipe(recipe, 6), 'en')
-        self.assertEqual([row['amount'] for row in displayed['ingredients']], [f'6 {unit}' for unit in english])
+        scaled = scale_recipe(recipe, 6)
+        scaled_before = deepcopy(scaled)
+        displayed = display_recipe(scaled, 'en')
+        expected = [f'6 {unit}' for unit in english]
+        self.assertEqual([row['display_amount'] for row in displayed['ingredients']], expected)
         self.assertEqual([row['unit'] for row in displayed['ingredients']], units)
+        for original, shown in zip(scaled['ingredients'], displayed['ingredients']):
+            for field in ('amount', 'raw', 'quantity', 'unit', 'original_text', 'evidence'):
+                self.assertEqual(shown.get(field), original.get(field))
+        view = _recipe_view('get', {'recipe': displayed}, 0, 20, 'ingredients')
+        self.assertEqual([row['display_amount'] for row in view['ingredients']['items']], expected)
+        rendered = menu_email_html({'week': '2026-W40', 'dishes': [scaled], 'salads': [], 'output_language': 'en'})
+        for amount in expected:
+            self.assertIn(f'{amount} salt', rendered)
+        self.assertEqual(scaled, scaled_before)
         self.assertEqual(recipe, before)
 
     def test_retail_mass_volume_and_piece_counts_need_explicit_practical_packages(self):

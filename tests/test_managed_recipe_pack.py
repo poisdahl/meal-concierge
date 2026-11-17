@@ -114,9 +114,13 @@ class ManagedRecipePackTests(unittest.TestCase):
         bank.set_favorite(publisher["library_recipe_ref"], True, idempotency_key="publisher-favorite")
 
         second_id, second_digest = self.stage(first_records[:1], version="2", revision=2)
+        with self.assertRaisesRegex(HouseholdError, "withdrawal_review"):
+            self.request("import", archive_id=second_id, expected_sha256=second_digest, allow_recipe_removals=True)
+        preview = self.request("inspect", archive_id=second_id)["withdrawals"]
+        self.assertEqual((preview["count"], preview["items"][0]["name"]), (1, "Remove"))
         refreshed = self.request(
             "import", archive_id=second_id, expected_sha256=second_digest,
-            allow_recipe_removals=True,
+            allow_recipe_removals=True, withdrawal_review=preview["review"],
         )
         self.assertEqual((refreshed["unchanged"], refreshed["deleted"]), (1, 1))
         remaining_collection = bank.search(entry_origin="collection", limit=10)
@@ -176,6 +180,8 @@ class ManagedRecipePackTests(unittest.TestCase):
         mcp = types.ModuleType("mcp")
         mcp_server_package = types.ModuleType("mcp.server")
         mcp_server_module = types.ModuleType("mcp.server.mcpserver")
+        exceptions = types.ModuleType("mcp.server.mcpserver.exceptions")
+        exceptions.ToolError = RuntimeError
         mcp_server_module.MCPServer = FakeMCPServer
         spec = importlib.util.spec_from_file_location(
             "managed_recipe_pack_mcp_test", CORE / "mcp_server.py"
@@ -185,6 +191,7 @@ class ManagedRecipePackTests(unittest.TestCase):
             "mcp": mcp,
             "mcp.server": mcp_server_package,
             "mcp.server.mcpserver": mcp_server_module,
+            "mcp.server.mcpserver.exceptions": exceptions,
         }):
             assert spec.loader is not None
             spec.loader.exec_module(module)
@@ -194,6 +201,7 @@ class ManagedRecipePackTests(unittest.TestCase):
         payload = b"synthetic local recipe collection"
         (downloads / "collection (1).zip").write_bytes(payload)
         module.rpc = mock.Mock(return_value={"available": True})
+        os.chown(self.inbox, -1, os.getegid())
         self.inbox.chmod(0o2770)
         with mock.patch.dict(os.environ, {
             "MEAL_CONCIERGE_RECIPE_PACK_DOWNLOADS": str(downloads),

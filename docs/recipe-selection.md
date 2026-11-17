@@ -5,7 +5,8 @@ Ordinary plans accept `planning_mode="ad_hoc"` and exact dates or
 calendar weeks and include up to seven eating dates. Without an explicit week,
 ad-hoc is the default; explicit weekly requests preserve calendar behavior.
 The saved scope retains those dates and relative batch sessions. Short plans
-do not automatically inherit full-week numeric quotas; explicit strict targets
+do not automatically inherit full-week numeric quotas; relative day-number plans
+shorter than the household's usual dinner count follow the same policy. Explicit strict targets
 remain enforced and saved dietary preferences still guide the agent.
 
 For ordinary open-ended planning, the host model compares a bounded candidate
@@ -14,6 +15,8 @@ It reads exact full recipes before choosing. Disabled/unavailable sources and
 explicit user recipe choices do not require extra searches. Dietary fit, practical
 suitability and variety take priority; source diversity is a tie-breaker, not a
 quota. A suitable plan may therefore use recipes from a single source.
+[Source preferences](#source-preferences) decide between sources when recipes
+fit comparably.
 The host applies the actual saved dietary text; free-text guidelines are not
 automatically enforced by the ranking score or recipe-readiness checks.
 Send `selection_mode="agent"`, chronological dates and ordered exact references
@@ -23,6 +26,11 @@ settings. Numeric goals are assessed but advisory unless named in `strict_target
 Dietary hard rules, cooldown, source binding and readiness remain enforced.
 The automatic collection/ranking behavior below remains available in `ranked`
 mode and to clients that omit `selection_mode`.
+
+For a complete ranked period, saved positive numeric minima and the saved
+leafy-green dinner range are checked before returning a save reference. Missing
+evidence returns `needs_input`; a known infeasible set returns `no_plan`. Saving
+the unchanged result uses the same minimum policy.
 
 `recipe_selection.py` supplies the compact projection, source-family grouping,
 context queries, bounded retrieval and shortlist used by automatic selection.
@@ -68,8 +76,7 @@ Known publisher/opaque source IDs and identity-preserving URLs join source
 families, including saved and web versions. Tracking parameters and observed
 retailer URL aliases do not split families; unknown identity and revision query
 parameters remain significant. Similar titles or ingredient names do not join
-families. Exact versions and local edits survive. Ready saved versions take
-precedence within a family, but a draft cannot hide a usable web version.
+families. Exact versions and local edits survive. Ready versions come first within a family. Source priority and then saved status decide between equally usable versions.
 Known family usage blockers are combined without rewriting history. The
 request-local history index reads retained menu/order documents, then exact
 local bank/discovery references where necessary. It never scans the catalog,
@@ -84,6 +91,20 @@ never-used ranking bonus. Application applies this at candidate resolution and
 save-time revalidation. Known recorded usage remains visible even when other
 historical source identities are unresolved. Explicit feedback is applied before
 shortlisting and refreshed through the same family keys before planning.
+
+Ranked planning draws only from active bank entries and active exact revisions.
+Its bank window rotates within each source tier based on the planning dates and
+saved menu history. Identical inputs reproduce the same proposal. When all tiers
+have entries, each retrieval cycle examines three preferred, two normal and one
+occasional entries. Enabled sources remain candidates under every preference.
+Eligibility and dietary constraints apply before ranking. Equal scores use
+source priority, then saved status, then exact reference. An unsaved v6 proposal
+must be regenerated; saved menus retain their snapshots and assessments.
+
+A retained original from one explicitly bound retailer with no secondary
+attribution can be excluded from a different retailer's original-only family.
+Missing references, user records without attribution, and cross-publisher
+aliases keep coverage partial. The work-limit outcome applies to every family.
 
 The shortlist is bounded by `math.perm(candidate_count, days) <= 250000`, as well
 as the existing 12-candidate maximum. For seven days nine candidates fit
@@ -104,7 +125,7 @@ establish meal completeness. Explicitly requested other meals use menu
 Unknown/non-scalable ingredient measures remain visible in saved menus with
 `scaling_ready=false`, and products remain unresolved without invented amounts.
 
-Planner version `weekly-menu-v6` adds attributed leafy-green assessment to
+Planner version `weekly-menu-v7` retains attributed leafy-green assessment to
 category-aware dinner selection and retains exact recipe-tag matches for
 `cuisine.wanted`/`flavours`, personal favorites, documented English/Norwegian
 food-category matches for `diet.prioritise`, and a weekly range in
@@ -163,6 +184,18 @@ clients. Full details use the exact bank ID/revision or discovery ref, never a
 summary masquerading as a recipe. Offset pages can change during concurrent
 catalog edits; every selected revision is re-resolved and checked before use.
 
+Full discovery filters local cooldown/provider eligibility while scanning up to
+200 ordered bank rows or eight seconds, rather than filtering only the first
+source share. The bank can fill slots unused by other sources, up to the requested
+total limit. Preferred/occasional group ordering is preserved; draft previews
+remain visibly marked as drafts. The internal source reports `examined` and
+`exhausted`, and `search_limit` when a bounded scan found no eligible results.
+An empty bounded page is not a claim that the whole bank is empty.
+Return its `next_cursor` unchanged with the same query/week to continue the local
+bank only; optional source searches are not repeated. The cursor is bound to the
+provider, group preferences and cooldown policy. Start a new search after changing
+those settings or editing the bank, whose live offset order can change.
+
 MENY detail results and client-assisted conversions use a bounded disposable
 SQLite metadata memo keyed by exact source ref, digest, schema and transform
 version. Immutable snapshots retain their existing expiry and storage limits;
@@ -172,6 +205,54 @@ expired details are not reused. Conversion action `convert` requires
 quantity evidence. Usable estimates remain visibly estimated and need no separate approval for
 planning; optional personal acceptance uses the exact `accept_estimates` operation. Accepted conversions remain reachable on the next
 automatic request. No personal save/favorite or additional model service occurs.
+
+## Source preferences
+
+A household can mark a recipe source as `preferred` or `occasional`; every
+other source is normal. The setting is `profile.recipes.preferred_sources` and
+`occasional_sources`, two lists of source groups:
+
+| Group | Recipes |
+|---|---|
+| `own` | The household's own saved recipes in the bank. |
+| `collection:<pack_id>` | One installed collection in the bank. |
+| `store` | The selected store's recipes. |
+| `web` | Recipes found through recipe-website discovery. |
+| `themealdb`, `wikibooks` | The two open English-language databases. |
+
+A group can be in one list only, and the two lists hold at most 16 groups in
+total. Preferences do not switch anything on or off; `recipes.sources` and
+`recipes.web_search` still do that, and the household's own recipes and its
+collections share the bank's one switch (`internal`). Setup `show`/`apply`
+and profile `overview` return `recipe_source_overview`: one row per source
+with `id`, `label`, `enabled`, `preference`, the bank groups' recipe counts
+(null when the bank cannot be read) and the enabled websites. Change preferences with setup `apply` and
+`changes.recipe_source_preferences={preferred:[...],occasional:[...]}`; a
+supplied list replaces the saved one and a source moved to one level leaves
+the other.
+
+Where preferences apply:
+
+- Bank pages (`projection=summary`, `source=internal`, and the automatic
+  collector) list preferred groups first and occasional groups last, then by
+  most recently updated as before. With no preference saved the order is
+  unchanged.
+- Candidate summaries carry `source_group`, and `source_preference` when it is
+  not normal. Discovery results repeat the saved lists as `source_preferences`
+  so the host model can follow them in `agent` mode.
+- In `ranked` mode a preferred source adds 4 points per meal and an occasional
+  source subtracts 4. This is a nudge between comparable dishes, not a filter:
+  a dietary deviation (−30) outweighs it, and preferred against occasional
+  (8 points) stays below the 10 points that separate a dish above the
+  cooking-time maximum from one merely outside the weekday target. A recipe
+  from an occasional source that fits the evening better can still win.
+- Full cross-source discovery asks every enabled source for the same share and
+  lists preferred sources first and occasional sources last, so the occasional
+  ones are what the overall limit cuts.
+
+The shortlist no longer drops every saved recipe in favour of store or web
+discoveries when scores are equal. Preferences never override hard dietary
+rules, cooldown, source binding or an explicit recipe choice.
 
 ## Request-scoped available ingredients
 

@@ -79,6 +79,6 @@ class WithdrawalTests(unittest.TestCase):
             self.assertEqual(result['counts']['wikibooks.withdrawn'],1)
             report=apply_archive(new,state.directory,'withdrawal-test',expected)
             self.assertEqual((report['deleted'],report['deleted_favorites']),(1,1))
-            self.assertEqual(report['withdrawals'],[{'recipe_id':'wikibooks:123',**reasons['wikibooks:123']}])
+            self.assertEqual(report['withdrawals'],[{'recipe_id':'wikibooks:123','name':removed['name'],'was_favorite':True,**reasons['wikibooks:123']}])
             self.assertEqual(state.path.read_bytes(),frozen)
             self.assertEqual([row['pack']['recipe_id'] for row in bank.search(limit=10)],['wikibooks:124'])

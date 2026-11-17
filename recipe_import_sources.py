@@ -24,7 +24,7 @@ import ssl
 import threading
 import time
 from typing import Any, Iterator, Mapping
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from recipe_import_readers import (
     MAX_EXPORT_BYTES, MAX_RECORD_BYTES, MAX_RECORDS, MAX_WEBPAGE_BYTES, MAX_MEALIE_COVER_BYTES,
@@ -147,11 +147,38 @@ class _PinnedConnection(http.client.HTTPConnection):
             raise RecipeImportSourceError("source DNS or connection is unavailable") from None
 
 
+def _same_site_redirect(requested, response) -> str:
+    """Name where the same site moved the page, so the caller can ask for that address.
+
+    Nothing is followed. Another site, a credential or a non-HTTPS target is not repeated.
+    """
+    location = response.headers.get("Location")
+    if not isinstance(location, str) or not location:
+        return ""
+    try:
+        raw_target = urljoin(requested.geturl(), location)
+        parts = urlsplit(raw_target)
+        if parts.query or parts.fragment:
+            return ""
+        target = _url(raw_target, "redirect target")
+        moved = urlsplit(target or "")
+        hosts = {(requested.hostname or "").casefold().removeprefix("www."), (moved.hostname or "").casefold().removeprefix("www.")}
+        if moved.scheme != "https" or moved.port not in {None, 443} or len(hosts) != 1 or target == requested.geturl():
+            return ""
+        # Only a short plain address is repeated: the path is the site's own text,
+        # and a non-ASCII one cannot be read back reliably from the header.
+        if len(target) > 300 or not target.isascii() or not target.isprintable():
+            return ""
+    except (RecipeImportSourceError, RecipeImportReaderError, ValueError):
+        return ""
+    return f"; the same site moved this page to {target}"
+
+
 def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
                authorization: str | None = None,
                search_api_key: str | None = None,
                accept: str = "application/json, text/html, application/xhtml+xml",
-               json_body: dict | None = None) -> tuple[bytes, str]:
+               json_body: dict | None = None, public_product_validator: dict | None = None) -> tuple[bytes, str]:
     """Fixed-origin GET. Only an independently configured origin permits private IPs."""
     checked = _url(url, "source URL")
     if not checked:
@@ -194,6 +221,16 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
     if port != (443 if parsed.scheme == "https" else 80):
         authority += f":{port}"
     headers = {"Host": authority, "Accept": accept, "Accept-Encoding": "identity", "User-Agent": "meal-concierge/source-import-v1"}
+    if public_product_validator is not None:
+        # Validators only apply to anonymous retailer detail reads.
+        if (configured_origin is not None or authorization or search_api_key or json_body is not None
+                or not re.fullmatch(r"https://(?:oda\.com/no|www\.mathem\.se/se)/products/[1-9][0-9]{0,19}(?:-[A-Za-z0-9._~-]+)?/", checked)):
+            raise RecipeImportSourceError("invalid public product validator destination")
+        tag = public_product_validator.get("if_none_match")
+        if tag is not None:
+            if not isinstance(tag, str) or not re.fullmatch(r'"[!#-~]{1,128}"', tag):
+                raise RecipeImportSourceError("invalid public product validator")
+            headers["If-None-Match"] = tag
     if checked.startswith("https://www.matprat.no/api/ContentSearch/Search?"):
         # The publisher's public search requires its own search-page referrer.
         headers["Referer"] = "https://www.matprat.no/sok/"
@@ -213,8 +250,17 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
         else:
             connection.request("POST", path, body=_wire_json(json_body), headers=headers)
         response = connection.getresponse()
+        if public_product_validator is not None:
+            tags = response.headers.get_all("ETag", [])
+            if len(tags) == 1 and re.fullmatch(r'"[!#-~]{1,128}"', tags[0]):
+                public_product_validator["etag"] = tags[0]
+            if response.status == 304 and headers.get("If-None-Match") and public_product_validator.get("etag") == headers["If-None-Match"]:
+                public_product_validator["unchanged"] = True
+                return b"", ""
         if 300 <= response.status < 400:
-            raise RecipeImportSourceError("source redirects are forbidden")
+            # Only a plain public page read reports where its own site moved it.
+            plain = configured_origin is None and search_header is None and json_body is None
+            raise RecipeImportSourceError("source redirects are forbidden" + (_same_site_redirect(parsed, response) if plain else ""))
         if response.status != 200:
             raise RecipeImportSourceError(f"source request failed with HTTP {response.status}")
         if response.headers.get("Content-Encoding", "identity").casefold() != "identity":
@@ -262,7 +308,7 @@ def firecrawl_request(endpoint: str, payload: dict, *, api_key: str | None = Non
         **({"search_api_key": api_key} if api_key is not None else {}))
     try:
         value = json.loads(raw)
-    except (ValueError, UnicodeError) as exc:
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise RecipeImportSourceError("Firecrawl returned invalid JSON") from exc
     if content_type != "application/json" or not isinstance(value, dict) or value.get("success") is not True or not isinstance(value.get("data"), dict):
         raise RecipeImportSourceError("Firecrawl response is unavailable or incompatible")
@@ -295,8 +341,8 @@ def _firecrawl_page(url: str) -> bytes:
 def fetch_public_webpage(url: str, *, fetch_method: str = "direct") -> dict[str, Any]:
     """Fetch once: structured recipes or bounded text requiring host interpretation.
 
-    Embedded contexts, images and links stay inert. Malformed JSON-LD is an
-    explicit failure, not a reason to silently switch extraction methods.
+    Embedded contexts, images and links stay inert. Malformed JSON-LD returns an
+    explicit structured_error with visible text requiring host interpretation.
     """
     if fetch_method == "firecrawl":
         raw = _firecrawl_page(url)
@@ -307,7 +353,7 @@ def fetch_public_webpage(url: str, *, fetch_method: str = "direct") -> dict[str,
     else:
         raise RecipeImportSourceError("fetch_method must be direct or firecrawl")
     result = read_webpage(raw, source_url=url)
-    result["recipes"] = [_source_result(record, {"kind": "web", "url": url})
+    result["recipes"] = [_source_result(record, {"kind": "web", "url": url, "source_sha256": result["source_sha256"]})
                          for record in result["recipes"]]
     result["fetch_method"] = fetch_method
     return result
@@ -509,12 +555,19 @@ def _recipesage_record(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise RecipeImportSourceError("RecipeSage native labels/images are incompatible") from exc
     instructions = [{"@type": "HowToSection", "name": line[1:-1]} if re.fullmatch(r"\[.*\]", line)
                     else {"@type": "HowToStep", "text": line} for line in lines("instructions")]
+    try:
+        original_url = _url(raw.get("url"), "RecipeSage original URL")
+    except RecipeImportReaderError:
+        if isinstance(raw.get("url"), str) and raw["url"].strip().casefold().startswith(("http://", "https://")):
+            raise
+        original_url = None
+        ignored.append("url")
     jsonld = {
         "@type": "Recipe", "identifier": raw.get("id"), "name": raw.get("title"),
         "description": raw.get("description"), "recipeIngredient": lines("ingredients"),
         "recipeInstructions": instructions, "recipeYield": raw.get("yield"),
         "prepTime": raw.get("activeTime"), "totalTime": raw.get("totalTime"),
-        "recipeCategory": categories, "creditText": raw.get("source"), "isBasedOn": raw.get("url"),
+        "recipeCategory": categories, "creditText": raw.get("source"), "isBasedOn": original_url,
         "image": image_urls, "comment": [{"@type": "Comment", "name": "Author Notes", "text": notes}],
     }
     record = read_recipesage_export(_wire_json({"recipes": [jsonld]}))[0]

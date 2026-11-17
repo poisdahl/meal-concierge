@@ -224,7 +224,20 @@ class MenuOccurrenceEditsTests(unittest.TestCase):
         menu = expanded["menu"]
         self.assertEqual(menu["batches"][0]["prepared_portions"], {"numerator": 6, "denominator": 1})
         self.assertEqual(menu["batches"][0]["storage"], {"basis": "unknown"})
-        self.assertNotIn("confirmation", menu["batches"][0])
+        batch = menu["batches"][0]
+        self.assertNotIn("confirmation", batch)
+        self.assertIn("storage_review", batch)
+        review = {"action": "review_storage", "source_slot_id": source["slot_id"],
+                  "spec_digest": batch["spec_digest"], "suitability": spec["suitability"],
+                  "storage": spec["storage"]}
+        with self.assertRaisesRegex(HouseholdError, "changed"):
+            self.edit(menu, [{**review, "spec_digest": "a" * 64}], "stale-storage")
+        with self.assertRaisesRegex(HouseholdError, "does not cover"):
+            self.edit(menu, [{**review, "storage": {**spec["storage"], "max_interval_days": 1}}], "too-short")
+        reviewed, _ = self.edit(menu, [review], "review-edited-storage")
+        menu = reviewed["menu"]
+        self.assertEqual(menu["batches"][0]["storage"], spec["storage"])
+        self.assertNotIn("storage_review", menu["batches"][0])
         self.app.handle({"operation": "recipes", "action": "mark_cooked", "menu_id": menu["menu_id"],
                          "expected_revision": menu["revision"], "slot_id": source["slot_id"],
                          "actual_batch": {"prepared_portions": "6", "consumed_at_source": "2"}})

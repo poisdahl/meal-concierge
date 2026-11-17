@@ -10,6 +10,12 @@ Give the agent a recipe link, paste the text or attach a supported file:
 
 > Read this recipe, show me the ingredients and portions, then save it when I confirm.
 
+Or simply paste the link or the text and say "save this recipe". The agent reads
+it, translates it to your language and metric measures when needed, and saves it
+in a form you can plan and shop from. Each ingredient keeps its original line.
+Amounts the source states stay marked as source amounts; anything the agent had
+to work out, such as cups, a can or "1 onion", is saved as a labelled estimate.
+
 Check the preview before saving. Before importing text or a URL, the agent must
 record a concrete basis for storing the full recipe privately: your own recipe,
 permission, a verified license or an applicable private-use assessment. Public
@@ -51,14 +57,19 @@ User-supplied recipe links and text still work with automatic web search off.
 | Recipe webpage | Send the link. The agent reads supported recipe data or visible text; inaccessible or incomplete pages may need pasted text. |
 | Your own text | Paste ingredients, portions and steps. |
 | Photo or PDF | Attach it to an agent that can read the file. Review extracted quantities and all relevant pages. |
-| Mealie | Import through a configured connection or a supported recipe JSON/recipe-export ZIP. This is not a full account restore. |
-| RecipeSage | Import through a configured connection or its supported JSON-LD export. |
+| Mealie | Import through a configured connection. |
+| RecipeSage | Import through a configured connection. |
 
 Mealie and RecipeSage are optional import sources. You do not need either service
 to save or use recipes. Ask the installing agent to configure a connection if
 you want to import from your account; enter credentials through its private
 setup, never in chat. New saves and edits stay in Meal Concierge rather than
 writing back to those services.
+
+The chat import tool does not accept Mealie ZIP/JSON or RecipeSage export files
+directly. The [technical reference](recipe-import-reference.md#native-source-extraction)
+documents offline readers for integrations; inspecting an export with those
+readers does not save its recipes into your household.
 
 Photos and covers depend on available source images and your agent's attachment
 support. A link to an image does not mean the image was downloaded. The agent

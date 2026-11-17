@@ -298,6 +298,14 @@ def page(raw):
 
 
 class ReaderTests(unittest.TestCase):
+    def test_source_labels_reject_controls_and_source_prose_keeps_lines(self):
+        recipe = recipesage_fixture()
+        recipe.update(name="Brød", description="Første linje.\nAndre linje.")
+        self.assertEqual(read_one(recipe)["extracted"]["description"], recipe["description"])
+        for label in ("Brød\u2028loaf", "Brød\u202eloaf"):
+            with self.subTest(label=label), self.assertRaisesRegex(RecipeImportReaderError, "single-line"):
+                read_one(dict(recipe, name=label))
+
     def test_actual_export_shape_preserves_text_and_reports_losses(self):
         record = read_one()
         raw = record["extracted"]
@@ -2234,8 +2242,11 @@ class WebpageTextTests(unittest.TestCase):
         self.assertNotIn('source', footer_result['source_context']['metadata_basis'].values())
 
     def test_malformed_structured_recipe_does_not_silently_downgrade(self):
-        with self.assertRaises(RecipeImportReaderError):
-            read_webpage('<script type="application/ld+json">{bad}</script><p>Soup</p>', source_url='https://example.org')
+        result = read_webpage('<script type="application/ld+json">{bad}</script><p>Soup</p>', source_url='https://example.org')
+        self.assertEqual(result['mode'], 'text')
+        self.assertEqual(result['recipes'], [])
+        self.assertTrue(result['requires_interpretation'])
+        self.assertEqual(result['structured_error']['code'], 'structured_recipe_unavailable')
 
     def test_oversize_empty_and_unclosed_hidden_content_fail(self):
         for html in ('<p>' + 'x' * (MAX_WEBPAGE_TEXT_BYTES + 1) + '</p>', '<script>x</script>', '<script>closed never', '<span>' * 129 + 'text'):
@@ -2343,7 +2354,7 @@ class PrivatePortableTests(unittest.TestCase):
         with self.assertRaises(FileExistsError): self.export()
         self.assertEqual(self.output.read_bytes(),original)
 
-    def test_collection_origin_uses_private_schema_two_and_restores(self):
+    def test_collection_origin_with_status_provenance_uses_schema_three_and_restores(self):
         with self.store._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -2351,7 +2362,7 @@ class PrivatePortableTests(unittest.TestCase):
                 (self.identity,),
             )
         manifest = self.export()
-        self.assertEqual(manifest["private_schema_version"], 2)
+        self.assertEqual(manifest["private_schema_version"], 3)
         with open_private_archive(self.output) as archive:
             archive.verify()
             entries = {group["entry"]["id"]: group for group in archive.recipe_entries()}
@@ -2450,9 +2461,9 @@ class PrivatePortableTests(unittest.TestCase):
     def test_wrong_household_schema_wal_and_inconsistent_head(self):
         with self.assertRaises(RecipeError): export_private_archive(self.output,RecipeStore(self.store.path,'other'))
         connection=sqlite3.connect(self.store.path)
-        connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'"); connection.commit()
+        connection.execute("UPDATE metadata SET value='99' WHERE key='schema_version'"); connection.commit()
         with self.assertRaises(RecipeError): self.export()
-        connection.execute("UPDATE metadata SET value='6' WHERE key='schema_version'")
+        connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
         connection.execute("UPDATE recipes SET updated_at='different' WHERE id=?",(self.identity,)); connection.commit()
         with self.assertRaises(RecipeError): self.export()
         connection.execute('PRAGMA journal_mode=WAL'); connection.close()
@@ -2662,6 +2673,23 @@ class PrivateCLITests(unittest.TestCase):
 
     def export(self,**options):
         return self.invoke('--export-private',self.output,'--installation-home',self.home,**options)
+
+    def test_planning_only_external_cli_uses_the_state_and_listener_ownership(self):
+        self.meta['manager'] = 'external'
+        config = self.home / 'config.json'
+        install.write_json(config, {'provider':'none','household':self.household})
+        self.meta['paths'] = {'state':str(self.state), 'config':str(config), 'socket':self.meta['paths']['socket']}
+        install.write_json(self.home / 'runtime.json', self.meta)
+        install.write_json(self.state/'state.json', {'household':self.household,'provider':'none'})
+        with install.data_ownership(self.meta), self.assertRaisesRegex(SystemExit, 'ownership locks'):
+            self.export()
+        self.assertFalse(self.output.exists())
+        self.assertTrue(self.export()['exported'])
+        self.output.unlink()
+        install.write_json(config, {'provider':'oda','household':self.household})
+        with self.assertRaisesRegex(SystemExit, 'matching runtime.json'):
+            self.export()
+        self.assertFalse(self.output.exists())
 
     def test_actual_main_exports_manifest_state_history_and_cover(self):
         before=(self.state/'recipes.sqlite3').read_bytes()

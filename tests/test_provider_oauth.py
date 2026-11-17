@@ -330,6 +330,8 @@ class ProviderOAuthTests(unittest.TestCase):
                 self.assertEqual(wire.methods, [])
                 self.assertEqual(storage.tokens_path.read_bytes(), old)
                 self.assertEqual(json.loads(storage.transaction_path.read_text())["status"], "pending")
+                status = asyncio.run(storage.status())
+                self.assertEqual((status["exchange_kind"], status["recovery"]), ("refresh", "explicit_login"))
                 restarted = ProviderWire()
                 with use_wire(restarted), self.assertRaisesRegex(HouseholdError, "outcome is uncertain"):
                     RetailMcpClient(root).call("get_cart", {})
@@ -434,7 +436,7 @@ class ProviderOAuthTests(unittest.TestCase):
             processes.append(second)
             second.start()
             blocked = output.get(timeout=15)
-            self.assertEqual(blocked[0:2], ("error", "HouseholdError"))
+            self.assertEqual(blocked[0:2], ("error", "RetailPreDispatchError"))
             self.assertIn("another Oda operation is active", blocked[2])
             self.assertEqual(blocked[3], 0)
             release.set()
@@ -640,6 +642,18 @@ class ProviderOAuthTests(unittest.TestCase):
         finally:
             logger.removeHandler(handler)
             logger.setLevel(previous_level)
+
+    def test_explicit_reauthorization_keeps_uncertain_original_receipt(self):
+        _, storage = seed(self.directory)
+        storage.begin_exchange("refresh")
+        original = storage.read(storage.transaction_path)
+        with self.assertRaisesRegex(HouseholdError, "explicit login"):
+            storage.begin_exchange("refresh")
+        storage.begin_exchange("authorization_code")
+        receipt = storage.directory / f"{storage.server_name}.superseded-{original['exchange_id']}.json"
+        self.assertEqual(storage.read(receipt), {"exchange_id": original["exchange_id"],
+                         "kind": "refresh", "outcome": "uncertain"})
+        self.assertNotEqual(storage.read(storage.transaction_path)["exchange_id"], original["exchange_id"])
 
     def test_status_is_secret_free_and_does_not_recover_or_create_files(self):
         _, storage = seed(self.directory)

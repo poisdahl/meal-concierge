@@ -6,6 +6,42 @@ Use its returned `discovery_ref` with `recipe_write` only when saving is wanted;
 retain the exact reference and stable idempotency key on recovery. A draft or
 link-only bookmark is not a complete shopping recipe.
 
+## A link or text the user pasted
+
+When the user sends a recipe link or pastes recipe text and wants to keep it,
+carry it through to a saved recipe in this turn; do not stop at a preview
+unless they only asked to look. Their request to keep it for the household is
+the storage basis: `{storage:"full",basis:"private_use",evidence:"User supplied
+this link/text and asked to save it for household use."}`; use `own_recipe`
+when the text is their own recipe. Do not ask them about storage rights.
+
+1. Import it. A link: `source_kind="url"` with the exact URL; if the result
+   asks for an interpretation, repeat the call with quotes from the returned
+   text. If the error says the same site moved the page, import the address it
+   names. Pasted text: `source_kind="transcript"`, `kind="pasted_text"`, with the
+   text as page 1 and exact quotes for every ingredient line and step. Add the
+   serving line as `yield`. For a line without a usable amount (a count such as
+   "1 onion", a can, a cup) give `estimated_amount` and, beside it, `item` with
+   the plain ingredient name.
+2. If the recipe is not in the user's language, uses non-metric measures, or
+   the result lists `missing_decisions`, make one `convert` call with `changes`
+   (below) instead of rebuilding the recipe.
+3. Save with `recipe_write`, the returned `discovery_ref` and
+   `status=suggested_status`. Tell the user the saved name, portions and source,
+   and name anything still unresolved in a draft.
+
+`convert` `changes` on the exact `discovery_ref`, `recipe_digest` and
+`source_schema_version`: `language`, `name`, `notes`, complete translated
+`steps`, `estimated_portions={quantity,assumptions}` only when servings are
+unknown, and `ingredients=[{index,item,notes,quantity,unit,assumptions}]` by
+zero-based index. Give each ingredient the name the user's store would use.
+`item` and `notes` alone rename a line and keep its source amount untouched.
+Supply `quantity`/`unit` with `assumptions` only where you read or convert an
+amount (cups to dl, a can to grams, a bare count to `stk`); those are labelled
+as estimates. Changing `tbsp` to `ss` or `tsp` to `ts` is a relabel. Keep times,
+temperatures and the source's own amounts as written. Substituting or splitting
+ingredients is `adapt`, not `convert`.
+
 ## Web discovery and a single correctness check
 
 Pass the search's `search_context` unchanged to `web_read` and URL import with
@@ -113,7 +149,8 @@ A complete schema-2 `recipe` is still supported instead of `changes`. Preserve
 source attribution/rights and original text, set `source.relationship="adapted"`,
 and retain estimate assumptions. Never copy a scaled display's calculated
 provenance into a reconstructed original. `convert` changes representation while
-preserving source facts; it is not a substitute for adaptation.
+preserving source facts; it is not a substitute for adaptation. Prefer its
+bounded `changes` (above) to a complete replacement recipe.
 
 Oda, Mathem and MENY snapshots retain their original provider binding, even
 after adaptation. Do not relabel store content as neutral to shop elsewhere.

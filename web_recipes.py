@@ -58,9 +58,16 @@ def search_digest(settings):
 
 def url_enabled(url, settings):
     """Disabled parent domains also exclude their subdomains in broad search."""
+    if not isinstance(url, str) or len(url) > 2048:
+        return False  # The fetch refuses longer addresses; do no work on them here either.
     try:
-        parsed = urlsplit(url or "")
+        parsed = urlsplit(url)
         host = (parsed.hostname or "").lower().rstrip(".")
+        if len(host) > 253:
+            return False
+        # Compare the name the fetch will actually resolve: a full-width letter
+        # or soft hyphen must not make a disabled site look like another host.
+        host = host.encode("idna").decode("ascii")
         port = parsed.port
     except (ValueError, TypeError):
         return False
@@ -272,7 +279,7 @@ def _brave_search(settings, query, api_key):
         web = value.get("web")
         hits = [] if web is None else web["results"]
         return _records(hits)
-    except (ValueError, TypeError, KeyError, UnicodeError):
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         raise RecipeImportSourceError("Brave search response is unavailable or incompatible") from None
 
 
@@ -314,7 +321,7 @@ def search_web(settings, query, backend=None, *, config=None, scope="selected_si
             try:
                 hits = _filtered_hits(_source_search(domain, query.strip()), settings)
                 return {"domain": domain, "status": "completed", "count": len(hits)}, hits
-            except (RecipeImportSourceError, ValueError, TypeError, KeyError, IndexError):
+            except (RecipeImportSourceError, ValueError, TypeError, KeyError, IndexError, RecursionError):
                 return {"domain": domain, "status": "unavailable", "count": 0,
                         "reason": "First-party search unavailable or incompatible"}, []
         sites = [s for s in plan["settings"]["sites"] if s["enabled"]]

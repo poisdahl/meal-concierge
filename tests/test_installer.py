@@ -592,7 +592,9 @@ class InstallerTests(unittest.TestCase):
         release = code / 'r1'; release.mkdir()
         config = home / 'config.json'
         meta = {'code_root': str(code), 'paths': {'config': str(config), 'state': str(home / 'state')}}
+        import build_identity
         with patch.object(install, 'stage_release', return_value=release), \
+             patch.object(install, 'preflight_program'), patch.object(install, 'candidate_identity', side_effect=build_identity.read), \
              patch.object(install, 'offline', side_effect=lambda _: nullcontext()), \
              patch.object(install, 'migrate'), patch.object(install, 'write_unit'), \
              patch.object(install.urllib.request, 'urlopen', side_effect=AssertionError('unexpected recipe network')), \
@@ -1056,9 +1058,9 @@ class InstallerTests(unittest.TestCase):
         old = RecipeStore(state / 'recipes.sqlite3', CONFIG['household']).get('rec_v1', 1)
         self.assertEqual(old['name'], RECIPE['name'])
         self.assertEqual(old['library_recipe_ref']['version'], '1')
-        self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 13)
+        self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 14)
         with sqlite3.connect(state / 'recipes.sqlite3') as db:
-            self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '6')
+            self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '8')
             self.assertEqual(db.execute('select response_json from idempotency where key=?', ('v1-key',)).fetchone()[0], '{"id":"rec_v1"}')
         (state / 'recipes.sqlite3').write_bytes(b'broken database')
         with self.assertRaises(subprocess.CalledProcessError):

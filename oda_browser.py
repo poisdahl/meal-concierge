@@ -417,6 +417,7 @@ def _oda_checkout_amount_script(
  const itemizedMatches=expectedItemizedDiscounts===null||JSON.stringify(canonical(itemizedDiscountBindings))===JSON.stringify(canonical(expectedItemizedDiscounts));
  const ready=urlMatches&&controlMatches&&amountsValid&&amountMatches&&itemizedMatches;
  if(!ready){
+   if(!RETAIN_DIAGNOSTIC)return JSON.stringify({clicked:false});
    const expectedRows=expectedItemizedDiscounts||[],rowCount=Math.max(expectedRows.length,itemizedDiscountBindings.length),mismatchIndexes=[];
    for(let index=0;index<rowCount;index++)if(JSON.stringify(canonical(itemizedDiscountBindings[index]))!==JSON.stringify(canonical(expectedRows[index])))mismatchIndexes.push(index);
    const prefix=row=>{const match=typeof row?.label==='string'?row.label.match(/^([1-9]\d{0,5})kr:/i):null;return match?Number(match[1]):null};
@@ -431,6 +432,7 @@ def _oda_checkout_amount_script(
             "AMOUNT_LABELS",
             json.dumps(labels, ensure_ascii=False, separators=(",", ":")),
         )
+        .replace("RETAIN_DIAGNOSTIC", json.dumps(retry or addition_retry))
         .replace("TOTAL", json.dumps(expected_total))
         .replace("ADDITION_GOODS", json.dumps(addition_goods_minor if addition_goods_minor is not None else expected_total))
         .replace("PRODUCT_LABEL",
@@ -679,6 +681,12 @@ def _checkout_item_counts(items: Any) -> tuple[int | None, int | None]:
     return len(items), quantity_count
 
 
+def _click_receipt(result):
+    if not isinstance(result, dict) or set(result) != {"clicked"} or type(result["clicked"]) is not bool:
+        raise HouseholdError("The merchant click receipt is unavailable; reconcile the original attempt")
+    return result["clicked"]
+
+
 def delivery_signature(value: str, *, provider: str = "oda") -> tuple[int, int, int, int, int, str] | None:
     normalized = " ".join(unicodedata.normalize("NFC", value).lower().split())
     if provider not in {"oda", "mathem"}:
@@ -696,10 +704,12 @@ def delivery_signature(value: str, *, provider: str = "oda") -> tuple[int, int, 
     start, start_minute, end, end_minute = hours[0]
     day, month = dates[0]
     start_hour, start_minute, end_hour, end_minute, day = int(start), int(start_minute or 0), int(end), int(end_minute or 0), int(day)
+    if (end_hour, end_minute) == (0, 0) and (start_hour, start_minute) != (0, 0):
+        end_hour = 24
     month = month[:3]
     months = ("jan", "feb", "mar", "apr", "maj" if provider == "mathem" else "mai", "jun", "jul", "aug", "sep", "okt", "nov", "dec" if provider == "mathem" else "des")
     month_number = months.index(month) + 1
-    if not (0 <= start_hour <= 23 and 0 <= end_hour <= 23 and 0 <= start_minute <= 59 and 0 <= end_minute <= 59):
+    if not (0 <= start_hour <= 23 and (0 <= end_hour <= 23 or (end_hour, end_minute) == (24, 0)) and 0 <= start_minute <= 59 and 0 <= end_minute <= 59):
         return None
     if (start_hour, start_minute) >= (end_hour, end_minute) or not 1 <= day <= calendar.monthrange(2024, month_number)[1]:
         return None
@@ -720,7 +730,7 @@ def _relative_delivery_text(value: str, *, provider: str, today: date) -> str | 
     return re.sub(relative_pattern, f"{day.day} {months[day.month - 1]}", normalized)
 
 
-def checkout_delivery_matches(expected: str, roots: Any, *, provider: str = "oda", today: date | None = None) -> bool:
+def checkout_delivery_matches(expected: str, roots: Any, *, provider: str = "oda", today: date | None = None, bound_address: str | None = None) -> bool:
     if not expected:
         return True
     zone = ZoneInfo("Europe/Stockholm" if provider == "mathem" else "Europe/Oslo")
@@ -737,12 +747,17 @@ def checkout_delivery_matches(expected: str, roots: Any, *, provider: str = "oda
     if signature is None or not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], str):
         return False
     observed = " ".join(unicodedata.normalize("NFC", roots[0]).lower().split())
+    if bound_address:
+        address = " ".join(unicodedata.normalize("NFC", bound_address).lower().split())
+        pattern = r"(?<!\w)" + re.escape(address) + r"(?!\w)"
+        if len(re.findall(pattern, observed)) == 1:
+            observed = re.sub(pattern, " ", observed)
     relative_pattern = expected_pattern
     if re.findall(relative_pattern, observed):
         relative_used = True
         # Retail checkout switches to relative dates at local midnight. Never
         # let a relative label override a numeric date or a second date label.
-        observed = _relative_delivery_text(roots[0], provider=provider, today=local_today)
+        observed = _relative_delivery_text(observed, provider=provider, today=local_today)
         if observed is None:
             return False
     if relative_used and today is None and datetime.now(zone).date() != local_today:
@@ -1023,12 +1038,11 @@ def _oda_checkout_surface_script(
  const summaryLabel=SUMMARY_LABEL;
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  ROW_IDENTITY
- const text=norm(document.body?.innerText||'');
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
  const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(FINAL_CONTROL)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|CURRENCY)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
  const login=!!document.querySelector('form[action*="login"],input[type="password"]');
- const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i.test(text);
  const itemInputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>ITEM_MATCH);
+ const unavailable=[...itemInputs.map(input=>input.closest('li,article')),...document.querySelectorAll('[role="alert"],[role="alertdialog"]')].some(node=>node&&visible(node)&&/ikke tilgjengelig|utsolgt|unavailable/i.test(norm(node.innerText)));
  const items=itemInputs.map(input=>{const root=input.closest('li,article'),fields=[...(root?.querySelectorAll('p')||[])].filter(visible),title=fields[0]?norm(fields[0].innerText):null,subtitle=fields[1]?norm(fields[1].innerText):null;return {quantity:Number(input.value),title,subtitle,...rowIdentity(root,input,title,subtitle)};});
  const summaryCountNodes=summaryLabel===null?[]:[...document.querySelectorAll('*')].filter(visible).filter(node=>norm(node.innerText||'')===summaryLabel).filter(node=>![...node.children].some(child=>visible(child)&&norm(child.innerText||'')===summaryLabel));
  const summaryCountMatches=summaryLabel!==null&&itemInputs.length===0&&summaryCountNodes.length===1;
@@ -1094,7 +1108,7 @@ process.exit(process.exitCode||0);
 
 
 def _oda_delivery_restrictions_script():
-    """Only the observed merchant banner establishes a stock-delay explanation."""
+    """Observe a notice or an authenticated, fully rendered delivery picker."""
     return r"""(() => {
         const norm=v=>(v||'').replace(/\s+/g,' ').trim();
         const visible=x=>{for(let p=x;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=x.getBoundingClientRect();return r.width>0&&r.height>0};
@@ -1105,7 +1119,8 @@ def _oda_delivery_restrictions_script():
             .filter(x=>![...x.children].some(c=>visible(c)&&notice(c))).map(x=>norm(x.innerText)):[];
         // A positive visible banner is ready evidence. No match alone cannot
         // distinguish hydration, unsupported markup or an unrestricted cart.
-        return JSON.stringify({ready:page&&warnings.length>0,warnings:[...new Set(warnings)].slice(0,5)});
+        const picker=page&&document.readyState==="complete"&&[...document.querySelectorAll('main input[type="radio"], main button')].some(e=>visible(e)&&!e.disabled&&/\b(?:[01]?\d|2[0-3]):[0-5]\d\s*[-–]\s*(?:(?:[01]?\d|2[0-3]):[0-5]\d|24:00)\b/.test(norm(e.labels?.[0]?.innerText||e.innerText)));
+        return JSON.stringify({ready:page&&(warnings.length>0||picker),warnings:[...new Set(warnings)].slice(0,5)});
     })()""".replace("DELIVERY_URL", json.dumps(DELIVERY_URL))
 
 
@@ -1464,7 +1479,7 @@ class OdaBrowser:
                     or not all(surface.get(key) is True for key in (
                         "authenticated", "available", "total_matches", "address_matches", "masked_payment"))
                     or not item_binding_matches
-                    or not checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider)):
+                    or not checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider, bound_address=expected.get("delivery_address"))):
                 raise HouseholdError("The merchant recovery review differs from the original order")
             amounts = self._eval(_oda_checkout_amount_script(payment_total,
                 expected_product_count=expected["product_count"], provider=self.checkout_provider, retry=True,
@@ -1859,7 +1874,7 @@ class OdaBrowser:
         result["line_matches"] = identity["matched"]
         if identity.get("review"):
             result["identity_review"] = identity["review"]
-        result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"))
+        result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"), bound_address=expected.get("delivery_address"))
         if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:
             diagnostics = {
                 "line_matches": result["line_matches"] is True,
@@ -2115,14 +2130,13 @@ class OdaBrowser:
                 except HouseholdError:
                     pass
                 self._settle(0.5 * (attempt + 1))
-        self._settle(12)
         self._invoke("reload")
         self._invoke("snapshot")
         action = "wait"
         full_cart_dispatched = False
         for attempt in range(2):
-            self._settle(5)
             for _ in range(5):
+                self._require_checkout_time()
                 surface = self._cart_surface()
                 action = surface.get("action")
                 if action == "full_cart" and self.checkout_provider == "mathem":
@@ -2191,8 +2205,18 @@ class OdaBrowser:
  if(location.href===CART){
    const main=document.querySelector('main');
    roots=[main||document];
-   const message=stockMessage(main||document.body);
-   if(message)return JSON.stringify({action:'blocked',unavailable_message:message});
+   const cartRoot=main||document.body;
+   const rows=[...cartRoot.querySelectorAll('input[type="number"]')].filter(visible).map(control=>control.closest('li,article')).filter(Boolean);
+   const candidates=[...rows,...cartRoot.querySelectorAll('[role="alert"],[role="alertdialog"]')].filter(visible);
+   // The flat acknowledgement lists the heading, item and removal direction.
+   // Newsletter, footer and ancillary service availability are outside the goods review.
+   const lines=(cartRoot.innerText||'').split(/\n+/).map(norm);
+   for(let i=0;i<lines.length;i++){
+     if(/^(?:Du må fjerne noen varer fra handlekurven|Du måste ta bort .*varor .*varukorgen)/i.test(lines[i])){
+       candidates.push({innerText:lines.slice(i,i+4).join('\n')});
+     }
+   }
+   for(const node of candidates){const message=stockMessage(node);if(message)return JSON.stringify({action:'blocked',unavailable_message:message});}
  }else{
    const candidates=dialogs.length?dialogs:(storefrontLinkOnly?[document]:[]);
    roots=candidates.filter(root=>{
@@ -2271,7 +2295,7 @@ class OdaBrowser:
  const confirmPage=location.origin==='https://oda.com'&&location.pathname==='/no/checkout/confirm/';
  if(![STORE,CART,CHECKOUT_ENTRY,MODIFY,RECOMMENDATIONS].includes(location.href)&&!confirmPage)return JSON.stringify({action:'blocked'});
  const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
- if(unavailable.test(norm(document.body?.innerText||''))||dialogs.some(root=>unavailable.test(norm(root.innerText||''))))return JSON.stringify({action:'blocked'});
+ if([...document.querySelectorAll('[role="alert"],[role="alertdialog"]'),...dialogs].some(root=>visible(root)&&unavailable.test(norm(root.innerText||''))))return JSON.stringify({action:'blocked'});
  if(location.href===MODIFY){
    // Bind the requested destination; Oda initially selects an existing order.
    const main=document.querySelector('main');
@@ -2342,8 +2366,8 @@ class OdaBrowser:
 })()
 """.replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("FINAL_CONTROL", "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order").replace("ORDER", json.dumps(order_id))
         dispatched: set[str] = set()
-        self._settle(10)
         for _ in range(30):
+            self._require_checkout_time()
             action = self._eval(script).get("action")
             if action == "ready":
                 return
@@ -2365,7 +2389,6 @@ class OdaBrowser:
                 if action not in dispatched:
                     dispatched.add(action)
                     self._click_action(action.replace("_", "-"))
-                    self._settle(10)
                 else:
                     self._settle(0.5)
                 continue
@@ -2998,7 +3021,7 @@ class OdaBrowser:
         self._open(expected["checkout_url"])
         for _ in range(20):
             surface = self._eval((self._checkout_surface_script(expected) if mathem else _oda_delivery_change_surface_script(expected["checkout_url"])))
-            if checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider):
+            if checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider, bound_address=expected.get("delivery_address")):
                 return
             self._settle(0.25)
         self._open(home)
@@ -3261,7 +3284,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                       + ";if(!sameJson(actual,expected))"
                       + "return JSON.stringify({clicked:false});return " + script.strip() + ";})()")
         clicked = self._eval(script)
-        if clicked != {"clicked": True}:
+        if not _click_receipt(clicked):
             raise CheckoutPreconditionError("Oda checkout button changed before click")
         return self._capture_checkout_payment(
             dispatch_tab,
@@ -3482,7 +3505,10 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             self._checkout_deadline = min(previous, deadline)
         try:
             if previous is None and not preserve_session:
-                self._invoke("close", browser_args=DEFAULT_BROWSER_ARGS)
+                try:
+                    self._invoke("close", browser_args=DEFAULT_BROWSER_ARGS)
+                except HouseholdError as exc:
+                    raise CheckoutPreconditionError(str(exc)) from exc
             yield
         finally:
             self._checkout_deadline = previous
@@ -3788,7 +3814,6 @@ class MathemBrowser(OdaBrowser):
  const expected=EXPECTED;
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
- const text=norm(document.body?.innerText||'');
  const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(e=>[...e.labels].some(label=>norm(label.textContent)==='Antal'));
  ROW_IDENTITY
  const items=inputs.map(input=>{const root=input.closest('li,article'),fields=[...(root?.querySelectorAll('p')||[])].filter(visible),title=fields[0]?norm(fields[0].innerText):null,subtitle=fields[1]?norm(fields[1].innerText):null;return {quantity:Number(input.value),title,subtitle,...rowIdentity(root,input,title,subtitle)};});
@@ -3797,7 +3822,7 @@ class MathemBrowser(OdaBrowser):
  const address_matches=!!expected.delivery_address&&delivery.length===1&&new RegExp(`(?:^|[\\s,:])${escaped}(?=$|[\\s,])`,'i').test(norm(delivery[0].innerText));
  const payment=JSON.parse(PAYMENT);
  const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s+PAYABLE_SIGN\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|SEK)$/i.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
- return JSON.stringify({url:location.href,authenticated:!document.querySelector('input[type="password"]'),available:!/inte tillgänglig|slut i lager|unavailable/i.test(text),items,delivery_roots:delivery.map(e=>norm(e.innerText)),address_matches,payment_display:payment.verified===true?payment.payment_display:null,submit_controls:controls.length});
+ return JSON.stringify({url:location.href,authenticated:!document.querySelector('input[type="password"]'),available:![...inputs.map(input=>input.closest('li,article')),...document.querySelectorAll('[role="alert"],[role="alertdialog"]')].some(node=>node&&visible(node)&&/inte tillgänglig|slut i lager|unavailable/i.test(norm(node.innerText))),items,delivery_roots:delivery.map(e=>norm(e.innerText)),address_matches,payment_display:payment.verified===true?payment.payment_display:null,submit_controls:controls.length});
 })()
 """.replace("ROW_IDENTITY", _CHECKOUT_ROW_IDENTITY_JS).replace("PAYMENT", _mathem_checkout_payment_script(expected.get("checkout_url", self.checkout_url)).strip()).replace("EXPECTED", json.dumps(expected, ensure_ascii=False)).replace("PAYABLE_SIGN", "[−-]?" if expected.get("delivery_change") else "")
 
@@ -3811,7 +3836,7 @@ class MathemBrowser(OdaBrowser):
         identity = OdaBrowser._review_checkout_identity(expected, surface, account_digest, identity_review)
         if not identity["matched"]:
             raise OdaCheckoutMismatchError("Mathem checkout product display differs: " + json.dumps(identity["issue"], ensure_ascii=False))
-        if not checkout_delivery_matches(expected["delivery_text"], surface["delivery_roots"], provider="mathem"):
+        if not checkout_delivery_matches(expected["delivery_text"], surface["delivery_roots"], provider="mathem", bound_address=expected.get("delivery_address")):
             raise OdaCheckoutMismatchError("Mathem checkout products or delivery changed")
         if type(surface["submit_controls"]) is not int or surface["submit_controls"] != 1 or re.fullmatch(r"•••• \d{4}", str(surface["payment_display"] or "")) is None:
             raise HouseholdError("Mathem checkout requires one selected saved card and one payment control")
@@ -3953,7 +3978,7 @@ class MathemBrowser(OdaBrowser):
             script = "(() => {" + _JSON_EQUAL_JS + "const actual=JSON.parse(" + surface_script + ");if(!sameJson(actual," + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + amount_script + ";})()"
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
-        if self._eval(script) != {"clicked": True}:
+        if not _click_receipt(self._eval(script)):
             raise CheckoutPreconditionError("Mathem checkout changed before the final click")
         return self._capture_checkout_payment(dispatch_tab)
 
@@ -3995,7 +4020,7 @@ class MathemBrowser(OdaBrowser):
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             # Transport failure here may follow the click. Leave it uncertain.
-            if self._eval(script) != {"clicked": True}:
+            if not _click_receipt(self._eval(script)):
                 raise CheckoutPreconditionError("Mathem addition changed before the final click")
             return self._capture_addition_failure(order_id, dispatch_tab)
 
@@ -4046,7 +4071,7 @@ class MathemBrowser(OdaBrowser):
                 script = "(() => {" + _JSON_EQUAL_JS + "const actual=JSON.parse(" + surface_script + ");if(!sameJson(actual," + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + _retail_addition_amount_script(expected, submit=True).strip() + ";})()"
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
-            if self._eval(script) != {"clicked": True}:
+            if not _click_receipt(self._eval(script)):
                 raise CheckoutPreconditionError("Mathem delivery changed before the final click")
             return self._capture_checkout_payment(dispatch_tab,
                 authentication_expected=review["order_amounts"]["payable_minor"] > 0, capture_failure=False)
@@ -4175,7 +4200,7 @@ class MathemBrowser(OdaBrowser):
                 # retaining exact array/text equality, rather than key order.
                 script = "(() => {const receipt=JSON.parse(" + self._cancellation_receipt_script(order_id, review["binding"]).strip() + ");const expected=" + json.dumps(review["receipt"], ensure_ascii=False) + ";if(Object.keys(receipt).length!==Object.keys(expected).length||Object.keys(expected).some(k=>JSON.stringify(receipt[k])!==JSON.stringify(expected[k])))return JSON.stringify({clicked:false});return " + self._cancellation_dialog_script("submit").strip() + ";})()"
                 final_dispatched = True
-                if self._eval(script) != {"clicked": True}:
+                if not _click_receipt(self._eval(script)):
                     final_dispatched = False
                     raise HouseholdError("Mathem cancellation changed before the final click")
         except HouseholdError as exc:

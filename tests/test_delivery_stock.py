@@ -14,13 +14,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_meal_concierge as fixtures
 from test_payment_setup import PAYMENT_DOM
 from core import HouseholdError
-from oda_browser import OdaBrowser, CART_URL, DELIVERY_URL, _oda_delivery_restrictions_script
+from oda_browser import OdaBrowser, CART_URL, DELIVERY_URL, _oda_delivery_restrictions_script, checkout_delivery_matches
 
 WARNING = 'Noen av varene i handlekurven, f.eks. Håndsåpe refill, er ikke tilgjengelige før 18. oktober 2026.'
 SNAPSHOT = {'items': [('10', 1)], 'address': {'id': 1, 'address': 'Eksempelveien 1'}}
 
 
 class DeliveryStockTests(unittest.TestCase):
+    def test_bound_address_is_removed_before_checking_the_exact_window(self):
+        expected = "17. mai kl 21:00–24:00"
+        observed = ["Levering 17. mai kl 21:00–00:00 17. mai-plassen 12–14"]
+        self.assertTrue(checkout_delivery_matches(expected, observed, bound_address="17. mai-plassen 12–14"))
+        self.assertFalse(checkout_delivery_matches(expected, observed, bound_address="Annen vei 12–14"))
+        self.assertFalse(checkout_delivery_matches(expected, [observed[0].replace("00:00", "24:15")], bound_address="17. mai-plassen 12–14"))
+
     def test_real_browser_reader_waits_on_delivery_page_and_restores_original_tab(self):
         node = shutil.which('node')
         if not node:
@@ -95,6 +102,31 @@ class DeliveryStockTests(unittest.TestCase):
             result = json.loads(run.stdout)
             self.assertEqual(result['result']['ready'], expected)
             self.assertEqual(result['clicks'], [])
+
+    def test_synthetic_delivery_picker_requires_complete_page_and_enabled_real_window(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node required")
+        # Semantic fixture for an enabled window control, independent of live retailer markup.
+        harness = """
+const [url, readyState, label, disabled, script] = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const control = {innerText: label, disabled, getBoundingClientRect: () => ({width: 40, height: 20})};
+global.location = {href: url};
+global.document = {readyState, querySelector: () => null,
+    querySelectorAll: q => q.startsWith('main input') ? [control] : []};
+global.getComputedStyle = () => ({display:'block',visibility:'visible',opacity:'1'});
+process.stdout.write(eval(script));
+"""
+        for page_state, label, disabled, expected in (
+            ("complete", "22:00 – 24:00", False, True), ("complete", "22:00 – 24:15", False, False),
+            ("loading", "22:00 – 24:00", False, False), ("complete", "22:00 – 24:00", True, False),
+            ("complete", "Street 12–14", False, False),
+        ):
+            with self.subTest(page_state=page_state, label=label, disabled=disabled):
+                args = [DELIVERY_URL, page_state, label, disabled, _oda_delivery_restrictions_script()]
+                run = subprocess.run([node, "-e", harness], input=json.dumps(args), text=True,
+                                     capture_output=True, timeout=10, check=True)
+                self.assertEqual(json.loads(run.stdout), {"ready": expected, "warnings": []})
 
     def test_large_delivery_page_does_not_measure_unrelated_card_visibility(self):
         node = shutil.which('node')

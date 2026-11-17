@@ -20,7 +20,7 @@ from recipes import RecipeError, scale_recipe
 from recipe_quantities import UNITS, normalized_unit, read_quantity
 
 
-PLANNER_VERSION = "weekly-menu-v6"
+PLANNER_VERSION = "weekly-menu-v7"
 MAX_CANDIDATES = 12
 MAX_DAYS = 7
 MAX_ALTERNATIVES = 3
@@ -515,6 +515,16 @@ def _preference_reasons(candidate: Mapping[str, Any], day: str, profile: Mapping
                                    {"matched_tags": matched, "unmatched_or_unknown": sorted(requested - tags)}))
     if candidate.get("is_favorite"):
         reasons.append(_reason("recipe:favorite", 4, "current personal favorite"))
+    from core import recipe_source_preference
+    from recipe_selection import source_group
+    group = source_group(recipe, entry_origin=candidate.get("entry_origin"), pack=candidate.get("pack"))
+    preference = recipe_source_preference(profile.get("recipes") or {}, group)
+    if preference != "normal":
+        # A saved household preference between sources. Preferred against
+        # occasional is 8 points: it decides between comparable dishes, and stays
+        # below the 10 points that separate a dish above the cooking-time maximum
+        # from one merely outside the weekday target.
+        reasons.append(_reason("source:" + preference, 4 if preference == "preferred" else -4, {"source_group": group}))
     identities = [_text(item.get("item")) for item in recipe.get("ingredients", []) if not item.get("optional")]
     facets = set(candidate["facts"]["dietary_facets"]["values"])
     if any(_contains_term(identity, WHOLEGRAIN_TERMS) for identity in identities):
@@ -641,7 +651,7 @@ def _leafy_week(selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, A
     assessments = []
     for candidate in selected:
         components = candidate.get("leafy_components") or [candidate]
-        rows = [_leafy_dinner(component) for component in components]
+        rows = [component.get("_planning_leafy") or _leafy_dinner(component) for component in components]
         grams = sum(row.get("listed_grams_per_serving") or 0 for component, row in zip(components, rows)
                     if not component.get("partial_coverage") and
                     (row.get("assessment") == "substantial" or row.get("source") == "legacy_heuristic"))
@@ -768,7 +778,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     planner_request = planner_selection.get("request") if isinstance(planner_selection, Mapping) else None
     scope = menu.get("planning_scope") if isinstance(menu, Mapping) else None
     request = scope if isinstance(scope, Mapping) else planner_request
-    if isinstance(request, Mapping) and request.get("planning_mode") == "ad_hoc" and not request.get("relative_origin") and len(request_days(request)) < 7:
+    if isinstance(request, Mapping) and _partial_period(request, profile):
         explicit = set(request.get("strict_targets", []))
         targets = [target for target in targets if target in explicit]
     agent_mode = isinstance(request, Mapping) and request.get("selection_mode") == "agent"
@@ -830,7 +840,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             for selected_slot in fact_slots:
                 if not isinstance(selected_slot, Mapping):
                     continue
-                if planner_selection.get("planner_version") == PLANNER_VERSION:
+                if planner_selection.get("planner_version") in {"weekly-menu-v6", PLANNER_VERSION}:
                     new_assessment_slots.add((mp.slot_day(selected_slot), selected_slot.get("recipe_key")))
                 facets = selected_slot.get("dietary_facets")
                 if not (isinstance(facets, Mapping) and isinstance(facets.get("values"), list)
@@ -1015,7 +1025,8 @@ def _plan_reasons(
     for candidate in selected:
         identities = {
             (identity, unit)
-            for identity, unit, excluded in _ingredient_identities(candidate["recipe"])
+            for identity, unit, excluded in (candidate["_planning_ingredients"] if "_planning_ingredients" in candidate
+                                              else _ingredient_identities(candidate["recipe"]))
             if not excluded and unit is not None
         }
         for identity, unit in identities:
@@ -1194,9 +1205,19 @@ def planning_dates(value, today, default_count):
     return mode, week, dates
 
 
+def _partial_period(request, profile):
+    """Whether this scope is shorter than the weekly targets describe."""
+    if request.get("planning_mode") == "ad_hoc" and not request.get("relative_origin"):
+        return len(request_days(request)) < 7
+    if request.get("planning_mode") == "relative" or request.get("relative_origin"):
+        expected = (profile.get("meals") or {}).get("dinner_days", 7)
+        return type(expected) is int and len(request_days(request)) < expected
+    return False
+
+
 def period_profile(profile, request):
-    """A short ad-hoc plan cannot certify a household's full-week quotas."""
-    if request.get("planning_mode") != "ad_hoc" or len(request_days(request)) >= 7:
+    """A short dated or relative plan cannot certify full-week quotas."""
+    if not _partial_period(request, profile):
         return profile
     result = deepcopy(profile)
     explicit = set(request.get("strict_targets", []))
@@ -1316,11 +1337,17 @@ def plan_week(
     dinner_days = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     diet = profile.get("diet") if isinstance(profile, Mapping) else None
     agent_mode = checked.get("selection_mode") == "agent"
-    if not agent_mode and type(dinner_days) is int and len(request_days(checked)) == dinner_days and isinstance(diet, Mapping):
+    complete_period = (
+        checked.get("planning_mode") in {"ad_hoc", "relative"} and not _partial_period(checked, profile)
+        or type(dinner_days) is int and len(request_days(checked)) == dinner_days
+    )
+    if not agent_mode and complete_period and isinstance(diet, Mapping):
         saved_minima = {
             target for target in SAVED_MINIMUM_TARGETS
             if type(diet.get(target)) is int and diet[target] > 0
         }
+        if diet.get("leafy_green_days"):
+            saved_minima.add("leafy_green_days")
         checked["strict_targets"] = sorted(set(checked["strict_targets"]) | saved_minima)
     if not isinstance(history, Mapping) or len(history) > MAX_HISTORY_RECORDS:
         raise PlannerError(f"planner history exceeds {MAX_HISTORY_RECORDS} records")
@@ -1369,6 +1396,11 @@ def plan_week(
                 "status": "fail",
                 "detail": {"same_as_reference_key": ordered[0]["reference_key"]},
             })
+    # These facts depend on one frozen candidate, never on its assigned date or
+    # the selected order. Keep them out of canonical input and public output.
+    for item in prepared:
+        item["_planning_ingredients"] = tuple(_ingredient_identities(item["recipe"]))
+        item["_planning_leafy"] = _leafy_dinner(item)
     if not agent_mode:
         prepared.sort(key=lambda item: item["reference_key"])
     unknown_override_keys = set(checked["cooldown_overrides"]).difference(
@@ -1469,6 +1501,8 @@ def plan_week(
         if agent_mode else
         ((candidate, index, day) for candidate in eligible for index, day in enumerate(source_dates))
     )
+    from recipe_selection import source_tie_order
+    source_ties = {item["reference_key"]: source_tie_order(item, profile) for item in eligible}
     slot_scores = {
         (candidate["reference_key"], index): sum(
             reason["weight"] for reason in _slot_reasons(
@@ -1508,7 +1542,7 @@ def plan_week(
         for index in range(count):
             by_candidate_set: dict[
                 tuple[tuple[str, ...], tuple[Any, ...]],
-                list[tuple[int, tuple[str, ...], tuple[Mapping[str, Any], ...]]],
+                list[tuple[int, tuple[tuple[int, bool, str], ...], tuple[Mapping[str, Any], ...]]],
             ] = {}
             for prefix in frontier:
                 for candidate in eligible:
@@ -1533,11 +1567,11 @@ def plan_week(
                     )
                     ranked_prefix = (
                         -score,
-                        tuple(item["reference_key"] for item in selected),
+                        tuple(source_ties[item["reference_key"]] for item in selected),
                         selected,
                     )
                     state_key = (
-                        tuple(sorted(ranked_prefix[1])),
+                        tuple(sorted(item["reference_key"] for item in selected)),
                         batch_prefix_signature(selected),
                     )
                     retained = by_candidate_set.setdefault(state_key, [])
@@ -1556,6 +1590,7 @@ def plan_week(
 
     ranked: list[dict[str, Any]] = []
     strict_unknowns: dict[str, dict[str, Any]] = {}
+    strict_statuses = {}
     strict_failures = 0
     for selected in candidate_sequences:
         if len({item["recipe_key"] for item in selected}) != count:
@@ -1566,33 +1601,38 @@ def plan_week(
             continue
         if layout and any(s['batch'] and c.get('supplied_facts', {}).get('batch_guidance', {}).get('suitability') == 'unsuitable' for c, s in zip(selected, layout['sources'])):
             continue
-        evaluated = _eating_candidates(selected, layout)
-        strict = _strict_evaluation(evaluated, checked["strict_targets"], profile)
-        if strict["status"] == "unknown":
+        set_key = tuple(sorted(item["reference_key"] for item in selected))
+        strict = None
+        strict_status = strict_statuses.get(set_key) if not layout else None
+        if strict_status is None:
+            strict = _strict_evaluation(_eating_candidates(selected, layout), checked["strict_targets"], profile)
+            strict_status = strict["status"]
+            if not layout and strict_status in {"pass", "fail"}:
+                strict_statuses[set_key] = strict_status
+        if strict_status == "unknown":
             for item in strict["results"]:
                 if item["status"] == "unknown":
                     strict_unknowns.setdefault(canonical(item), item)
             continue
-        if strict["status"] == "fail":
+        if strict_status == "fail":
             strict_failures += 1
             continue
         tie_break = tuple(item["reference_key"] for item in selected)
         ranked.append({
             "selected": selected,
             "strict": strict,
-            "total_score": sum(
-                reason["weight"] for reason in _plan_reasons(selected, profile, layout)
-            ) + sum(
+            "total_score": sum(reason["weight"] for reason in _plan_reasons(selected, profile, layout)) + sum(
                 slot_scores[(item["reference_key"], index)]
                 for index, item in enumerate(selected)
             ),
             "tie_break": tie_break,
+            "source_tie": tuple(source_ties[key] for key in tie_break),
         })
         # Exact references are unique within every permutation, so tie_break is
         # itself unique. The selection digest can be computed only for the
         # retained winners without changing the deterministic ordering.
         if not agent_mode:
-            ranked.sort(key=lambda item: (-item["total_score"], item["tie_break"]))
+            ranked.sort(key=lambda item: (-item["total_score"], item["source_tie"]))
             del ranked[checked["alternatives"]:]
     if not ranked:
         if strict_unknowns:
@@ -1604,9 +1644,13 @@ def plan_week(
         return {**base_result, "status": status, "issues": issues, "selections": []}
     selections = []
     for rank in ranked:
+        # Only status is order independent. Rebuild winner diagnostics in their
+        # actual order, including active-minute values and leafy assessments.
+        strict = rank["strict"] or _strict_evaluation(
+            _eating_candidates(rank["selected"], layout), checked["strict_targets"], profile)
         selection = _selection(
             rank["selected"], source_dates, profile, input_digest, scope,
-            rank["strict"], checked["portions"], recurring=layout,
+            strict, checked["portions"], recurring=layout,
         )
         if (
             selection["total_score"] != rank["total_score"]

@@ -440,10 +440,28 @@ def _write_archive(destination, manifest, files, validate_manifest, opener) -> d
 
 def _private_manifest(value: Any) -> dict:
     fields = {"format", "format_version", "kind", "private_schema_version", "recipes_count", "records_count", "files"}
+    if isinstance(value, dict) and value.get("private_schema_version") == 4:
+        fields.add("pack_deletions")
+        rows = value.get("pack_deletions")
+        if not isinstance(rows, list) or len(rows) > MAX_IMPORT_RECORDS:
+            raise RecipeError("private deletion inventory exceeds its bound")
+        seen = set()
+        for row in rows:
+            required = {"entry_origin", "pack_id", "pack_recipe_id", "source_digest", "deletion_id"}
+            if (not isinstance(row, dict) or set(row) != required
+                    or row["entry_origin"] not in ("bundled", "collection")
+                    or not isinstance(row["source_digest"], str) or not _DIGEST.fullmatch(row["source_digest"])
+                    or not isinstance(row["deletion_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", row["deletion_id"])):
+                raise RecipeError("private collection deletion is invalid")
+            key = (_private_identity(row["pack_id"], "pack_id", 128),
+                   _private_identity(row["pack_recipe_id"], "pack_recipe_id", 256))
+            if key in seen:
+                raise RecipeError("private collection deletion is duplicated")
+            seen.add(key)
     if (not isinstance(value, dict) or set(value) != fields or value["format"] != FORMAT
             or type(value["format_version"]) is not int or value["format_version"] != FORMAT_VERSION
             or value["kind"] != "private" or type(value["private_schema_version"]) is not int
-            or value["private_schema_version"] not in {1, 2}):
+            or value["private_schema_version"] not in {1, 2, 3, 4}):
         raise RecipeError("unsupported private recipe format")
     for field, maximum in (("recipes_count", MAX_IMPORT_RECORDS), ("records_count", MAX_PRIVATE_RECORDS)):
         if type(value[field]) is not int or not 0 <= value[field] <= maximum:
@@ -464,7 +482,7 @@ def _private_text(value: Any, field: str, maximum: int = 200) -> str:
     try:
         source_text(value, "private recipe text", maximum)
     except RecipeImportReaderError as exc:
-        raise RecipeError("private recipe text contains an unsafe URL") from exc
+        raise RecipeError("private recipe text contains an unsafe URL; run --preview-private-url-remediation with the stopped installation") from exc
     return value
 
 
@@ -491,12 +509,21 @@ def _private_entry(value: Any) -> dict:
         _private_text(value["source_key"], "source_key", 4096)
     pack = value["pack"]
     if value["entry_origin"] in {"bundled", "collection"}:
-        if not isinstance(pack, dict) or set(pack) != {"pack_id", "recipe_id", "version", "baseline_hash"}:
+        if not isinstance(pack, dict) or set(pack) not in (
+                {"pack_id", "recipe_id", "version", "baseline_hash"},
+                {"pack_id", "recipe_id", "version", "baseline_hash", "status_provenance"}):
             raise RecipeError("private bundled origin is incomplete")
         for field in ("pack_id", "recipe_id", "version"):
             _private_identity(pack[field], field, 256 if field == "recipe_id" else 128)
         if not isinstance(pack["baseline_hash"], str) or not _DIGEST.fullmatch(pack["baseline_hash"]):
             raise RecipeError("private pack baseline is invalid")
+        if "status_provenance" in pack:
+            provenance = pack["status_provenance"]
+            if (not isinstance(provenance, dict) or set(provenance) != {"applied_revision", "local_status"}
+                    or type(provenance["applied_revision"]) is not int
+                    or not 1 <= provenance["applied_revision"] <= value["revision"]
+                    or type(provenance["local_status"]) is not bool):
+                raise RecipeError("private pack status provenance is invalid")
     elif pack is not None:
         raise RecipeError("private non-pack recipe cannot have pack metadata")
     favorite = value["favorite"]
@@ -534,7 +561,7 @@ def _private_revision(value: Any) -> dict:
             try:
                 source_text(child, "private recipe text", len(child))
             except RecipeImportReaderError as exc:
-                raise RecipeError("private recipe text contains an unsafe URL") from exc
+                raise RecipeError("private recipe text contains an unsafe URL; run --preview-private-url-remediation with the stopped installation") from exc
     return value
 
 
@@ -572,7 +599,8 @@ class PrivatePortableArchive(PortableArchive):
         Revisions stay in increasing original-number order; gaps are preserved.
         Call verify() completely before applying any group to a destination.
         """
-        identities, source_keys, pack_keys = set(), set(), set()
+        identities, source_keys = set(), set()
+        pack_keys = {(row["pack_id"], row["pack_recipe_id"]) for row in self.manifest.get("pack_deletions", [])}
         entry = None
         revisions = []
         size = 0
@@ -583,6 +611,9 @@ class PrivatePortableArchive(PortableArchive):
                     or revisions[-1]["created_at"] != entry["updated_at"]
                     or revisions[0]["created_at"] != entry["created_at"]):
                 raise RecipeError("private recipe head/history differs")
+            provenance = (entry["pack"] or {}).get("status_provenance")
+            if provenance and not any(row["revision"] == provenance["applied_revision"] for row in revisions):
+                raise RecipeError("private pack status provenance revision is missing")
             return {"entry": entry, "revisions": revisions}
 
         for row, row_size in self._rows():
@@ -595,6 +626,9 @@ class PrivatePortableArchive(PortableArchive):
                     and entry["entry_origin"] == "collection"
                 ):
                     raise RecipeError("private schema 1 cannot contain collection origin")
+                if (self.manifest["private_schema_version"] < 3
+                        and entry["pack"] and "status_provenance" in entry["pack"]):
+                    raise RecipeError("pack status provenance requires private schema 3")
                 if entry["id"] in identities:
                     raise RecipeError("private recipe identity is duplicated")
                 identities.add(entry["id"])
@@ -702,6 +736,13 @@ def _restore_private_entries(archive: PrivatePortableArchive, store, archive_dig
             results.append(result)
 
     try:
+        for row in archive.manifest.get("pack_deletions", []):
+            outcome = store.restore_pack_deletion(row)
+            report["deletions_" + outcome] = report.get("deletions_" + outcome, 0) + 1
+            if outcome == "conflict":
+                report["conflicts"] += 1
+                remember({"pack_recipe_id": row["pack_recipe_id"], "outcome": "conflict",
+                          "reason": "local_entry_or_deletion_preserved"})
         for group in archive.recipe_entries():
             current = group["entry"]["id"]
             assets = {row["document"]["image"]["asset_id"] for row in group["revisions"]
@@ -749,7 +790,7 @@ def restore_private_archive(path: Path | str, store) -> dict:
 def export_private_archive(destination: Path | str, store) -> dict:
     """Export one coherent read-only recipe snapshot under caller offline locks.
 
-    The exact household and schema 6 are checked locally and never exported.
+    The exact household and supported bank schema are checked locally and never exported.
     SQLite WAL mode is rejected: a read-only SQLite connection can otherwise
     create source-side shared-memory files. No checkpoint, migration, cleanup or
     RecipeStore connection helper is used. Temporary files stay beneath the
@@ -781,16 +822,30 @@ def export_private_archive(destination: Path | str, store) -> dict:
                 connection.execute("PRAGMA query_only=ON")
                 connection.execute("BEGIN")
                 metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('household','schema_version')"))
-                if metadata != {"household": store.household, "schema_version": "6"}:
+                if (metadata.get("household") != store.household
+                        or metadata.get("schema_version") not in {"6", "7", "8"}):
                     raise RecipeError("private export household/schema differs")
                 for table, maximum in (("recipes", MAX_IMPORT_RECORDS), ("revisions", MAX_PRIVATE_RECORDS)):
                     if connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] > maximum:
                         raise RecipeError("private recipe snapshot is oversized")
                     if connection.execute(f"SELECT 1 FROM {table} WHERE typeof(document) != 'text' OR length(CAST(document AS BLOB)) > ? LIMIT 1", (MAX_RECIPE_BYTES,)).fetchone():
                         raise RecipeError("private stored recipe document is invalid or oversized")
-                for table in ("revisions", "recipe_entry_metadata", "recipe_favorites"):
+                has_status_provenance = metadata["schema_version"] in {"7", "8"}
+                deletions = ([dict(row) for row in connection.execute(
+                    "SELECT * FROM pack_deletions ORDER BY entry_origin,pack_id,pack_recipe_id LIMIT ?",
+                    (MAX_IMPORT_RECORDS + 1,))] if metadata["schema_version"] == "8" else [])
+                tables = ("revisions", "recipe_entry_metadata", "recipe_favorites")
+                if has_status_provenance:
+                    tables += ("recipe_pack_status",)
+                for table in tables:
                     if connection.execute(f"SELECT 1 FROM {table} t LEFT JOIN recipes r ON r.id=t.recipe_id WHERE r.id IS NULL LIMIT 1").fetchone():
                         raise RecipeError("private recipe snapshot contains orphan rows")
+                if has_status_provenance and connection.execute("""
+                        SELECT 1 FROM recipe_pack_status p
+                        LEFT JOIN recipe_entry_metadata m ON m.recipe_id=p.recipe_id
+                        WHERE m.entry_origin IS NULL OR m.entry_origin NOT IN ('bundled','collection')
+                        LIMIT 1""").fetchone():
+                    raise RecipeError("private pack status provenance has no pack origin")
                 with files["records.jsonl"].open("xb") as records:
                     os.chmod(files["records.jsonl"], 0o600)
                     for current in connection.execute("SELECT id,revision,status,source_key,document,created_at,updated_at,created_via FROM recipes ORDER BY id"):
@@ -799,10 +854,21 @@ def export_private_archive(destination: Path | str, store) -> dict:
                         if origin is None:
                             raise RecipeError("private recipe origin metadata is missing")
                         if origin["entry_origin"] == "collection":
-                            private_schema_version = 2
+                            private_schema_version = max(private_schema_version, 2)
                         pack = None
                         if any(origin[key] is not None for key in ("pack_id", "pack_recipe_id", "pack_version", "baseline_hash")):
                             pack = {"pack_id": origin["pack_id"], "recipe_id": origin["pack_recipe_id"], "version": origin["pack_version"], "baseline_hash": origin["baseline_hash"]}
+                            provenance = (connection.execute(
+                                "SELECT applied_revision,local_status FROM recipe_pack_status WHERE recipe_id=?",
+                                (identity,)).fetchone() if has_status_provenance else None)
+                            if provenance:
+                                if (type(provenance["applied_revision"]) is not int
+                                        or type(provenance["local_status"]) is not int
+                                        or provenance["local_status"] not in (0, 1)):
+                                    raise RecipeError("private pack status provenance is invalid")
+                                pack["status_provenance"] = {"applied_revision": provenance["applied_revision"],
+                                                             "local_status": bool(provenance["local_status"])}
+                                private_schema_version = 3
                         favorite = connection.execute("SELECT library_id,is_favorite,favorite_revision,created_at,updated_at FROM recipe_favorites WHERE recipe_id=?", (identity,)).fetchall()
                         if len(favorite) > 1 or (favorite and (favorite[0]["library_id"] != "builtin" or favorite[0]["is_favorite"] not in (0, 1))):
                             raise RecipeError("private favorite state is invalid")
@@ -854,7 +920,8 @@ def export_private_archive(destination: Path | str, store) -> dict:
             finally:
                 connection.close()
             return write_private_archive(output, {"format": FORMAT, "format_version": FORMAT_VERSION,
-                "kind": "private", "private_schema_version": private_schema_version, **counts}, files)
+                "kind": "private", "private_schema_version": 4 if deletions else private_schema_version,
+                **({"pack_deletions": deletions} if deletions else {}), **counts}, files)
     except sqlite3.Error as exc:
         raise RecipeError("private recipe snapshot is unavailable") from exc
 
@@ -1073,8 +1140,10 @@ def _pack_metadata_inventory(state: Path, pack_id: str) -> dict[str, Any]:
             return {"directories": [], "empty_directories": [], "assets": set()}
         descriptors.append(metadata)
         for name in sorted(os.listdir(metadata)):
+            if name == ".DS_Store" and stat.S_ISREG(os.stat(name, dir_fd=metadata, follow_symlinks=False).st_mode):
+                continue  # Finder metadata is neither a collection directory nor owned collection data.
             if not _PACK_METADATA_DIRECTORY.fullmatch(name):
-                raise RecipeError("retained recipe collection metadata has an invalid directory")
+                raise RecipeError(f"retained recipe collection metadata has an invalid directory: {name[:120]!r}")
             directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=metadata)
             descriptors.append(directory)
             entries = sorted(os.listdir(directory))
@@ -1123,6 +1192,59 @@ def _pack_metadata_inventory(state: Path, pack_id: str) -> dict[str, Any]:
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+_COLLECTION_NAMES: dict[str, tuple[list, dict[str, str]]] = {}
+
+
+def installed_collection_names(state_directory: Path | str) -> dict[str, str]:
+    """Display names of installed collections, for presentation only.
+
+    A collection whose retained manifest cannot be read is simply left out, and
+    its pack_id is shown instead. Nothing here decides what may be imported.
+    """
+    try:
+        root = os.open(Path(state_directory) / "pack-metadata", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        manifests = []
+        for name in sorted(os.listdir(root))[:256]:
+            if not _PACK_METADATA_DIRECTORY.fullmatch(name):
+                continue
+            try:
+                info = os.stat(f"{name}/manifest.json", dir_fd=root, follow_symlinks=False)
+            except OSError:
+                continue
+            manifests.append((name, info.st_mtime_ns, info.st_size))
+        # Manifests list every file of a collection; read them again only when one changed.
+        cached = _COLLECTION_NAMES.get(str(state_directory))
+        if cached is not None and cached[0] == manifests:
+            return dict(cached[1])
+        newest: dict[str, tuple] = {}
+        for name, modified, _size in manifests:
+            try:
+                directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+            except OSError:
+                continue
+            try:
+                manifest = _manifest(_json(_read_regular_at(directory, "manifest.json", MAX_MANIFEST_BYTES)))
+                # Several versions can be retained; the latest revision names the collection.
+                version = (manifest.get("pack_revision") or 0, modified)
+                if version >= newest.get(manifest["pack_id"], ((-1, -1), ""))[0]:
+                    newest[manifest["pack_id"]] = (version, manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME))
+            except (OSError, RecipeError, ValueError, KeyError, TypeError):
+                continue
+            finally:
+                os.close(directory)
+        names = {pack_id: label for pack_id, (_version, label) in newest.items()}
+        _COLLECTION_NAMES.clear()
+        _COLLECTION_NAMES[str(state_directory)] = (manifests, dict(names))
+        return names
+    except OSError:
+        return {}
+    finally:
+        os.close(root)
 
 
 def _validate_local_collection_update(
@@ -1396,6 +1518,69 @@ def remove_collection(state_directory: Path | str, household: str,
     }
 
 
+def resolve_archive_conflict(path, state_directory, household, expected_descriptor, *,
+                             pack_recipe_id, expected_revision, disposition):
+    """Resolve one exact record from a verified archive under offline ownership."""
+    from recipes import RecipeStore
+    from recipe_assets import RecipeAssets
+    with _verified_archive(path, expected_descriptor) as archive:
+        local = archive.manifest['kind'] == LOCAL_PACK_KIND
+        _preflight(archive, trust='local' if local else 'official')
+        selected = None
+        for record in archive.records():
+            if record['recipe_id'] == pack_recipe_id:
+                if selected is not None:
+                    raise RecipeError('selected pack recipe identity is duplicated')
+                selected = record
+        if selected is None:
+            raise RecipeError('selected recipe is absent from the exact archive')
+        state = Path(state_directory)
+        store = RecipeStore(state / 'recipes.sqlite3', household)
+        if image := selected['recipe'].get('image'):
+            RecipeAssets(state / 'recipe-assets').install_managed(image['asset_id'], archive.read_asset(image['asset_id']))
+        return store.resolve_pack_record_conflict(selected['recipe'], pack_id=archive.manifest['pack_id'],
+            recipe_id=pack_recipe_id, version=archive.manifest['pack_version'],
+            status=selected['status'], entry_origin='collection' if local else 'bundled',
+            archive_sha256=expected_descriptor['sha256'], expected_revision=expected_revision,
+            disposition=disposition)
+
+
+def withdrawal_preview(path, state_directory, household, expected):
+    """Compare one verified archive to one coherent, read-only bank snapshot."""
+    rows = []
+    with _verified_archive(path, expected) as archive:
+        origin = "collection" if archive.manifest["kind"] == LOCAL_PACK_KIND else "bundled"
+        bank = Path(state_directory) / "recipes.sqlite3"
+        if archive.manifest.get("membership_mode") == AUTHORITATIVE_MEMBERSHIP and (bank.exists() or bank.is_symlink()):
+            with _regular_file(bank) as handle:
+                if handle.read(20)[18:20] != b"\x01\x01":
+                    raise RecipeError("withdrawal preview requires a regular rollback-journal bank")
+            present = {record["recipe_id"] for record in archive.records()}
+            from contextlib import closing
+            with closing(sqlite3.connect(bank.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                db.row_factory = sqlite3.Row
+                db.execute("PRAGMA query_only=ON")
+                db.execute("BEGIN")
+                owner = db.execute("SELECT value FROM metadata WHERE key='household'").fetchone()
+                if not owner or owner[0] != household:
+                    raise RecipeError("withdrawal preview household differs")
+                for row in db.execute("""SELECT m.pack_recipe_id AS recipe_id,r.id,r.name,r.revision,
+                        r.content_hash,m.baseline_hash,coalesce(f.is_favorite,0) AS favorite,
+                        coalesce(f.favorite_revision,0) AS favorite_revision
+                    FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id
+                    LEFT JOIN recipe_favorites f ON f.library_id='builtin' AND f.recipe_id=r.id
+                    WHERE m.pack_id=? AND m.entry_origin=? ORDER BY m.pack_recipe_id""",
+                        (archive.manifest["pack_id"], origin)):
+                    if row["recipe_id"] not in present:
+                        rows.append(dict(row))
+    binding = hashlib.sha256(canonical_bytes([expected["sha256"], household, rows])).hexdigest()
+    return {"review": binding, "count": len(rows), "favorites": sum(row["favorite"] for row in rows),
+            "locally_modified": sum(row["content_hash"] != row["baseline_hash"] for row in rows),
+            "items": [{"recipe_id": row["recipe_id"], "name": row["name"], "favorite": bool(row["favorite"]),
+                       "locally_modified": row["content_hash"] != row["baseline_hash"]} for row in rows[:20]],
+            "truncated": len(rows) > 20}
+
+
 def apply_archive(
     path: Path | str,
     state_directory: Path | str,
@@ -1452,7 +1637,7 @@ def apply_archive(
                       "display_name": archive.manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME),
                       "membership_mode": archive.manifest.get("membership_mode", "merge"),
                       "total": checked["records_count"], "processed": 0, "created": 0,
-                      "updated": 0, "unchanged": 0, "deleted": 0,
+                      "updated": 0, "unchanged": 0, "kept_deleted": 0, "deleted": 0,
                       "deleted_favorites": 0, "deleted_locally_modified": 0,
                       "conflicts": 0, "failed": 0,
                       "report_directory": relative}
@@ -1471,14 +1656,20 @@ def apply_archive(
                         assets.install_managed(image["asset_id"], archive.read_asset(image["asset_id"]))
                     outcome = store.import_pack_record(record["recipe"], pack_id=archive.manifest["pack_id"],
                         recipe_id=current, version=archive.manifest["pack_version"],
-                        status=record["status"], entry_origin=entry_origin)
-                    category = {"created": "created", "updated": "updated", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
+                        status=record["status"], entry_origin=entry_origin,
+                        archive_sha256=expected_descriptor['sha256'])
+                    category = {"created": "created", "updated": "updated", "unchanged": "unchanged", "conflict": "conflicts", "kept_deleted": "kept_deleted"}[outcome["outcome"]]
                     report[category] += 1
                     report["processed"] += 1
-                    result = {"recipe_id": current, "outcome": outcome["outcome"],
-                              "bank_recipe_ref": outcome["recipe"]["library_recipe_ref"]}
+                    result = {"recipe_id": current, "outcome": outcome["outcome"]}
+                    if outcome["outcome"] == "kept_deleted":
+                        result.update(deletion_id=outcome["deletion_id"], source_matches=outcome["source_matches"])
+                    else:
+                        result["bank_recipe_ref"] = outcome["recipe"]["library_recipe_ref"]
                     if outcome.get("reason"):
                         result["reason"] = outcome["reason"]
+                    if outcome.get('resolution'):
+                        result['resolution'] = outcome['resolution']
                     results.append(result)
                     current = None
                     _report_bytes(directory, "status.json", canonical_bytes(report))
@@ -1494,12 +1685,15 @@ def apply_archive(
                     report["deleted_favorites"] = sum(item["was_favorite"] for item in deleted)
                     report["deleted_locally_modified"] = sum(item["locally_modified"] for item in deleted)
                     results.extend({"recipe_id": item["recipe_id"], "outcome": "deleted",
+                                    "name": item["name"],
                                     "bank_recipe_id": item["bank_recipe_id"],
                                     "was_favorite": item["was_favorite"],
                                     "locally_modified": item["locally_modified"],
                                     "withdrawal": archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})}
                                    for item in deleted)
-                    report["withdrawals"] = [{"recipe_id": item["recipe_id"], **archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})} for item in deleted[:20]]
+                    report["withdrawals"] = [{"recipe_id": item["recipe_id"], "name": item["name"],
+                                              "was_favorite": item["was_favorite"],
+                                              **archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})} for item in deleted[:20]]
                     report["withdrawals_truncated"] = len(deleted) > 20
                     _report_bytes(directory, "status.json", canonical_bytes(report))
             except (RecipeError, RecipeAssetError) as exc:

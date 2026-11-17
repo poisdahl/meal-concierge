@@ -325,7 +325,7 @@ class FileBoundaryTests(unittest.TestCase):
 
 
 class BuildRoundtripTests(unittest.TestCase):
-    def fixture(self, root):
+    def fixture(self, root, *, first_measure=None):
         source = root / 'snapshot'
         source.mkdir()
         rows = []
@@ -335,6 +335,8 @@ class BuildRoundtripTests(unittest.TestCase):
             wikitext = 'Synthetic source '+str(number)
             text = ('<table class="infobox"><tr><th>Servings</th><td>2</td></tr></table>'
                     '<h2>Ingredients</h2><p>100 g rice</p><h2>Procedure</h2><p>Boil.</p>')
+            if first_measure and number == 123:
+                text = text.replace('100 g rice', first_measure)
             rendered = {'parse': {'pageid': number, 'revid': 456, 'text': text, 'wikitext': wikitext}}
             raw = {'query': {'pages': [{'pageid': number, 'revisions': [{
                 'revid': 456, 'timestamp': '2026-09-05T00:00:00Z',
@@ -359,6 +361,18 @@ class BuildRoundtripTests(unittest.TestCase):
         write_file(source, 'SEALED', encoded({'sealed_at': '2026-09-06T00:00:00+00:00',
                                               'snapshot_sha256': sha, 'status': 'synthetic_complete'}))
         return source, sha
+
+    def test_malformed_measure_holds_release_while_other_rows_finish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, sha = self.fixture(root, first_measure='1/0 cup rice')
+            options = {'snapshot_sha256': sha, 'pack_version': 'test.1'}
+            result = build(source, root / 'out', **options)
+            self.assertFalse(result['complete'])
+            self.assertEqual(result['processed'], 2)
+            self.assertEqual([r['source_id'] for r in result['held']], ['123'])
+            self.assertFalse(list((root / 'out').glob('*.zip')))
+            self.assertEqual(build(source, root / 'out', **options), result)
 
     def test_clean_repeat_and_resume_use_real_shared_codec(self):
         from recipe_portable import open_archive

@@ -345,6 +345,11 @@ class Migration:
                 doc = document(current)
                 self.app._require_recipe_provider(doc)
                 frozen["document"] = doc
+                # Retrieval time is excluded from drift comparisons, but remains
+                # a real observation in the copy. Keep it beside the stable form
+                # rather than persisting the comparison sentinel as provenance.
+                if current.get("external_snapshot"):
+                    frozen["source_fetched_at"] = normalize_recipe(current)["external_snapshot"]["fetched_at"]
                 preview.update(name=doc["name"], document_digest=digest(doc))
                 if source_caps is None or dest_caps is None:
                     raise RecipeError("capabilities unavailable")
@@ -516,6 +521,13 @@ class Migration:
                     self.save_mapping(plan, item, state["destination_ref"])
                     self.apply_metadata(plan, item, expired)
                     return
+                if (not frozen.get("source_fetched_at") and current.get("external_snapshot")
+                        and not progress.get("source_fetched_at")):
+                    # Legacy preparations used a comparison sentinel. Persist the
+                    # verified reread time before dispatch so reconciliation sees
+                    # the same outbound document after a lost reply.
+                    progress["source_fetched_at"] = normalize_recipe(current)["external_snapshot"]["fetched_at"]
+                    self.update(plan, item)
                 operation = self.begin(plan, item)
             except Exception:
                 if operation:
@@ -529,18 +541,22 @@ class Migration:
             self.update(plan, item)
             return
         try:
+            copy_document = deepcopy(frozen["document"])
+            fetched_at = frozen.get("source_fetched_at") or progress.get("source_fetched_at")
+            if fetched_at and copy_document.get("external_snapshot"):
+                copy_document["external_snapshot"]["fetched_at"] = fetched_at
             if destination == "builtin":
                 # One local transaction commits the new recipe and operation result.
                 with self.store._connection() as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     if now() >= datetime.fromisoformat(plan["expires_at"]):
                         raise RecipeLibraryDefiniteError("migration confirmation expired")
-                    saved = self.store._save(connection, frozen["document"], "active", None, "migration", migration_identity=frozen["source_context"]["identity"] if frozen.get("source_context") else self.identity(frozen["source_ref"]))
+                    saved = self.store._save(connection, copy_document, "active", None, "migration", migration_identity=frozen["source_context"]["identity"] if frozen.get("source_context") else self.identity(frozen["source_ref"]))
                     ref = saved["library_recipe_ref"]
                     connection.execute("UPDATE library_operations SET status='confirmed',result_metadata=?,provider_recipe_id=?,provider_version=?,updated_at=? WHERE operation_id=?", (canonical(ref), ref["recipe_id"], ref["version"], now().isoformat(), operation["operation_id"]))
             else:
                 adapter = self.app.recipe_library_adapters[destination]
-                outbound = self.app._outbound_library_snapshot(frozen["document"])
+                outbound = self.app._outbound_library_snapshot(copy_document)
                 if dispatched:
                     if not self.app._library_capabilities(destination)["reconcile_create"]:
                         raise RecipeError("exact reconciliation unavailable")

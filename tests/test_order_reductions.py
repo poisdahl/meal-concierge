@@ -139,6 +139,22 @@ class OrderRemovalTests(unittest.TestCase):
         self.assertEqual(result['credit_ore'], 8960)
         self.assertEqual(self.browser.source['eligibility']['total_uncredited_quantity'], 2)
 
+    def test_disappearing_eligibility_row_is_not_proof_of_zero_target(self):
+        prepared = self.prepare(0)
+        self.browser.apply_click = False
+        confirmation_id = prepared["confirmation_id"]
+        self.assertTrue(self.call("remove_confirm", confirmation_id=confirmation_id)["reconciliation_required"])
+        eligibility = self.browser.source["eligibility"]
+        rows = eligibility["items_groups"][0]["items"]
+        missing = rows.pop(0)
+        eligibility["total_uncredited_quantity"] -= missing["uncredited_quantity"]
+        unresolved = self.call("remove_reconcile", confirmation_id=confirmation_id)
+        self.assertTrue(unresolved["reconciliation_required"])
+        self.assertEqual(self.store.read()["order_change"]["status"], "uncertain")
+        rows.append({**missing, "uncredited_quantity": 0})
+        self.assertTrue(self.call("remove_reconcile", confirmation_id=confirmation_id)["removed"])
+        self.assertEqual(self.browser.final_clicks, 1)
+
     def test_uncertain_click_is_reconciled_without_dispatching_again(self):
         prepared = self.prepare(1)
         self.browser.fail_after_click = True
@@ -148,6 +164,32 @@ class OrderRemovalTests(unittest.TestCase):
         result = self.call('remove_confirm', confirmation_id=prepared['confirmation_id'])
         self.assertTrue(result['removed'])
         self.assertEqual(self.browser.final_clicks, 1)
+
+    def test_delivered_bound_order_retires_uncertain_removal_without_claiming_credit(self):
+        prepared = self.prepare(1)
+        self.browser.apply_click = False
+        self.assertTrue(self.call("remove_confirm", confirmation_id=prepared["confirmation_id"])["reconciliation_required"])
+        self.provider.tracking = "delivered"
+        terminal = self.call("remove_reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(terminal["status"], "delivered")
+        self.assertIsNone(terminal["removed"])
+        self.assertFalse(terminal["retry_allowed"])
+        self.assertTrue(self.call("remove_confirm", confirmation_id=prepared["confirmation_id"])["idempotent"])
+        self.assertEqual(self.browser.final_clicks, 1)
+
+    def test_stopped_final_read_retires_original_key_without_a_click(self):
+        prepared = self.prepare(1)
+        original = self.browser._eval
+        def lost_control(script):
+            if "order-removal-ui" in script and self.store.read()["order_change"]["status"] == "clicking":
+                raise HouseholdError("synthetic final control disappeared before click invocation")
+            return original(script)
+        self.browser._eval = lost_control
+        result = self.call("remove_confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(result["status"], "not_dispatched")
+        self.assertEqual(self.prepare(1), {**result, "idempotent": True})
+        self.assertEqual(self.browser.final_clicks, 0)
+        self.assertIsNone(self.store.read()["order_change"])
 
     def test_unapplied_uncertain_click_remains_protected(self):
         prepared = self.prepare(1)
@@ -253,7 +295,7 @@ class OrderRemovalTests(unittest.TestCase):
             self.prepare(1)
         self.assertEqual(self.browser.final_clicks, 0)
 
-    def test_wrong_credit_is_not_reported_as_completed(self):
+    def test_unrelated_total_change_does_not_hide_completed_target_quantity(self):
         prepared = self.prepare(1)
         original = self.browser._invoke
         def altered(*args):
@@ -263,8 +305,9 @@ class OrderRemovalTests(unittest.TestCase):
             return result
         self.browser._invoke = altered
         result = self.call('remove_confirm', confirmation_id=prepared['confirmation_id'])
-        self.assertTrue(result['reconciliation_required'])
-        self.assertFalse(result['removed'])
+        self.assertTrue(result['removed'])
+        self.assertNotEqual(result['order_total_change_ore'], result['expected_credit_ore'])
+        self.assertEqual(result['payment_resolution']['refund'], 'unknown')
 
     def test_provider_currency_is_bound_before_review(self):
         wrong = 'SEK' if self.provider_name == 'oda' else 'NOK'

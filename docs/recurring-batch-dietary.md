@@ -60,6 +60,18 @@ text remains intact; unqualified dairy ingredients, allergens and traces still
 count, and a negated plant claim grants no exception. Plant wording establishes
 neither allergen absence nor nutritional superiority.
 
+The literal matcher also recognizes a bounded food-name list in recipe
+ingredients and retail fields: milk/melk includes helmelk, lettmelk, kremfløte
+and the named milk-powder/protein/fat/chocolate compounds; egg includes eggs,
+eggeplommer and eggehviter; reke/reker includes shrimp/prawns; a general nut term
+includes valnøtt/valnøtter, while a specific walnut term stays specific. This is
+an explicit lexical list, not generic substring or suffix matching: kyllinglegg,
+bokhvete, muskatnøtt and kokosmelk do not create those conflicts. Nearby literal
+free-from qualifiers retain an unknown result rather than proving suitability.
+Declared allergen/trace evidence still overrides a product-title claim, and
+laktosefri helmelk remains positive milk evidence. An old permission to review
+an unknown item cannot cover a newly identified allergy/never-buy conflict.
+
 Oda's and Mathem's exact numeric product routes resolve only to the same product's canonical
 public URL. The anonymous reader retains the visible ingredient/allergen rows,
 source URL and missing-information limits.
@@ -222,3 +234,5 @@ behind nutritional choices. Narrow cream/sour-cream preferences and `never_buy`
 rules do not imply a milk allergy or a ban on all dairy;
 only explicit user intent changes stored rules. Numeric goals with missing
 evidence stay visibly unverified rather than being silently certified.
+
+A linked-serving edit preserves storage guidance for an unchanged preparation, batch size and equivalent portions and dates. When those facts change, read the batch storage_review and review the new preparation. Submit one menu edit_slots edit with action=review_storage, its source_slot_id and spec_digest, and the replacement suitability and storage from the batch contract. The review must cover each linked serving. Recorded and locked batches keep their existing guidance.

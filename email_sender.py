@@ -219,6 +219,10 @@ class EmailSender:
             result.update(acknowledged=False, next="Receipt retained. Repeat this same request to reconcile; do not create a replacement send.")
         if record["outcome"] == "unknown":
             result["next"] = record.get("next") or "Email may have been sent. Reconcile this same request; never resend blindly."
+        elif record["outcome"] == "not_sent" and result.get("acknowledged"):
+            action = "retry_order" if record["target"]["kind"] == "order" else "retry"
+            result.update(retry_allowed=True,
+                          next=f"After an explicit request to retry, use {action} with delivery_requested=true for this same original target. Do not create a replacement send.")
         return result
 
     def execute(self, request):
@@ -227,6 +231,9 @@ class EmailSender:
             return self.status()
         if action == "configure":
             return self.configure(request)
+        if action == "review_order":
+            return self.rpc("email", action="review_catch_up", provider=request.get("provider"),
+                            order_id=request.get("order_id"), scheduler=request.get("scheduler"))
         if action == "adopt_order":
             return self.rpc("email", action="bind_sender", provider=request.get("provider"), order_id=request.get("order_id"))
         if action not in {"send", "reconcile", "retry", "send_order", "reconcile_order", "retry_order"}:
@@ -261,7 +268,9 @@ class EmailSender:
                 if bound.get("trigger") != "after_purchase" and (
                         not binding["unattended"] or not self.connections[binding["connection_id"]].get("unattended")):
                     raise ValueError("original sender is not available for unattended execution")
-                claimed = self.rpc("email", action="due", provider=target["provider"], order_id=target["order_id"], scheduler=request.get("scheduler"))
+                claimed = self.rpc("email", action="due", provider=target["provider"], order_id=target["order_id"],
+                                   scheduler=request.get("scheduler"), **({"catch_up_ref": request["catch_up_ref"],
+                                   "delivery_requested": request.get("delivery_requested")} if request.get("catch_up_ref") else {}))
                 if claimed.get("claim") is not True:
                     return claimed
                 record = {"target": target, "binding": binding, "token": claimed["claim_token"], "phase": "before_network"}

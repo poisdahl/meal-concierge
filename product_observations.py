@@ -10,7 +10,7 @@ import re
 from typing import Any, Hashable, Mapping
 import unicodedata
 
-from core import HouseholdError
+from core import HouseholdError, contains_line_controls
 
 
 MAX_PRODUCTS = 20
@@ -56,7 +56,9 @@ _PACKAGE_METADATA = re.compile(
     r"(?:[0-9]{1,3}(?:[.,][0-9]{1,2})?\s*%(?:\s+fett)?|klasse [1-3]|"
     r"(?:lagret i )?[0-9]{1,2}(?:[–-][0-9]{1,2})? (?:måneder|mnd))", re.IGNORECASE,
 )
-_PACKAGE_WORD = r"[^\W\d_]+(?:[.'’/-][^\W\d_]+)*\.?"
+# "/" joins words only through the description pattern below. Allowing it inside a
+# word as well gave every slash two readings and made a failed match exponential.
+_PACKAGE_WORD = r"[^\W\d_]+(?:[.'’-][^\W\d_]+)*\.?"
 _PACKAGE_DESCRIPTION = re.compile(rf"{_PACKAGE_WORD}(?:(?:\s+|\s*/\s*){_PACKAGE_WORD})*")
 # These words change the meaning of a measurement. Unknown names are inert;
 # quantity qualifiers, rates and alternative sizes must never supply capacity.
@@ -92,7 +94,7 @@ def _bounded_text(value: Any, *, required: bool = False, maximum: int = MAX_TEXT
         if required:
             raise HouseholdError("product observation text is missing")
         return None
-    if not isinstance(value, str):
+    if not isinstance(value, str) or contains_line_controls(value):
         raise HouseholdError("product observation text is invalid")
     text = " ".join(unicodedata.normalize("NFC", value).split())
     if (required and not text) or len(text.encode("utf-8")) > maximum:
@@ -182,6 +184,10 @@ def _oda_ore(value: Any) -> int | None:
 
 
 def _fraction(value: str) -> Fraction | None:
+    # In store display text, 1.000 / 1,000 can mean one or one thousand.
+    # Neither reading is exact package evidence without a declared numeric format.
+    if re.fullmatch(r"[1-9][0-9]{0,2}[.,][0-9]{3}", value):
+        return None
     try:
         decimal = Decimal(value.replace(",", "."))
     except InvalidOperation:
@@ -668,6 +674,14 @@ def normalize_retail_product_search(value: Any, *, observed_at: str | None = Non
     }
 
 
+class IncompleteProductBatch(HouseholdError):
+    """Individual query results failed validation within a verified batch."""
+
+    def __init__(self, message, observations):
+        super().__init__(message)
+        self.observations = observations
+
+
 def normalize_retail_product_search_batch(value: Any, queries: list[str], *, size: int,
                                           provider: str = "oda") -> dict[str, dict[str, Any]]:
     """Bind every native result to exactly one requested query; never zip by order."""
@@ -683,11 +697,20 @@ def normalize_retail_product_search_batch(value: Any, queries: list[str], *, siz
         query = batch.get("query") if isinstance(batch, Mapping) else None
         if not isinstance(query, str) or query not in queries or query in observed:
             raise HouseholdError("Product search batch query changed")
-        normalized = normalize_retail_product_search({"result": [batch]}, provider=provider)
-        if len(batch["products"]) > size:
-            raise HouseholdError("Product search batch exceeded its candidate scope")
-        normalized["scope"]["requested_size"] = size
-        observed[query] = normalized
+        observed[query] = None
+    failure = None
+    for batch in batches:
+        query = batch["query"]
+        try:
+            normalized = normalize_retail_product_search({"result": [batch]}, provider=provider)
+            if len(batch["products"]) > size:
+                raise HouseholdError("Product search batch exceeded its candidate scope")
+            normalized["scope"]["requested_size"] = size
+            observed[query] = normalized
+        except HouseholdError as exc:
+            failure = exc
+    if failure:
+        raise IncompleteProductBatch(str(failure), {k: v for k, v in observed.items() if v is not None})
     return observed
 
 

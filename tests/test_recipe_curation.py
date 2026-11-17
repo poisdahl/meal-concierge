@@ -155,6 +155,18 @@ class CurationTests(unittest.TestCase):
                          ('hermetisk palmenøttekstrakt',800,'ml'))
         self.assertIn('raw palm nuts', actual['original_text'])
 
+    def test_amendment_preserves_prior_notes_resolutions_and_editorial_history(self):
+        from recipe_curation import apply_amendment
+        recipe = source_recipe()
+        recipe['notes'] = 'Keep the original source note.'
+        credit = {'normalization_issues': ['new issue'], 'resolved_normalization_issues': ['older issue'],
+                  'editorial_adaptation': 'First review'}
+        recipe, credit = apply_amendment(recipe, credit, {'wikibooks:123': {
+            'source_hash': 'a' * 64, 'note': 'Second review', 'resolved_issues': ['new issue']}})
+        self.assertIn('Keep the original source note.', recipe['notes'])
+        self.assertEqual(credit['resolved_normalization_issues'], ['older issue', 'new issue'])
+        self.assertEqual(credit['editorial_history'], ['First review'])
+
     def test_source_bound_amendments_cannot_change_identity_or_ignore_source_issues(self):
         recipe = source_recipe()
         patch = {'source_hash': 'a'*64, 'note': 'Chosen batch', 'set': {}, 'resolved_issues': ['missing_steps']}

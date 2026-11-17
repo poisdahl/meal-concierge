@@ -46,6 +46,70 @@ class ProductContinuationTests(unittest.TestCase):
         self.menu = self.app.handle({"operation": "menu", "action": "save", "menu": {
             "week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
 
+    def test_stock_refresh_preserves_only_unaffected_product_approvals(self):
+        self.save_week()
+        ref = self.app._cart_menu_ref(self.menu)
+        initial = self.request(action="prepare", menu_ref=ref, include_recurring=False)
+        reviewed = self.request(action="prepare", product_plan_ref=initial["product_plan_ref"],
+                                candidate_approvals=self.approvals(initial["product_plan"]))
+        stock = self.app.handle({"operation": "shopping_list", "action": "get"})["stock_check"]
+        covered = stock["items"][0]["requirement_id"]
+        updated = self.app.handle({"operation": "shopping_list", "action": "record_stock",
+            "stock_ref": stock["stock_ref"], "stock_answers": [{"requirement_id": covered, "action": "have_all"}]})
+        args = {"action": "prepare", "product_plan_ref": reviewed["product_plan_ref"], "continuation_mode": "refresh_stock"}
+        with self.assertRaisesRegex(HouseholdError, "current stock_ref"):
+            self.request(**args, stock_ref=stock["stock_ref"])
+        fresh = self.request(**args, stock_ref=updated["stock_check"]["stock_ref"])
+        remaining = fresh["product_plan"]["requirements"]
+        self.assertNotIn(covered, [r["requirement_id"] for r in remaining])
+        self.assertTrue(remaining)
+        self.assertTrue(all(r["status"] == "selected" for r in remaining))
+        self.assertNotEqual(reviewed["product_plan_ref"], fresh["product_plan_ref"])
+        self.assertFalse(self.provider.quantities)
+
+    def test_continuation_rejects_changed_context_instead_of_ignoring_it(self):
+        self.save_week()
+        first = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu),
+                             price_mode='exact', budget_ore=50000, include_recurring=False)
+        ref = first['product_plan_ref']
+        calls = len(self.provider.calls)
+        for key, value in [('price_mode', 'estimate'), ('budget_ore', 1),
+                           ('ingredient_decisions', [{'source': first['product_plan']['requirements'][0]['sources'][0],
+                                                     'action': 'have_all'}])]:
+            with self.subTest(field=key), self.assertRaisesRegex(HouseholdError, f'preserves {key}'):
+                self.request(action='prepare', product_plan_ref=ref, **{key: value})
+            self.assertEqual(len(self.provider.calls), calls)
+        # Repeating unchanged context, or omitting it, keeps the original mode.
+        continued = self.request(action='prepare', product_plan_ref=ref, price_mode='exact',
+                                 budget_ore=50000, ingredient_decisions=[])
+        self.assertEqual(continued['product_plan']['price_mode'], 'exact')
+
+    def test_bad_batch_entry_retries_only_failed_query_and_preserves_good_observations(self):
+        self.save_week()
+        self.provider = BatchedRetailer()
+        self.app = Application(self.store, self.provider, object())
+        normal = self.provider.product_search_batch
+        bad = []
+
+        def malformed(queries, **kwargs):
+            response = normal(queries, **kwargs)
+            if not bad and len(queries) > 1:
+                bad.append(queries[-1])
+                response[bad[0]]["query"] = "unrelated"
+            return response
+        self.provider.product_search_batch = malformed
+        result = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu))
+        while result.get("continue_arguments"):
+            result = self.request(**result["continue_arguments"])
+        self.assertEqual(len(bad), 1)
+        self.assertEqual([args["queries"][0] for call, args, _ in self.provider.calls if call == "product_search"], bad)
+        self.assertTrue(all(row.get("observation") for row in result["product_plan"]["requirements"]))
+
+    def test_service_default_matches_mcp_estimate_mode_for_retail_planning(self):
+        self.save_week()
+        result = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu))
+        self.assertEqual(result['product_plan']['price_mode'], 'estimate')
+
     def test_failed_search_diagnostics_survive_saved_plan_and_agent_pages(self):
         from meny import MenyBrowserError
 
@@ -187,6 +251,15 @@ class ProductContinuationTests(unittest.TestCase):
         self.assertIsNone(self.app._weekly_checkout_problem())
         self.assertEqual(self.provider.quantities.get(recurring, 0), 0)
         # A fresh default shop explicitly reset from the menu still includes due items.
+        ordinary = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu),
+                                continuation_mode="reset", candidate_approvals=self.approvals(initial))
+        # This fake catalog treats case as distinct. The configured display
+        # name initially returns different SKUs; no unobserved standing item
+        # may acquire full apply authority.
+        self.assertIsNone(ordinary["apply_arguments"])
+        self.assertEqual(ordinary["product_plan"]["recurring_issues"][0]["reason"], "recurring_product_not_observed")
+        name = self.store.read()["recurring_items"][0]["product_name"]
+        self.provider.catalog[name] = observation(name, self.provider.entry("recurring fixture")["products"])
         ordinary = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu),
                                 continuation_mode="reset", candidate_approvals=self.approvals(initial))
         self.assertTrue(self.request(**ordinary["apply_arguments"], cart_change_requested=True)["applied"])

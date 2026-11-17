@@ -26,9 +26,12 @@ from pathlib import Path
 import re
 import stat
 from typing import Any
+import unicodedata
 from urllib.parse import parse_qsl, urlsplit
 import zipfile
 import zlib
+
+from core import contains_line_controls
 
 
 MAX_EXPORT_BYTES = 64 * 1024 * 1024
@@ -36,7 +39,7 @@ MAX_WEBPAGE_BYTES = 8 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 10_000
 MAX_JSONLD_SCRIPTS = 64
-MAX_TEXT = 8_000
+MAX_TEXT = 4_000  # Match the stored recipe step/notes boundary.
 MAX_MEALIE_COVER_BYTES = 12 * 1024 * 1024
 _CREDENTIAL_KEYS = {
     "access_token", "api_key", "apikey", "authorization", "auth", "token",
@@ -122,6 +125,12 @@ def _text(value: Any, field: str, maximum: int, *, required: bool = False) -> st
     return value
 
 
+def _label(value: Any, field: str, maximum: int, *, required: bool = False) -> str:
+    if isinstance(value, str) and contains_line_controls(value):
+        raise RecipeImportReaderError(f"{field} must be single-line text without directional controls")
+    return _text(value, field, maximum, required=required)
+
+
 def _url(value: Any, field: str) -> str | None:
     if value in (None, ""):
         return None
@@ -166,7 +175,7 @@ def _instructions(value: Any, unsupported: set[str], depth: int = 0) -> list[str
             result.append(_text(item, "recipeInstructions", MAX_TEXT, required=True))
         elif isinstance(item, dict) and _type(item.get("@type"), "HowToSection"):
             unsupported.update(f"recipeInstructions.{key}" for key in set(item) - {"@type", "name", "itemListElement"})
-            name = _text(item.get("name"), "section name", 500)
+            name = _label(item.get("name"), "section name", 500)
             if name:
                 result.append(f"[{name}]")
             if item.get("itemListElement") is not None:
@@ -193,11 +202,17 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
     if size > MAX_RECORD_BYTES:
         raise RecipeImportReaderError("source recipe is too large")
     unsupported = set(raw) - _SUPPORTED_FIELDS
-    name = _text(raw.get("name"), "name", 300, required=not (allow_incomplete and raw.get("name") is None))
+    tolerant_metadata = kind == "web" and allow_incomplete
+    name = _label(raw.get("name"), "name", 300, required=not (allow_incomplete and raw.get("name") is None))
     notes = []
     comments = raw.get("comment") or []
+    if tolerant_metadata and isinstance(comments, dict):
+        comments = [comments]
     if not isinstance(comments, list) or len(comments) > 100:
-        raise RecipeImportReaderError("comment must be a bounded list")
+        if not tolerant_metadata:
+            raise RecipeImportReaderError("comment must be a bounded list")
+        unsupported.add("comment")
+        comments = []
     for comment in comments:
         if isinstance(comment, dict) and comment.get("name") == "Author Notes" and _type(comment.get("@type"), "Comment"):
             notes.append(_text(comment.get("text"), "author notes", MAX_TEXT))
@@ -221,7 +236,15 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
         if isinstance(item, dict):
             unsupported.update(f"image.{key}" for key in set(item) - {"@type", "url", "contentUrl"})
             item = item.get("contentUrl") or item.get("url")
-        url = _url(item, "image")
+        try:
+            url = _url(item, "image")
+        except RecipeImportReaderError:
+            if not tolerant_metadata:
+                raise
+            # Media is optional and inert. Do not echo or retain signed,
+            # credential-bearing or relative URLs as managed image candidates.
+            unsupported.add("image")
+            continue
         if not url:
             unsupported.add("image")
         elif url not in image_candidates:
@@ -233,24 +256,44 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
         raise RecipeImportReaderError("recipeCategory must be a bounded text list")
     original_url = _url(raw.get("isBasedOn"), "isBasedOn")
     credit = _text(raw.get("creditText"), "creditText", 300)
+    ingredient_input = raw.get("recipeIngredient")
+    if tolerant_metadata and isinstance(ingredient_input, list):
+        if len(ingredient_input) > 200:
+            raise RecipeImportReaderError("recipeIngredient must contain at most 200 text entries")
+        without_empty = [line for line in ingredient_input if not isinstance(line, str) or line.strip()]
+        if without_empty != ingredient_input:
+            unsupported.add("recipeIngredient.empty")
+        ingredient_input = without_empty
+    identifier = raw.get("identifier")
+    if tolerant_metadata and type(identifier) is int:
+        identifier = str(identifier)  # An exact numeric ID has no culinary units to infer.
+    elif tolerant_metadata and identifier is not None and not isinstance(identifier, str):
+        unsupported.add("identifier")
+        identifier = None
+    times = {}
+    for key, field in (("prep", "prepTime"), ("cook", "cookTime"), ("total", "totalTime")):
+        if raw.get(field):
+            if tolerant_metadata and not isinstance(raw[field], str):
+                unsupported.add(field)  # A bare number cannot establish minutes or seconds.
+                continue
+            times[key] = _text(raw[field], field, 1000)
     extracted = {
         "name": name,
         "language": _text(raw.get("inLanguage"), "inLanguage", 20) or "und",
-        "ingredients": ([] if allow_incomplete and raw.get("recipeIngredient") in (None, "", []) else
-                        _strings(raw.get("recipeIngredient"), "recipeIngredient", 500, 200)),
+        "ingredients": ([] if allow_incomplete and ingredient_input in (None, "", []) else
+                        _strings(ingredient_input, "recipeIngredient", 500, 200)),
         "steps": ([] if allow_incomplete and raw.get("recipeInstructions") in (None, "", []) else
                   _instructions(raw.get("recipeInstructions"), unsupported)),
         "yield_text": _web_yield_text(raw.get("recipeYield")),
         "description": _text(raw.get("description"), "description", MAX_TEXT),
         "notes": _text("\n\n".join(notes), "author notes", MAX_TEXT),
         "tags": [_text(tag, "recipeCategory", 80, required=True) for tag in tags],
-        "times": {key: _text(raw[field], field, 1000) for key, field in
-                  (("prep", "prepTime"), ("cook", "cookTime"), ("total", "totalTime")) if raw.get(field)},
+        "times": times,
         "credit": credit,
         "source": {
             "kind": kind, "publisher": "RecipeSage" if kind == "recipesage" else None,
             "title": name, "author": _text(author, "author", 200) or None,
-            "url": source_url, "external_id": _text(raw.get("identifier"), "identifier", 300) or None,
+            "url": source_url, "external_id": _text(identifier, "identifier", 300) or None,
             "relationship": "user_supplied",
             "original": {"url": original_url, "publisher": credit or None},
         },
@@ -461,12 +504,21 @@ def _decoded_web_prose(value: str) -> str:
 def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
     """Prefer structured recipes, otherwise expose bounded text for host interpretation.
 
-    Malformed structured data fails explicitly; it is not silently downgraded to
-    text. Text has no inferred recipe fields or authority and must be presented
-    as untrusted source content to the calling agent.
+    A structured failure is explicit in the text result. Text has no inferred
+    recipe fields or authority and requires a separate host interpretation.
     """
     raw = _input_text(data, MAX_WEBPAGE_BYTES)
-    recipes = read_webpage_jsonld(raw, source_url=source_url, allow_empty=True, allow_incomplete=True)
+    source_bytes = data.encode("utf-8") if isinstance(data, str) else data
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    structured_error = None
+    try:
+        recipes = read_webpage_jsonld(raw, source_url=source_url, allow_empty=True, allow_incomplete=True)
+    except RecipeImportReaderError:
+        # Do not guess that a malformed script was unrelated, or promote a
+        # partial extraction to a complete recipe. Only visible text survives.
+        recipes = []
+        structured_error = {"code": "structured_recipe_unavailable",
+                            "message": "Structured recipe data could not be read completely; interpret the bounded visible text explicitly."}
     # Classify each advertised record independently. One incomplete sibling
     # must not erase usable structured recipes, and a physical yield remains
     # valid structured evidence even though person portions stay unresolved.
@@ -477,7 +529,7 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
         target.append(record)
     if complete:
         return {"mode": "structured", "recipes": complete, "incomplete_recipes": incomplete,
-                "text": None, "requires_interpretation": False}
+                "source_sha256": source_sha256, "text": None, "requires_interpretation": False}
     parser = _WebpageText(main_only=True)
     parser.feed(raw)
     parser.close()
@@ -504,17 +556,25 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
                 break
             retained.append(line)
             size += encoded
+        if not retained:
+            raise RecipeImportReaderError("webpage has no readable recipe text; supply the recipe text or a readable attachment")
         return _text("\n".join(retained), "webpage text", MAX_WEBPAGE_TEXT_BYTES, required=True)
-    record_texts = [{"record_index": index, "text": bounded_text(record_lines(record))}
-                    for index, record in enumerate(incomplete)]
     if len(incomplete) > 1:
-        return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete,
-                "record_texts": record_texts, "text": None, "source_url": _url(source_url, "source_url"),
-                "requires_record_selection": True, "requires_interpretation": True}
-    text = bounded_text([*(record_lines(incomplete[0]) if incomplete else []), *visible_lines])
+        record_values = [record_lines(record) for record in incomplete]
+        if all(record_values):
+            record_texts = [{"record_index": index, "text": bounded_text(lines)}
+                            for index, lines in enumerate(record_values)]
+            return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete,
+                    "record_texts": record_texts, "text": None, "source_url": _url(source_url, "source_url"),
+                    "requires_record_selection": True, "requires_interpretation": True,
+                    "source_sha256": source_sha256}
+        structured_error = {"code": "incomplete_recipe_selection",
+                            "message": "Incomplete structured entries cannot be separated reliably; explicitly interpret the selected visible recipe."}
+    text = bounded_text([*(record_lines(incomplete[0]) if len(incomplete) == 1 else []), *visible_lines])
     return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete, "text": text,
             "source_url": _url(source_url, "source_url"),
-            "requires_interpretation": True}
+            "requires_interpretation": True, "source_sha256": source_sha256,
+            **({"structured_error": structured_error} if structured_error else {})}
 
 
 def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
@@ -526,12 +586,26 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
     them. Input is an internal result of one of the read_* functions above.
     """
     try:
-        from recipes import source_ingredient, source_yield, categories_from_tags
+        from recipes import source_ingredient, source_ingredient_sections, source_yield, categories_from_tags
     except ImportError as exc:
         raise RecipeImportReaderError("shared schema-2 source parsers are not installed") from exc
     raw = record["extracted"]
     yield_value, portions = source_yield(raw["yield_text"])
-    ingredients = [source_ingredient(text, language=raw["language"]) for text in raw["ingredients"]]
+    if portions is None and "; " in raw["yield_text"]:
+        # Recipe plugins commonly publish ["4", "4 servings"]; the labelled entry names the servings.
+        for label in raw["yield_text"].split("; "):
+            labelled, portions = source_yield(label)
+            if portions is not None:
+                yield_value = {**labelled, "original_text": raw["yield_text"]}
+                break
+    # Imported pages, recipe exports and store recipe pages reach this helper,
+    # never the curated collection build.
+    empty_sections = []
+    if raw["source"]["kind"] == "recipesage":
+        ingredients, empty_sections = source_ingredient_sections(raw["ingredients"], language=raw["language"],
+                                                               attached_metric_units=True)
+    else:
+        ingredients = [source_ingredient(text, language=raw["language"], attached_metric_units=True) for text in raw["ingredients"]]
     portions_input = raw["yield_text"] or None
     if raw["source"]["kind"] == "mealie":
         # Mealie explicitly stores person servings independently from yield.
@@ -543,7 +617,9 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
             if food and unit and quantity:
                 unit_text = (unit["abbreviation"] if unit["useAbbreviation"] else "") or unit["name"]
                 measure = f"{quantity} {unit_text}"
-                ingredient = source_ingredient(text, item=food["name"], measure=measure, language=raw["language"])
+                # Mealie stores the quantity as a number, so "1.125" is one and an eighth.
+                ingredient = source_ingredient(text, item=food["name"], measure=measure, language=raw["language"],
+                                               numeric_measure=True)
                 # The structured native values, rather than potentially stale
                 # originalText/display, are the actual input to this parse.
                 for evidence in ingredient["evidence"].values():
@@ -556,7 +632,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
                 ingredient = source_ingredient(text, language=raw["language"])
             ingredient["notes"] = detail["note"] or None
             ingredients.append(ingredient)
-    notes = "\n\n".join(part for part in (raw["description"], raw["notes"]) if part)
+    notes = "\n\n".join(part for part in (raw["description"], raw["notes"], *empty_sections) if part)
     _text(notes, "combined recipe notes", MAX_TEXT)
     return {
         "schema_version": 2, "name": raw["name"], "language": raw["language"],
@@ -568,6 +644,67 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
         "portions_evidence": {"basis": "source" if portions is not None else "unknown", "input": portions_input},
         "notes": notes or None, "times": deepcopy(raw["times"]) or None,
     }
+
+
+_FRACTIONS = "¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞"
+
+
+def _whole_quote(text: str, quote: str) -> bool:
+    """True when some occurrence of quote cuts neither a number nor a word.
+
+    "5 dl" also occurs inside "1,5 dl", "500 g" inside "1 500 g", "2 ss" inside
+    "1-2 ss" and "4 porsjoner" inside "14 porsjoner"; such a cut would record a
+    different amount as the source's own. A letter beside a digit is not a
+    cut: pages often glue a list number or heading to the text that follows.
+    """
+    def number(character: str) -> bool:
+        return character.isdigit() or character in _FRACTIONS
+
+    def cut(position: int) -> bool:
+        before, after = text[max(0, position - 4):position], text[position:position + 2]
+        left, right = before[-1:], after[:1]
+        if not left or not right:
+            return False
+        if (left.isalpha() and right.isalpha()) or (number(left) and number(right)):
+            return True
+        # One separator between two numbers on either side of the cut: a decimal
+        # or fraction mark, a range dash, or the single space of "1 500" and "1 1/2".
+        joins = ".,/⁄-–— \u00a0\u2009\u202f"
+        if left in joins and number(right) and number(before[-2:-1]):
+            return True
+        if right in joins and number(left) and number(after[1:2]):
+            return True
+        # A multiplier: "2 x 400 g" is not 400 g.
+        if number(right):
+            # OCR and pasted text may retain several horizontal spaces around
+            # grouped digits, fraction/range marks or multiplication signs.
+            # Do not cross lines or mistake a list marker ("1. 2 ss") for a decimal.
+            prefix = text[:position]
+            spaces = " \t\u00a0\u2009\u202f"
+            trimmed = prefix.rstrip(spaces)
+            if trimmed != prefix and trimmed and number(trimmed[-1]):
+                return True
+            if trimmed[-1:] in {",", "/", "⁄", "-", "–", "—", "x", "×"}:
+                previous = trimmed[:-1].rstrip(spaces)
+                if previous and number(previous[-1]):
+                    return True
+        if number(left) and right in " \t\u00a0\u2009\u202f":
+            suffix = text[position:].lstrip(" \t\u00a0\u2009\u202f")
+            if suffix and number(suffix[0]):
+                return True
+            if suffix[:1] in {",", "/", "⁄", "-", "–", "—", "x", "×"}:
+                following = suffix[1:].lstrip(" \t\u00a0\u2009\u202f")
+                if following and number(following[0]):
+                    return True
+        return False
+
+    start, tried = text.find(quote), 0
+    while start != -1 and tried < 256:
+        if not cut(start) and not cut(start + len(quote)):
+            return True
+        # A page that repeats the quote hundreds of times is not searched further.
+        start, tried = text.find(quote, start + 1), tried + 1
+    return False
 
 
 def read_transcript(value: Any) -> dict[str, Any]:
@@ -625,8 +762,16 @@ def read_transcript(value: Any) -> dict[str, Any]:
                 or type(item.get("page")) is not int or item["page"] not in page_text):
             raise RecipeImportReaderError(f"{field} requires an exact transcript page and quote")
         quote = _text(item.get("quote"), field + " quote", maximum, required=True)
-        if quote not in page_text[item["page"]]:
+        # Canonically equivalent letters and invisible line-wrap characters
+        # do not change the quote. Retain the supplied pages for source hashing;
+        # only the comparison and numeric-boundary check use this readable form.
+        def comparable(text):
+            return unicodedata.normalize("NFC", text.replace("\u00ad", "").replace("\u200b", ""))
+        readable_page, readable_quote = comparable(page_text[item["page"]]), comparable(quote)
+        if not readable_quote or readable_quote not in readable_page:
             raise RecipeImportReaderError(f"{field} quote is absent from its supplied page")
+        if not _whole_quote(readable_page, readable_quote):
+            raise RecipeImportReaderError(f"{field} quote starts or ends inside a number or word on its supplied page")
         return quote, f"Page {item['page']}: {quote}"
 
     def selected(field, maximum, *, optional=False):
@@ -663,20 +808,55 @@ def read_transcript(value: Any) -> dict[str, Any]:
     def has_dependency(text):
         return any(pattern.search(text) for pattern in dependency_patterns)
     for item in ingredient_excerpts:
-        quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount",))
+        quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item", "choice", "whole_count"))
+        original_quote = quote
+        if "choice" in item:
+            # Only a single shared explicit measure and two complete named
+            # alternatives establish the amount for either selected ingredient.
+            parts = re.fullmatch(r"(\d+(?:[.,/]\d+)?\s+[^\W\d_]+)\s+([^\W\d_]+)\s+(?:or|eller)\s+([^\W\d_]+)",
+                                 quote, re.IGNORECASE)
+            if (not parts or item["choice"] not in parts.groups()[1:]
+                    or "estimated_amount" in item or "item" in item or "whole_count" in item):
+                raise RecipeImportReaderError("choose one complete source alternative with the same stated measure")
+            quote = f"{parts[1]} {item['choice']}"
+        if "whole_count" in item:
+            pieces = re.fullmatch(r"([1-9]\d{0,2})\s+(egg|eggs|løk|onion|onions|gulrot|gulrøtter|carrot|carrots)",
+                                  quote, re.IGNORECASE)
+            if (not pieces or item["whole_count"] is not True or "estimated_amount" in item
+                    or "item" in item or "choice" in item):
+                raise RecipeImportReaderError("whole_count requires an explicit count of a recognized whole ingredient")
+            quote = f"{pieces[1]} stk {pieces[2]}"
         if (re.search(r"\b(?:or|eller)\b", quote, re.IGNORECASE)
                 or re.search(r"(?<=[^\W\d_])\s*[/|]\s*(?=[^\W\d_])", quote, re.UNICODE)):
             raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
         if has_dependency(quote):
             raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
         estimated_item = None
-        if "estimated_amount" in item:
+        if "item" in item:
+            # The quote stays the evidence; the host names what its estimate measures
+            # ("1 can chopped tomatoes" as 400 g of "chopped tomatoes").
+            if "estimated_amount" not in item:
+                raise RecipeImportReaderError("an ingredient item name applies only with estimated_amount")
+            estimated_item = _text(item["item"], "ingredient item", 300, required=True)
+            # The name is held to the same rules as the quoted line.
+            if (re.search(r"\b(?:or|eller)\b", estimated_item, re.IGNORECASE)
+                    or re.search(r"(?<=[^\W\d_])\s*[/|]\s*(?=[^\W\d_])", estimated_item, re.UNICODE)):
+                raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
+            if has_dependency(estimated_item):
+                raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+        elif "estimated_amount" in item:
             without_leading_amount = re.sub(
                 r"^\s*\d+(?:[.,]\d+)?\s+", "", quote, count=1,
             ).strip()
             if without_leading_amount != quote.strip():
                 estimated_item = without_leading_amount
-        ingredient = source_ingredient(quote, item=estimated_item, language=language)
+        ingredient = source_ingredient(quote, item=estimated_item, language=language, attached_metric_units=True)
+        if quote != original_quote:
+            if ingredient["quantity"] is None or ingredient["unit"] is None:
+                raise RecipeImportReaderError("selected ingredient needs a source-supported measure")
+            ingredient["original_text"] = ingredient["raw"] = original_quote
+            if "choice" in item:
+                ingredient["notes"] = f"Selected from source alternatives: {item['choice']}"
         for evidence in ingredient["evidence"].values():
             evidence["input"] = evidence_input
         if "estimated_amount" in item:
@@ -694,8 +874,16 @@ def read_transcript(value: Any) -> dict[str, Any]:
         ingredients.append(ingredient)
     step_excerpts = selected("steps", 100)
     steps = [excerpt(item, "step", maximum=MAX_TEXT)[0] for item in step_excerpts]
-    if any(has_dependency(step) for step in steps):
-        raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+    reserved_marinade = False
+    for step in steps:
+        checked = step
+        if reserved_marinade:
+            checked = re.sub(r"\b(?:the leftover marinade|rest(?:en|ene) av marinaden)\b",
+                             "marinade", checked, flags=re.IGNORECASE)
+        if has_dependency(checked):
+            raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+        if re.fullmatch(r"\s*(?:reserve|set aside|sett av|hold av)\s+(?:(?:some|the|half|litt|halve|av)\s+){0,4}marinad(?:e|en)[.!]?\s*", step, re.IGNORECASE):
+            reserved_marinade = True
     note_excerpts = selected("notes", 100, optional=True)
     notes = "\n\n".join(excerpt(item, "note", maximum=MAX_TEXT)[0] for item in note_excerpts)
     notes = _text(notes, "combined transcript notes", MAX_TEXT) or None
@@ -713,7 +901,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
             portions_evidence = {"basis": "estimate", "input": evidence_input, "assumptions": assumptions}
     tags = selected("tags", 50, optional=True)
     tags = [_text(tag, "tag", 80, required=True) for tag in tags]
-    name = _text(interpretation.get("name"), "name", 300, required=True)
+    name = _label(interpretation.get("name"), "name", 300, required=True)
     categories = interpretation.get("categories")
     if categories is not None:
         if not isinstance(categories, list):
@@ -844,6 +1032,9 @@ def read_mealie_json(data: bytes | str) -> dict[str, Any]:
                 detail["quantity"] or "", (detail["unit"] or {}).get("name", ""),
                 (detail["food"] or {}).get("name", ""), detail["note"],
             ) if value)
+        if not text and not detail["title"]:
+            unsupported.add("recipeIngredient.empty")
+            continue
         ingredients.append(_text(text, "Mealie ingredient text", 500, required=True))
         details.append(detail)
         if detail["title"]:
@@ -870,7 +1061,7 @@ def read_mealie_json(data: bytes | str) -> dict[str, Any]:
         for value in _mealie_list(raw.get(field), field, 50):
             tag = _mealie_names(value, field)
             unsupported.update(f"{field}.{key}" for key in set(tag) - {"name"})
-            name = _text(tag.get("name"), f"Mealie {field} name", 80, required=True)
+            name = _label(tag.get("name"), f"Mealie {field} name", 80, required=True)
             if name not in tags:
                 tags.append(name)
     if len(tags) > 50:
@@ -880,8 +1071,19 @@ def read_mealie_json(data: bytes | str) -> dict[str, Any]:
     yield_label = _text(raw.get("recipeYield"), "Mealie recipeYield", 500)
     yield_text = f"{yield_quantity} {yield_label}".strip() if yield_quantity else yield_label
     yield_text = _text(yield_text, "Mealie complete yield", 500)
-    name = _text(raw.get("name"), "Mealie name", 300, required=True)
-    original_url = _url(raw.get("orgURL"), "orgURL")
+    name = _label(raw.get("name"), "Mealie name", 300, required=True)
+    if isinstance(raw.get("orgURL"), str):
+        try:
+            raw["orgURL"].encode("utf-8")
+        except UnicodeError as exc:
+            raise RecipeImportReaderError("Mealie orgURL contains invalid Unicode") from exc
+    try:
+        original_url = _url(raw.get("orgURL"), "orgURL")
+    except RecipeImportReaderError:
+        if isinstance(raw.get("orgURL"), str) and raw["orgURL"].strip().casefold().startswith(("http://", "https://")):
+            raise  # Preserve the native import's credential-bearing URL rejection.
+        original_url = None
+        unsupported.add("orgURL")  # Optional provenance text is not a usable URL.
     return {
         "extracted": {
             "name": name, "language": "und", "ingredients": ingredients,
