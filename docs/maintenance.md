@@ -24,7 +24,9 @@ into the conversation.
    and retain that clean checkout. Do not select `main` or a `recipes-*` release.
    If the same unmodified build is already running, verify it and report that no
    program update is needed. Otherwise run the target checkout's `check-browser`
-   against the existing home before stopping.
+   against the existing home before stopping. Then use `prepare-program` while
+   available and retain the exact ID for `update --prepared-program ID`; downloads
+   and the initial compatibility rehearsal happen before the service stops.
    Follow the runtime update sequence and the host's existing stop/start owner.
    Refresh only the matching client connection/skill as required by its guide;
    preserve unrelated registrations. A routine update does not authorize setup,

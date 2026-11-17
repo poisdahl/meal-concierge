@@ -593,6 +593,7 @@ class InstallerTests(unittest.TestCase):
         config = home / 'config.json'
         meta = {'code_root': str(code), 'paths': {'config': str(config), 'state': str(home / 'state')}}
         with patch.object(install, 'stage_release', return_value=release), \
+             patch.object(install, 'preflight_program'), \
              patch.object(install, 'offline', side_effect=lambda _: nullcontext()), \
              patch.object(install, 'migrate'), patch.object(install, 'write_unit'), \
              patch.object(install.urllib.request, 'urlopen', side_effect=AssertionError('unexpected recipe network')), \
