@@ -7,6 +7,7 @@ import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -32,6 +33,8 @@ import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+_REQUEST_ADMISSION_DEADLINE = ContextVar("meal_concierge_admission_deadline", default=None)
 
 from oda_browser import MathemBrowser, OdaBrowser, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
 from browser_prerequisites import validate_browser_paths
@@ -512,16 +515,28 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             view_fields.add("response_view")
         if view_fields.intersection(request):
             request = {key: value for key, value in request.items() if key not in view_fields}
+        def dispatch():
+            deadline = _REQUEST_ADMISSION_DEADLINE.get()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise HouseholdError("request expired while waiting for service ownership; no new operation was started")
+            # Admission is now complete. Nested calls and reconciliation for a
+            # started operation must finish even if the original caller leaves.
+            token = _REQUEST_ADMISSION_DEADLINE.set(None)
+            try:
+                return self._handle(request)
+            finally:
+                _REQUEST_ADMISSION_DEADLINE.reset(token)
+
         try:
             if operation == "products" and action == "lowest_cost":
                 with self._recipe_planner_operation(), self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "products":
                 with self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "cart" and action != "get":
                 with self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif (
                 operation == "profile" and action in {"update", "reset", "review_pantry"}
             ) or (
@@ -530,30 +545,30 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 operation == "recurring" and action in {"add", "remove", "substitute"}
             ):
                 with self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "menu" and action in {"add_slot", "edit_slots", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"}:
                 with self._recipe_planner_operation(), self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "menu" and action in {"save", "clear"}:
                 if action == "save" and (
                     request.get("planner_handoff") is not None or request.get("planner_ref") is not None
                 ):
                     with self._recipe_planner_operation():
-                        result = self._handle(request)
+                        result = dispatch()
                 else:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation == "recipe_pack":
                 with self._recipe_planner_operation(), self.product_plan_lock:
-                    result = self._handle(request)
+                    result = dispatch()
             elif operation in {"recipes", "feedback", "migration"} or (
                 operation == "menu" and (
                     action in {"plan", "resolve_handoff"}
                 )
             ):
                 with self._recipe_planner_operation():
-                    result = self._handle(request)
+                    result = dispatch()
             else:
-                result = self._handle(request)
+                result = dispatch()
         except HouseholdError as exc:
             # An explicit error response does not prove a previously dispatched
             # mutation failed. Keep the original journal and expose only the
@@ -611,7 +626,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         ):
             raise HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
         if operation == "health":
-            return {"ok": True, "integration": self.integration, "build": deepcopy(BUILD_IDENTITY)}
+            return {"ok": True, "integration": self.integration, "build": deepcopy(BUILD_IDENTITY),
+                    "admission_deadline_clock": time.monotonic()}
         if operation == "status":
             state = self.store.read()
             if self.provider in {"oda", "mathem"} and self.integration.get("status") != "ready":
@@ -1192,7 +1208,17 @@ class Server:
                     raise HouseholdError("request must be an object")
                 if request.get("contract", 1) != 1:
                     raise HouseholdError("incompatible bridge/core contract; update the client package to this service release")
-                response = {"ok": True, "contract": 1, "result": self.app.handle(request)}
+                deadline = request.pop("request_not_after", None)
+                if deadline is not None:
+                    if type(deadline) not in {int, float} or not math.isfinite(deadline):
+                        raise HouseholdError("request deadline must be finite")
+                    from rpc_client import rpc_timeout
+                    deadline = min(deadline, time.monotonic() + rpc_timeout(request.get("operation"), request))
+                token = _REQUEST_ADMISSION_DEADLINE.set(deadline)
+                try:
+                    response = {"ok": True, "contract": 1, "result": self.app.handle(request)}
+                finally:
+                    _REQUEST_ADMISSION_DEADLINE.reset(token)
             except (HouseholdError, TypeError, ValueError, OverflowError, UnicodeError, RecursionError) as exc:
                 response = {"ok": False, "error": str(exc)}
                 if isinstance(exc, HouseholdError) and getattr(exc, "outcome_unknown", False) is True:

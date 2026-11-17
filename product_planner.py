@@ -902,6 +902,30 @@ def _estimated_single_product(requirement, observation, approval):
             "merchandise_ore": merchandise, "mandatory_deposit_ore": None, "total_payable_ore": None}
 
 
+def _estimated_product_scope(requirement, observation, approval):
+    """Compare regular covering packs in an explicitly approved estimate scope.
+
+    Every candidate must have observable capacity, availability and a regular
+    merchandise price. Unknown deposits remain unknown; no payable-price or
+    globally cheapest claim follows from this comparison.
+    """
+    choices = []
+    for reference in approval["candidate_refs"]:
+        selection = _estimated_single_product(requirement, observation,
+                                              {**approval, "candidate_refs": [reference]})
+        if selection is None:
+            return None
+        findings = selection["products"][0].get("dietary_assessments", [])
+        dietary_rank = sum(10 if f["condition"] in {"preference_deviation", "sensitivity_conflict"}
+                           else 1 if f["condition"] == "unknown" else 0 for f in findings)
+        excess = selection["excess_score"]
+        choices.append(((dietary_rank, selection["merchandise_ore"],
+                         excess is None,
+                         _read_fraction(excess) if excess is not None else Fraction(0),
+                         selection["package_count"], canonical(reference)), selection))
+    return min(choices, key=lambda item: item[0])[1] if choices else None
+
+
 def _practical_packages(requirement, observation, approval, price_mode):
     """Select observed whole packages without claiming a physical conversion."""
     refs = approval['candidate_refs']
@@ -942,6 +966,14 @@ def _practical_packages(requirement, observation, approval, price_mode):
     if cost is None:
         return None
     amounts = {k: cost[k] for k in ('merchandise_ore', 'mandatory_deposit_ore', 'total_payable_ore')}
+    warnings = []
+    if size is not None and 'shared_package' not in approval:
+        needed = _read_fraction(requirement['quantity'], positive=True)
+        minimum_count = math.ceil(needed / size)
+        if count > minimum_count:
+            warnings.append({'reason': 'extra_packages', 'minimum_covering_packages': minimum_count,
+                'selected_packages': count,
+                'next': 'Explain the additional package need or select the minimum covering count; the ingredient need is unchanged.'})
     return {'products': [{'product_ref': refs[0], 'name': product['name'], 'quantity': count,
                          'dietary_assessments': deepcopy(product.get('dietary_findings', [])),
                          'purchase_options': cost['bundles'],
@@ -951,7 +983,8 @@ def _practical_packages(requirement, observation, approval, price_mode):
             'observed_package': deepcopy(package),
             'observed_package_description': product.get('display', {}).get('package'), 'coverage': None,
             'required': deepcopy(requirement['quantity']), 'unit': requirement['unit'],
-            'excess_score': None, 'package_count': count, **amounts}
+            'excess_score': None, 'package_count': count,
+            **({'quantity_warnings': warnings} if warnings else {}), **amounts}
 
 
 def _candidate_diagnostics(requirement, observation, approval):
@@ -1065,9 +1098,9 @@ def build_product_plan(
                       else 'dietary_conflict_no_compatible_candidate')
 
         if reason == "candidate_price_or_eligibility_unresolved" and price_mode == "estimate":
-            estimated = _estimated_single_product(requirement, evaluated_observation, filtered)
+            estimated = _estimated_product_scope(requirement, evaluated_observation, filtered)
             if estimated is not None:
-                selection, reason, eligible_count = estimated, None, 1
+                selection, reason, eligible_count = estimated, None, len(filtered["candidate_refs"])
         if 'package_count' in filtered and filtered['candidate_refs']:
             practical = _practical_packages(requirement, evaluated_observation, filtered, price_mode)
             selection, reason, eligible_count = (practical, None, 1) if practical is not None else (None, 'practical_package_choice_unavailable', 0)
@@ -1096,6 +1129,12 @@ def build_product_plan(
             item["status"] = "selected"
             item["selection"] = selection
             selection["surplus_quantity"] = None if selection["coverage"] is None else _fraction_json(_read_fraction(selection["coverage"]) - _read_fraction(selection["required"]))
+            if (selection["coverage"] is not None
+                    and _read_fraction(selection["coverage"]) > 2 * _read_fraction(selection["required"])):
+                selection["quantity_warnings"] = [{"reason": "oversized_package",
+                    "required": deepcopy(selection["required"]), "coverage": deepcopy(selection["coverage"]),
+                    "unit": selection["unit"],
+                    "next": "Review smaller suitable packs or explain how the surplus will be used; the required quantity is not increased."}]
         planned.append(item)
     planned_by_id = {item.get("requirement_id"): item for item in planned}
     allocated_refs: set[str | int] = set()

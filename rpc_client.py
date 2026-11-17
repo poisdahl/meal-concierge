@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -78,9 +79,17 @@ def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
 
 def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     # Probe before dispatch: a pre-contract core must never receive a mutation.
+    admission_clock = None
     if operation != "health":
-        rpc("health")
+        probe = rpc("health")
+        value = probe.get("admission_deadline_clock")
+        if type(value) in {int, float} and math.isfinite(value):
+            admission_clock = value
     request = {"operation": operation, **arguments, "contract": 1}
+    if admission_clock is not None:
+        # Use the service's own monotonic clock, so a container clock offset or
+        # wall-clock adjustment cannot extend a queued request past its caller.
+        request["request_not_after"] = admission_clock + rpc_timeout(operation, arguments)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(rpc_timeout(operation, arguments))
         connection.connect(str(SOCKET))

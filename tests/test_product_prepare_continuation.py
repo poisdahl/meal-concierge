@@ -63,6 +63,11 @@ class ProductContinuationTests(unittest.TestCase):
                                  budget_ore=50000, ingredient_decisions=[])
         self.assertEqual(continued['product_plan']['price_mode'], 'exact')
 
+    def test_service_default_matches_mcp_estimate_mode_for_retail_planning(self):
+        self.save_week()
+        result = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu))
+        self.assertEqual(result['product_plan']['price_mode'], 'estimate')
+
     def test_failed_search_diagnostics_survive_saved_plan_and_agent_pages(self):
         from meny import MenyBrowserError
 
