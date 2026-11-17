@@ -19,6 +19,11 @@ On first use, review the household, portions, dietary preferences, meal plan
 and recipe sources. Keep the suggested settings or describe what you want to
 change. Ask to review your setup again at any time.
 
+Reset only the settings you name. For agent tools, profile `reset` requires
+explicit `paths` such as `["meals.portions"]`; `["*"]` resets the entire profile,
+including saved dietary exclusions. The response includes the affected previous
+values. An omitted or empty list does not reset anything.
+
 The agent gives a short guide as you make the relevant choices. Ask at any time:
 "Show everything Meal Concierge can do and all my settings and preferences."
 That overview includes meal and purchasing preferences, recurring groceries,

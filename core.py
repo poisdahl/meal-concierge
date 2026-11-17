@@ -1268,24 +1268,34 @@ class StateStore:
             state["profile"] = candidate
             return deepcopy(candidate)
 
-    def reset_profile(self, paths: list[str] | None = None) -> dict[str, Any]:
+    def reset_profile(self, paths: list[str] | None = None, *, include_previous: bool = False) -> dict[str, Any]:
+        if (not isinstance(paths, list) or not 1 <= len(paths) <= 100
+                or any(not isinstance(path, str) or not path or len(path) > 100 for path in paths)
+                or len(set(paths)) != len(paths) or ("*" in paths and paths != ["*"])):
+            raise HouseholdError("reset requires explicit profile paths; use ['*'] only to reset the whole profile")
+        reset_all = paths == ["*"]
         defaults = initial_state(self.config)["profile"]
         with self.locked() as state:
             previous = state["profile"]
             candidate = deepcopy(previous)
-            if not paths:
+            previous_values = {}
+            if reset_all:
                 candidate = defaults
+                previous_values["*"] = deepcopy(previous)
             else:
                 for path in paths:
                     parts = path.split(".")
                     source: Any = defaults
                     target: Any = candidate
+                    original: Any = previous
                     for part in parts[:-1]:
                         if not isinstance(source, dict) or part not in source or not isinstance(target, dict) or part not in target:
                             raise HouseholdError(f"unknown profile field: {path}")
                         source, target = source[part], target[part]
+                        original = original[part]
                     if not isinstance(source, dict) or parts[-1] not in source or not isinstance(target, dict):
                         raise HouseholdError(f"unknown profile field: {path}")
+                    previous_values[path] = deepcopy(original[parts[-1]])
                     target[parts[-1]] = deepcopy(source[parts[-1]])
             if candidate["pantry"]["assume"] != previous["pantry"]["assume"]:
                 candidate["pantry"]["assumptions_accepted"] = False
@@ -1295,12 +1305,13 @@ class StateStore:
                 previous,
                 candidate,
                 provided_meal_fields=(
-                    RECURRING_MEAL_FIELDS if not paths else
+                    RECURRING_MEAL_FIELDS if reset_all else
                     frozenset(path.removeprefix("meals.") for path in paths if path.startswith("meals."))
                 ),
             )
             state["profile"] = candidate
-            return deepcopy(candidate)
+            return ({"profile": deepcopy(candidate), "previous_values": previous_values}
+                    if include_previous else deepcopy(candidate))
 
 
 def mask_email(value: str | None) -> str | None:
