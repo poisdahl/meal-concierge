@@ -57,6 +57,10 @@ PRODUCT_PLAN_REF_PATTERN = re.compile(r"productplan_[A-Za-z0-9_-]{16,32}\Z")
 MAX_PREPARED_REPLANS = 32
 
 
+class _ManagedCartReadUnavailable(RetailPreDispatchError):
+    """The first managed batch stopped on its own read, before journal or dispatch."""
+
+
 class PlanningOperations:
     products_prepare_budget_seconds = PRODUCT_OPERATION_TIMEOUT
 
@@ -4904,10 +4908,10 @@ class PlanningOperations:
         for batch in self._meny_cart_batches(operations):
             try:
                 before = self._cart_provider_call("get_cart", {}, deadline=deadline)
-            except RetailPreDispatchError as exc:
+            except (HouseholdError, OSError) as exc:
                 if acknowledged != original:
                     raise MenyCartStoppedError("Prior MENY batches completed; no next batch was dispatched") from exc
-                raise
+                raise _ManagedCartReadUnavailable("MENY cart read failed before the first managed batch was dispatched") from exc
             before_live, _names = self._cart_lines(cart_summary(before))
             if before_live != acknowledged:
                 raise HouseholdError("MENY cart changed between bounded batches")
@@ -5332,6 +5336,12 @@ class PlanningOperations:
                 else:
                     self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline,
                                                 plan_digest=request.get("_reviewed_product_digest"))
+            except _ManagedCartReadUnavailable:
+                if not request.get("_reviewed_product_digest"):
+                    raise
+                return {"synced": False, "status": "rejected_before_write", "cart_changed": False,
+                        "cart_write_pending": False, "reason": "cart_read_failed_before_first_batch",
+                        "next": "Read the cart before repeating the reviewed product apply."}
             except RetailPreDispatchError:
                 raise
             except HouseholdError as exc:
