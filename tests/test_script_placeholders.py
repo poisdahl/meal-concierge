@@ -37,7 +37,7 @@ class ScriptPlaceholderTests(unittest.TestCase):
             with self.subTest(name=name):
                 label = f"Legg {name} i handlevognen"
                 client, dispatched = RecordingMeny(), []
-                meny.MenyClient._click_cart_control(client, product, label, lambda: dispatched.append(True))
+                meny.MenyClient._click_cart_control(client, product, label, lambda: dispatched.append(True), lambda: True)
                 ready, hit_test = client.scripts
                 for script in (ready, hit_test):
                     self.assertIn(f"location.pathname === {json.dumps(product)} ", script)
