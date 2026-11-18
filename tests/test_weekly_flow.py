@@ -407,7 +407,7 @@ class WeeklyFlowTests(unittest.TestCase):
             return result
         with mock.patch.object(self.provider, 'call', side_effect=lost_response):
             result = self.app.handle({'operation': 'products', **prepared['apply_arguments'], 'cart_change_requested': True})
-        self.assertFalse(result['applied'])
+        self.assertTrue(result['applied'])
         plan = self.store.read()['cart_plan']
         self.assertEqual(plan['supplemental_quantities']['10'], 1)
         self.assertNotIn('10', plan['added_quantities'])

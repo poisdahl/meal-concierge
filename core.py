@@ -1468,7 +1468,7 @@ def masked_status(state: Mapping[str, Any], integration: Mapping[str, Any]) -> d
     }
 
 
-def cart_contents(cart: Mapping[str, Any]) -> dict[str, Any]:
+def cart_contents(cart: Mapping[str, Any], *, require_quantities: bool = False) -> dict[str, Any]:
     """Normalize observed cart lines independently of unavailable checkout amounts."""
     raw_lines: list[Any] = []
     groups = cart.get("groups")
@@ -1487,7 +1487,7 @@ def cart_contents(cart: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(item, Mapping):
             raise HouseholdError("Cart line is invalid")
         product = item.get("product") if isinstance(item.get("product"), Mapping) else item
-        quantity = item.get("quantity", 1)
+        quantity = item.get("quantity", None if require_quantities else 1)
         try:
             numeric_quantity = float(quantity)
         except (TypeError, ValueError, OverflowError):

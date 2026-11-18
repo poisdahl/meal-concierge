@@ -809,7 +809,7 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     view = {"projection": "agent", "operation": "cart", "action": action}
     view.update(_fields(result, ("status", "reason", "next", "cart_digest", "cart_write_pending",
                                  "cleared", "ensured", "reconciled", "synced", "stopped", "idempotent",
-                                 "changed", "outcome_unknown", "operation_id", "cart_observation", "cart_reconciliation_required", "decision",
+                                 "changed", "outcome_unknown", "operation_id", "cart_observation", "cart_target_observed", "dispatch_outcome", "cart_reconciliation_required", "decision",
                                  "product_plan_stale", "menu_binding_stale", "order_id", "applied_operations",
                                  "excluded_product_ids", "accepted_missing_product_ids", "default_suggestion")))
     if isinstance(result.get("cart_plan"), dict):

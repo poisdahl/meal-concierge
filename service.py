@@ -634,6 +634,17 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def _handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         operation = request.get("operation")
         pending_cart = self.store.read().get("pending_cart_change")
+        if (pending_cart and operation == "checkout" and request.get("action") == "prepare"
+                and self.provider in {"oda", "mathem"} and pending_cart.get("provider") == self.provider
+                and not any(pending_cart.get(k) for k in ("order_change", "native_cart_binding", "native_managed", "clear_requested"))):
+            with self.product_plan_lock:
+                try:
+                    self._cart({"action": "reconcile_change", "_deadline": request.get("_deadline")})
+                except (HouseholdError, OSError):
+                    # The original cart can still be uncertain. No checkout was dispatched.
+                    if not self.store.read().get("pending_cart_change"):
+                        raise
+            pending_cart = self.store.read().get("pending_cart_change")
         if pending_cart and (
             (operation == "cart" and request.get("action", "get") not in {"get", "reconcile_change"})
             or (operation == "products" and request.get("action") == "apply")

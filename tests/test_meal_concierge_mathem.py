@@ -1315,13 +1315,9 @@ class MathemFlowTests(unittest.TestCase):
 
     def test_uncertain_cart_is_reconciled_without_second_dispatch(self):
         self.shop.fail_after_write = True
-        with self.assertRaisesRegex(HouseholdError, 'timed out'):
-            self.app.handle({'operation': 'cart', 'action': 'change', 'operations': [{'productId': 10, 'quantity': 1}]})
-        with self.assertRaisesRegex(HouseholdError, 'reconcile_change'):
-            self.app.handle({'operation': 'checkout', 'action': 'prepare'})
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            self.app.handle({'operation': 'cart', 'action': 'reconcile_change'})
-        self.assertIsNotNone(self.store.read().get('pending_cart_change'))
+        result = self.app.handle({'operation': 'cart', 'action': 'change', 'operations': [{'productId': 10, 'quantity': 1}]})
+        self.assertTrue(result['cart_target_observed'])
+        self.assertFalse(self.store.read().get('pending_cart_change'))
         self.assertEqual(sum(tool == 'manipulate_cart' for tool, _ in self.shop.calls), 1)
 
     def test_protected_actions_never_use_oda_browser_or_create_attempts(self):
@@ -1688,17 +1684,12 @@ class CompactProductApplyTests(unittest.TestCase):
                 raise HouseholdError('synthetic lost cart response after effect')
             return result
         self.shop.call = lost_response
-        self.app.handle(self.arguments)
+        self.assertTrue(self.app.handle(self.arguments)['applied'])
         restarted = Application(StateStore(self.store.path.parent, {
             'instance': 'test', 'household': 'Test', 'profile_overrides': {}}), self.shop, object())
-        result = restarted.handle(self.arguments)
-        self.assertTrue(result["outcome_unknown"])
-        journal = restarted.store.read()["pending_cart_change"]
-        self.assertEqual(journal["operation_id"], result["operation_id"])
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            restarted.handle({"operation": "cart", "action": "reconcile_change"})
-        self.assertEqual(restarted.store.read()["pending_cart_change"], journal)
-        self.assertTrue(restarted.handle(self.arguments)["outcome_unknown"])
+        self.assertFalse(restarted.store.read().get('pending_cart_change'))
+        self.assertEqual(restarted.store.read()['cart_plan']['added_quantities'], {})
+        restarted.handle(self.arguments)
         self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
         self.assertEqual(self.shop.cart['items'][0]['quantity'], 1)
 

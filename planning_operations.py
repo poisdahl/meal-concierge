@@ -5154,6 +5154,42 @@ class PlanningOperations:
             "request_digest": mp.digest(pending["operations"]), "expected_digest": mp.digest(pending["expected"])}
         state.pop("pending_cart_change")
 
+    def _matches_uncertain_cart_target(self, state, pending, live):
+        """Check whether the observed cart satisfies an ordinary shopping operation."""
+        if (not pending or self.provider not in {"oda", "mathem"} or pending.get("provider") != self.provider
+                or not pending.get("operation_id") or pending.get("dispatch_finished")
+                or pending.get("native_cart_binding") or pending.get("native_managed") or pending.get("clear_requested")
+                or state.get("order_change") or pending.get("order_change") or state.get("pending_checkout")
+                or state.get("pending_cancellation") or pending.get("expected") != live
+                or state.get("pending_cart_change") != pending):
+            return False
+        if pending.get("managed_menu") and self._cart_menu_ref(state.get("menu")) != pending["managed_menu"]:
+            return False
+        return True
+
+    def _archive_observed_cart_target(self, state, pending, live):
+        if not self._matches_uncertain_cart_target(state, pending, live):
+            raise HouseholdError("original cart changed during observation")
+        state.setdefault("cart_change_receipts", {})[pending["operation_id"]] = {
+            "status": "target_observed", "dispatch_outcome": "unknown", "original_operation": deepcopy(pending),
+            "observed_digest": self._cart_digest(live),
+        }
+        state.pop("pending_cart_change")
+
+    def _observed_managed_target(self, mutation_error, cart, expected, menu_ref, operations):
+        if mutation_error is None or self.provider not in {"oda", "mathem"}:
+            return None
+        try:
+            quantities, _ = self._cart_lines(cart_contents(cart, require_quantities=True))
+        except HouseholdError:
+            return None
+        state = self.store.read()
+        pending = state.get("pending_cart_change") or {}
+        if (quantities == expected and pending.get("managed_menu") == menu_ref
+                and pending.get("operations") == operations and self._matches_uncertain_cart_target(state, pending, quantities)):
+            return pending
+        return None
+
     def _finish_observed_managed_cart(self, state, menu_ref, live):
         pending = state.get("pending_cart_change")
         if not pending or pending.get("managed_menu") != menu_ref:
@@ -5393,7 +5429,8 @@ class PlanningOperations:
             expected[product_id] = expected.get(product_id, 0) + operation["quantity"]
             if expected[product_id] == 0:
                 expected.pop(product_id)
-        if mutation_error is not None or verified_live != expected:
+        observed_only = self._observed_managed_target(mutation_error, verified_cart, expected, expected_menu_ref, operations)
+        if (mutation_error is not None and not observed_only) or verified_live != expected:
             with self.store.locked() as state:
                 pending_result = self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
                 plan = state["cart_plan"]
@@ -5413,12 +5450,17 @@ class PlanningOperations:
                 ),
             }
         with self.store.locked() as state:
-            self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
+            if observed_only:
+                self._archive_observed_cart_target(state, observed_only, verified_live)
+            else:
+                self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
             plan = state.get("cart_plan")
             if not isinstance(plan, dict) or canonical(plan.get("menu_ref")) != canonical(current.get("menu_ref")):
                 raise HouseholdError("cart plan changed while syncing")
             for operation in operations:
                 product_id = str(operation["productId"])
+                if observed_only and operation["quantity"] > 0:
+                    continue
                 remaining = max(0, plan["added_quantities"].get(product_id, 0) + operation["quantity"])
                 if remaining:
                     plan["added_quantities"][product_id] = remaining
@@ -5436,7 +5478,8 @@ class PlanningOperations:
         return {
             "synced": True,
             "idempotent": not operations,
-            "applied_operations": operations,
+            "applied_operations": [] if observed_only else operations,
+            **({"cart_target_observed": True} if observed_only else {}),
             "cart": verified_cart,
             "cart_plan": self._cart_plan_view(current, verified_summary),
         }
@@ -5577,7 +5620,8 @@ class PlanningOperations:
             raise
         verified_summary = summarize(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
-        if mutation_error is not None or verified_live != target:
+        observed_only = self._observed_managed_target(mutation_error, verified_cart, target, expected_menu_ref, operations)
+        if (mutation_error is not None and not observed_only) or verified_live != target:
             with self.store.locked() as state:
                 pending_result = self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
                 current = state["cart_plan"]
@@ -5596,7 +5640,10 @@ class PlanningOperations:
             }
         approved_digest = self._cart_digest(verified_live)
         with self.store.locked() as state:
-            self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
+            if observed_only:
+                self._archive_observed_cart_target(state, observed_only, verified_live)
+            else:
+                self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
             current = state.get("cart_plan")
             if not isinstance(current, dict) or current.get("pending_cart_digest") != supplied_digest:
                 raise HouseholdError("cart plan changed while applying the decision")
@@ -5617,7 +5664,7 @@ class PlanningOperations:
                 if min(quantity, verified_live.get(product_id, 0)) > 0
             }
             for operation in operations:
-                if operation["quantity"] > 0:
+                if operation["quantity"] > 0 and not observed_only:
                     product_id = str(operation["productId"])
                     current["added_quantities"][product_id] = current["added_quantities"].get(product_id, 0) + operation["quantity"]
             current["added_quantities"] = {
@@ -5649,6 +5696,7 @@ class PlanningOperations:
         return {
             "reconciled": True,
             "decision": decision,
+            **({"cart_target_observed": True} if observed_only else {}),
             "excluded_product_ids": sorted(excluded),
             "accepted_missing_product_ids": sorted(accepted_missing),
             "cart": verified_cart,
@@ -5918,6 +5966,8 @@ class PlanningOperations:
             state.pop("pending_cart_change")
 
     def _complete_cart_write(self, pending: Mapping[str, Any], cart: Mapping[str, Any], *, review_discrepancy=False):
+        if not isinstance(cart, Mapping):
+            raise HouseholdError("Cart items are unavailable")
         quantities, names = self._cart_lines(cart_contents(cart))
         native_ending = None
         if pending.get("native_cart_binding"):
@@ -5934,6 +5984,16 @@ class PlanningOperations:
                             raise HouseholdError("original native cart intent changed during refusal reconciliation")
                         state.pop("pending_cart_change")
                     return
+        if not pending.get("dispatch_finished"):
+            with self.store.locked() as state:
+                if self._matches_uncertain_cart_target(state, pending, quantities):
+                    self._cart_lines(cart_contents(cart, require_quantities=True))
+                    self._archive_observed_cart_target(state, pending, quantities)
+                    plan = state.get("cart_plan")
+                    if isinstance(plan, dict):
+                        self._set_cart_needs_input(plan, quantities, names)
+                    return {"reconciled": True, "cart_write_pending": False, "cart_target_observed": True,
+                            "dispatch_outcome": "unknown", "operation_id": pending["operation_id"]}
         stopped_prefix = pending.get("stopped_before_next_click") is True
         finished = pending.get("dispatch_finished") is True
         if pending.get("managed_menu"):
@@ -6234,7 +6294,15 @@ class PlanningOperations:
                         raise error from failure
                     return {"ensured": False, "stopped": True, "reason": str(exc), "cart": cart,
                             "next": "The adapter stopped before the next click. Earlier additions are retained; resolve product availability before a new ensure."}
-                except HouseholdError as exc:
+                except (HouseholdError, OSError) as exc:
+                    if self.provider in {"oda", "mathem"} and not change and not pending.get("native_cart_binding") and action != "clear":
+                        try:
+                            observed = self.provider_client.call("get_cart", {}, deadline=deadline)
+                            recovery = self._complete_cart_write(pending, observed)
+                            if recovery and recovery.get("cart_target_observed"):
+                                return {**recovery, "cart": observed, **({"ensured": True} if desired is not None else {})}
+                        except (HouseholdError, OSError):
+                            pass
                     exc.outcome_unknown = True
                     raise
                 try:

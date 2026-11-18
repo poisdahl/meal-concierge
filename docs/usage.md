@@ -290,6 +290,13 @@ quantities are labeled estimates with assumptions. Ask to save an adaptation
 when it should become a lasting bank entry. Oda, Mathem and MENY recipes retain
 their store binding and use the existing schema-2 format.
 
+If Oda or Mathem loses the reply to an ordinary grocery cart update, Meal
+Concierge reads the cart again. When the whole cart has the requested items
+and quantities, shopping can continue. The original write stays recorded as
+uncertain and is never resent by recovery. If that first read is unavailable,
+preparing checkout checks the cart again. If the quantities still differ, the original write remains pending.
+A cart observation cannot confirm payment or an existing order change.
+
 An explicit request to empty the cart uses its freshly observed digest. The menu
 is retained, earlier product completion is invalidated, and an uncertain removal
 is reconciled before another write. An empty cart is not a cancelled order.

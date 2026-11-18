@@ -430,18 +430,44 @@ class GroceryTopupTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "reconcile_change"):
             reopened.handle({"operation": "checkout", "action": "prepare"})
         self.assertEqual(len(queued), 1)
-        # An independent edit satisfies the target; the original delayed
-        # operation can still arrive. Neither matching read releases it.
+        # Use the observed cart as the shopping result, without asserting
+        # which shopper made it or repeating our original delta.
         provider._mutate_cart(queued[0])
         provider.call = original
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            reopened.handle({"operation": "cart", "action": "reconcile_change"})
-        provider._mutate_cart(queued[0])
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            reopened.handle({"operation": "cart", "action": "reconcile_change"})
-        self.assertEqual(self.quantities(app, provider)[product], 3)
-        self.assertTrue(store.read()["pending_cart_change"])
+        result = reopened.handle({"operation": "cart", "action": "reconcile_change"})
+        self.assertTrue(result["cart_target_observed"])
+        receipt = store.read()["cart_change_receipts"][result["operation_id"]]
+        self.assertEqual(receipt["dispatch_outcome"], "unknown")
+        self.assertEqual(receipt["original_operation"]["expected"], {str(product): 2})
+        self.assertFalse(store.read().get("pending_cart_change"))
         self.assertEqual(len(queued), 1)
+
+    def test_checkout_prepare_rereads_after_lost_write_and_unavailable_read(self):
+        store, provider, browser, app, product = self.household()
+        original = provider.call
+        writes = []
+        def lose_replies(tool, args, **kwargs):
+            if tool == "get_cart" and writes:
+                raise HouseholdError("temporary read outage")
+            result = original(tool, args, **kwargs)
+            if tool == "manipulate_cart":
+                writes.append(deepcopy(args))
+                raise HouseholdError("lost write reply")
+            return result
+
+        provider.call = lose_replies
+        with self.assertRaisesRegex(HouseholdError, "lost write reply"):
+            self.ensure(app, product, 2)
+        journal = store.read()["pending_cart_change"]
+        provider.call = original
+        reopened = Application(StateStore(store.directory, store.config), provider, browser)
+        with mock.patch.object(reopened, "_checkout", return_value={"status": "prepared"}) as prepare:
+            self.assertEqual(reopened.handle({"operation": "checkout", "action": "prepare"})["status"], "prepared")
+            prepare.assert_called_once()
+        self.assertEqual(len(writes), 1)
+        final = store.read()
+        self.assertFalse(final.get("pending_cart_change"))
+        self.assertEqual(final["cart_change_receipts"][journal["operation_id"]]["original_operation"], journal)
 
     def test_completed_raw_batch_with_concurrent_edit_requires_review_after_restart(self):
         store, provider, browser, app, product = self.household()
