@@ -1865,10 +1865,10 @@ __DELIVERY_BINDING__
   return JSON.stringify({reservation_expired:location.href === 'https://meny.no/kassen' && authenticated.length === 1 && notices.length === 1});
 })()
 """),
-            target_order_id=review.get("target_order_id"),
+            target_order_id=review.get("target_order_id"), total_ore=round(review_summary["total"] * 100),
         )
 
-    def _wait_for_vipps_dispatch(self, exact_checkout: Any = None, known_failure: Any = None, *, target_order_id: str | None = None) -> bool:
+    def _wait_for_vipps_dispatch(self, exact_checkout: Any = None, known_failure: Any = None, *, total_ore: int, target_order_id: str | None = None) -> bool:
         requests: Any = {"requests": []}
         for attempt in range(40):
             requests = self._invoke("network", "requests")
@@ -1880,7 +1880,7 @@ __DELIVERY_BINDING__
             # Its acknowledgement alone does not establish a Vipps handoff.
             if (vipps_dispatch_acknowledged(requests)
                     and (snapshot is None or snapshot.get("vipps_gateway") is True)):
-                self._complete_vipps_request()
+                self._complete_vipps_request(total_ore)
                 return True
             if attempt < 39:
                 self._sleep(0.25)
@@ -1900,75 +1900,101 @@ __DELIVERY_BINDING__
             "the outcome is uncertain and must be reconciled; do not retry"
         )
 
-    def _complete_vipps_request(self) -> None:
-        form: dict[str, Any] = {}
-        for attempt in range(40):
-            form = self._eval(r"""
-(() => {
-  document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
-  const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
-  const identity = location.origin === 'https://api.vipps.no' && location.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
-  const text = norm(document.body.innerText);
-  const sent = identity && /We've sent a payment request to/i.test(text) && /Open Vipps/i.test(text);
-  const phones = [...document.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible).filter(x => x.maxLength === 8 && x.autocomplete === 'tel-national');
-  const buttons = [...document.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === 'Next');
-  const remember = [...document.querySelectorAll('input[type="checkbox"]')].filter(visible);
-  const ready = identity && !sent && /Continue to pay with Vipps/i.test(text) && phones.length === 1 && buttons.length === 1 && remember.length === 1 && remember[0].checked === false;
-  if (ready) buttons[0].setAttribute('data-meal-concierge-action', 'vipps-next');
-  return JSON.stringify({identity, ready, sent});
+    def _vipps_gateway(self, stage: str, total_ore: int, session: str | None = None,
+                       hit: tuple[int, int] | None = None) -> str:
+        # The identity digest stays local. Neither the gateway token nor the
+        # private phone number is returned by browser evaluation.
+        options = {"stage": stage, "total": total_ore, "session": session, "hit": hit,
+                   "phone": self.vipps_phone_number}
+        return r"""
+(async () => {
+  const options = __OPTIONS__;
+  const url = new URL(location.href);
+  const official = url.origin === 'https://api.vipps.no' && !url.username && !url.password &&
+    url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
+  const absent = () => JSON.stringify(options.stage === 'gate' ? {ready:false} : {state:'absent'});
+  if (!official) return absent();
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url.href));
+  const session = Array.from(new Uint8Array(bytes), x => x.toString(16).padStart(2,'0')).join('');
+  if (location.href !== url.href || (options.session && session !== options.session)) return absent();
+  const norm = s => (s || '').normalize('NFC').replace(/\s+/g,' ').trim();
+  const text = norm(document.body?.innerText);
+  const state = value => JSON.stringify({state:value, session});
+  if (/(?:payment request|session|link) (?:has |is )?expired|(?:request|payment) (?:has been |was )?cancelled/i.test(text)) return absent();
+  const visible = x => { const box=x.getBoundingClientRect(), style=getComputedStyle(x);
+    return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0; };
+  const amounts = [...text.matchAll(/(?:^|\s)(\d+(?:[ \u00a0]\d{3})*)[.,](\d{2})\s*NOK\b/gi)]
+    .map(m => Number(m[1].replace(/\s/g,'')) * 100 + Number(m[2]));
+  const merchant = (document.body?.innerText || '').split(/\n/).some(s => /^MENY(?:\s|$)/i.test(norm(s)));
+  const verified = merchant && amounts.length === 1 && amounts[0] === options.total;
+  const recipient = text.match(/We['’]ve sent a payment request to\s+(\+47[ \u00a0-]*(?:\d[ \u00a0-]*){8})(?!\d)/i);
+  if (recipient && /Open Vipps/i.test(text)) {
+    const exactRecipient = recipient[1].replace(/\D/g,'') === '47' + options.phone;
+    return state(exactRecipient && (verified || (options.stage === 'ack' && options.session)) ? 'sent' : 'gateway');
+  }
+  const phones = [...document.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible);
+  const buttons = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.innerText) === 'Next');
+  if (!verified || phones.length !== 1 || buttons.length !== 1) {
+    return options.stage === 'gate' ? absent() : state('gateway');
+  }
+  const phone = phones[0], button = buttons[0];
+  const digits = () => phone.value.replace(/\D/g,'');
+  const matches = () => digits() === options.phone || digits() === '47' + options.phone;
+  const rememberSelected = [...document.querySelectorAll('input[type="checkbox"]')].some(x => x.checked);
+  if (options.stage === 'fill' && !matches() && !digits() && !phone.disabled && !phone.readOnly && !rememberSelected) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(phone,options.phone);
+    phone.dispatchEvent(new Event('input',{bubbles:true}));
+    phone.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+  if (options.stage === 'gate') {
+    document.querySelectorAll('[data-meal-concierge-action="vipps-next"]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
+    const hit = options.hit ? document.elementFromPoint(...options.hit) : button;
+    const ready = matches() && !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+      hit && (hit === button || button.contains(hit));
+    if (ready) button.setAttribute('data-meal-concierge-action','vipps-next');
+    return JSON.stringify({ready:Boolean(ready)});
+  }
+  return state('phone');
 })()
-""")
-            if form.get("identity") is True and (form.get("ready") is True or form.get("sent") is True):
+""".replace("__OPTIONS__", json.dumps(options))
+
+    def _complete_vipps_request(self, total_ore: int) -> None:
+        session = None
+        # The hosted page can take a minute to hydrate after MENY acknowledges
+        # the order. Observe it without repeating either payment action.
+        for attempt in range(90):
+            form = self._eval(self._vipps_gateway("observe", total_ore, session))
+            if form.get("session") and not session:
+                session = form["session"]
+            if session and form.get("state") == "sent":
+                return
+            if session and form.get("state") == "phone":
                 break
-            if attempt < 39:
-                self._sleep(0.25)
-        if form.get("sent") is True:
-            return
-        if form.get("identity") is not True or form.get("ready") is not True:
-            raise HouseholdError("Vipps payment page did not finish rendering; the outcome is uncertain; do not retry")
-        try:
-            self._invoke("fill", 'input[name="phone-number"]', self.vipps_phone_number)
-        except HouseholdError as exc:
-            raise HouseholdError("Vipps mobile number could not be entered; the outcome is uncertain; do not retry") from exc
-        selector = '[data-meal-concierge-action="vipps-next"]'
-        gate = r"""
-(() => {
-  document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
-  const requireHit = __REQUIRE_HIT__;
-  const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
-  const phone = document.querySelector('input[type="tel"][name="phone-number"]');
-  const remember = [...document.querySelectorAll('input[type="checkbox"]')].filter(visible);
-  const buttons = [...document.querySelectorAll('button')].filter(enabled).filter(x => (x.innerText || '').trim() === 'Next');
-  const exact = location.origin === 'https://api.vipps.no' && location.pathname === '/dwo-api-application/v1/deeplink/vippsgateway' && phone && phone.value.replace(/\D/g,'') === __PHONE__ && remember.length === 1 && remember[0].checked === false && buttons.length === 1;
-  const target = exact ? buttons[0] : null;
-  if (target) target.setAttribute('data-meal-concierge-action', 'vipps-next');
-  const hit = requireHit ? document.elementFromPoint(__HIT_X__, __HIT_Y__) : target;
-  return JSON.stringify({ready:Boolean(target && hit && (hit === target || target.contains(hit)))});
-})()
-"""
+            if attempt < 89:
+                self._sleep(1)
+        else:
+            raise HouseholdError("Vipps payment page did not finish rendering. Finish the existing Vipps handoff and reconcile this attempt.")
+        self._eval(self._vipps_gateway("fill", total_ore, session))
 
         def render(require_hit: bool, x: int = 0, y: int = 0) -> str:
-            return gate.replace("__REQUIRE_HIT__", "true" if require_hit else "false").replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y)).replace("__PHONE__", json.dumps(self.vipps_phone_number))
+            return self._vipps_gateway("gate", total_ore, session, (x, y) if require_hit else None)
 
-        if self._eval(render(False)) != {"ready": True}:
-            raise HouseholdError("Vipps mobile request control changed; the outcome is uncertain; do not retry")
-        x, y = self._wait_for_checkout_hit(selector, render, "Vipps mobile request control changed or is obscured")
+        for attempt in range(20):
+            if self._eval(render(False)) == {"ready": True}:
+                break
+            if attempt < 19:
+                self._sleep(0.25)
+        else:
+            raise HouseholdError("Check the phone number on the existing Vipps page, finish that handoff and reconcile this attempt.")
+        x, y = self._wait_for_checkout_hit('[data-meal-concierge-action="vipps-next"]', render,
+                                           "Vipps mobile request control changed or is obscured")
         self._invoke("mouse", "move", str(x), str(y))
         if self._eval(render(True, x, y)) != {"ready": True}:
-            raise HouseholdError("Vipps mobile request control changed or is obscured; the outcome is uncertain; do not retry")
+            raise HouseholdError("Vipps mobile request control changed or is obscured; reconcile this attempt")
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
         for attempt in range(40):
-            sent = self._eval(r"""
-(() => {
-  const text = (document.body.innerText || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  return JSON.stringify({sent:location.origin === 'https://api.vipps.no' && location.pathname === '/dwo-api-application/v1/deeplink/vippsgateway' && /We've sent a payment request to/i.test(text) && /Open Vipps/i.test(text)});
-})()
-""")
-            if sent == {"sent": True}:
+            if self._eval(self._vipps_gateway("ack", total_ore, session)).get("state") == "sent":
                 return
             if attempt < 39:
                 self._sleep(0.25)
@@ -2775,26 +2801,12 @@ __DELIVERY_BINDING__
             order_id = result.get("order_id")
             return str(order_id) if order_id is not None else None
 
-    def checkout_payment_awaiting_user(self, *, deadline: float | None = None) -> bool:
-        """Keep an acknowledged Vipps page alive while mobile approval is pending."""
+    def checkout_payment_handoff(self, total_ore: int, *, deadline: float | None = None) -> str | None:
+        """Identify a still-open hosted handoff before order-history navigation."""
 
         with self._locked_operation(MENY_READ_TIMEOUT, deadline):
-            for attempt in range(120):
-                result = self._eval(r"""
-(() => {
-  const text = (document.body.innerText || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  const url = new URL(location.href);
-  const waiting = url.origin === 'https://api.vipps.no' &&
-    url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway' &&
-    /We've sent a payment request to/i.test(text) && /Open Vipps/i.test(text);
-  return JSON.stringify({waiting});
-})()
-""")
-                if result != {"waiting": True}:
-                    return False
-                if attempt < 119:
-                    self._sleep(0.25)
-            return True
+            stage = self._eval(self._vipps_gateway("observe", total_ore)).get("state")
+            return stage if stage in {"sent", "phone", "gateway"} else None
 
     def checkout_payment_not_dispatched(self, review: Mapping[str, Any], *, deadline: float | None = None) -> bool:
         """Prove that a fenced click never left the unchanged MENY checkout page."""

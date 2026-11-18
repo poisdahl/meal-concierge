@@ -383,8 +383,8 @@ class FakeMeny(FakeOda):
     def checkout_confirmation_order_id(self, *, deadline=None):
         return self.confirmation_order_id
 
-    def checkout_payment_awaiting_user(self, *, deadline=None):
-        return self.payment_waiting
+    def checkout_payment_handoff(self, total_ore, *, deadline=None):
+        return "sent" if self.payment_waiting else None
 
     def checkout_payment_not_dispatched(self, review, *, deadline=None):
         return self.payment_not_dispatched
@@ -3573,7 +3573,7 @@ phoneOnly.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],inpu
 buttonOnly.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?buttons:[];
 const paymentText=c.amountless?'':` ${c.amount||'256.50'}`;
 const currency=c.currency===false?'':'NOK';
-const baseText=c.sent?`${c.merchant===false?'Other':'Oda'} ${currency}${paymentText} We've sent a payment request to your phone Open Vipps`:
+const baseText=c.sent?`${c.merchant===false?'Other':'Oda'} ${currency}${paymentText} We've sent a payment request to +47 9000 0000 Open Vipps`:
  c.expired?'Oh no, your payment timed out Go back and try again. Go back':`Continue to pay with Vipps ${c.merchant===false?'Other':'Oda'} ${currency}${paymentText}`;
 const text=baseText+(c.extraText?` ${c.extraText}`:'');
 global.location=new URL(c.url||'https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque');
@@ -7690,14 +7690,14 @@ process.stdout.write(eval(script));
             {"requests": [{"method": "POST", "status": 201, "url": "https://platform-rest-prod.ngdata.no/api/order/payment"}]},
         ])
 
-        client._wait_for_vipps_dispatch()
+        client._wait_for_vipps_dispatch(total_ore=47190)
 
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("network", "requests"),
             mock.call("network", "requests"),
         ])
         client._sleep.assert_called_once_with(0.25)
-        client._complete_vipps_request.assert_called_once_with()
+        client._complete_vipps_request.assert_called_once_with(47190)
 
     def test_meny_update_waits_for_delayed_same_order_receipt_without_vipps(self):
         client = self.client()
@@ -7714,7 +7714,7 @@ process.stdout.write(eval(script));
         # The caller already holds the non-reentrant browser lock.
         client.lock.acquire()
         try:
-            self.assertFalse(client._wait_for_vipps_dispatch(target_order_id="123"))
+            self.assertFalse(client._wait_for_vipps_dispatch(total_ore=47190, target_order_id="123"))
         finally:
             client.lock.release()
         client._complete_vipps_request.assert_not_called()
@@ -7732,8 +7732,8 @@ process.stdout.write(eval(script));
             {"authenticated": True, "blank": False, "vipps_gateway": False, "order_id": None},
             {"authenticated": False, "blank": False, "vipps_gateway": True, "order_id": None},
         ])
-        self.assertTrue(client._wait_for_vipps_dispatch(target_order_id="123"))
-        client._complete_vipps_request.assert_called_once_with()
+        self.assertTrue(client._wait_for_vipps_dispatch(total_ore=47190, target_order_id="123"))
+        client._complete_vipps_request.assert_called_once_with(47190)
         client._sleep.assert_called_once_with(0.25)
 
     def test_meny_update_post_without_matching_receipt_or_gateway_is_uncertain(self):
@@ -7751,7 +7751,7 @@ process.stdout.write(eval(script));
                     "vipps_gateway": False, "order_id": observed,
                 })
                 with self.assertRaises(HouseholdError) as caught:
-                    client._wait_for_vipps_dispatch(target_order_id="123")
+                    client._wait_for_vipps_dispatch(total_ore=47190, target_order_id="123")
                 self.assertNotIsInstance(caught.exception, CheckoutPreconditionError)
                 client._complete_vipps_request.assert_not_called()
                 self.assertTrue(all(call.args == ("network", "requests") for call in client._invoke.call_args_list))
@@ -7762,7 +7762,7 @@ process.stdout.write(eval(script));
         client._invoke = mock.Mock(return_value={"requests": []})
 
         with self.assertRaisesRegex(HouseholdError, "uncertain.*do not retry"):
-            client._wait_for_vipps_dispatch()
+            client._wait_for_vipps_dispatch(total_ore=47190)
 
         self.assertEqual(client._invoke.call_count, 40)
         self.assertEqual(client._sleep.call_count, 39)
@@ -7774,7 +7774,7 @@ process.stdout.write(eval(script));
         exact_checkout = mock.Mock(return_value=True)
 
         with self.assertRaisesRegex(CheckoutPreconditionError, "did not dispatch.*fresh prepare"):
-            client._wait_for_vipps_dispatch(exact_checkout)
+            client._wait_for_vipps_dispatch(exact_checkout, total_ore=47190)
 
         self.assertEqual(client._invoke.call_count, 41)
         self.assertEqual(exact_checkout.call_count, 2)
@@ -7787,7 +7787,7 @@ process.stdout.write(eval(script));
         known_failure = mock.Mock(return_value={"reservation_expired": True})
 
         with self.assertRaisesRegex(CheckoutPreconditionError, "reservation expired.*same delivery time"):
-            client._wait_for_vipps_dispatch(exact_checkout, known_failure)
+            client._wait_for_vipps_dispatch(exact_checkout, known_failure, total_ore=47190)
 
         self.assertEqual(client._invoke.call_count, 40)
         known_failure.assert_called_once_with()
@@ -7811,11 +7811,13 @@ process.stdout.write(eval(script));
         client = self.client()
         client._sleep = mock.Mock()
         client._eval = mock.Mock(side_effect=[
-            {"identity": True, "ready": True, "sent": False},
+            {"state": "gateway", "session": "fixture"},
+            {"state": "phone", "session": "fixture"},
+            {"state": "phone", "session": "fixture"},
             {"ready": True},
             {"ready": True},
             {"ready": True},
-            {"sent": True},
+            {"state": "sent"},
         ])
 
         def invoke(*arguments):
@@ -7825,10 +7827,9 @@ process.stdout.write(eval(script));
 
         client._invoke = mock.Mock(side_effect=invoke)
 
-        client._complete_vipps_request()
+        client._complete_vipps_request(47190)
 
         self.assertEqual(client._invoke.call_args_list, [
-            mock.call("fill", 'input[name="phone-number"]', "90000000"),
             mock.call("scrollintoview", '[data-meal-concierge-action="vipps-next"]'),
             mock.call("get", "box", '[data-meal-concierge-action="vipps-next"]'),
             mock.call("mouse", "move", "25", "40"),
@@ -7836,6 +7837,76 @@ process.stdout.write(eval(script));
             mock.call("mouse", "up"),
         ])
         self.assertTrue(all("Remember my number" not in str(call) for call in client._invoke.call_args_list))
+
+    def test_slow_vipps_render_can_recover_an_already_sent_request_without_a_click(self):
+        client = self.client()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock()
+        client._eval = mock.Mock(side_effect=[
+            *([{"state": "gateway", "session": "fixture"}] * 60),
+            {"state": "sent", "session": "fixture"},
+        ])
+        client._complete_vipps_request(47190)
+        self.assertEqual(client._sleep.call_count, 60)
+        client._invoke.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the hosted Vipps form fixture")
+    def test_hosted_vipps_phone_form_verifies_the_merchant_amount_and_same_session(self):
+        client = self.client()
+        script = r"""
+const assert=require('node:assert/strict');
+global.crypto=require('node:crypto').webcrypto;
+global.location=new URL('https://api.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=fixture');
+const verifiedText='Continue to pay with Vipps\nMENY Levert hjem Oslo\nMENY MLH AS\n471.90 NOK';
+const attrs={};
+const button={innerText:'Next',disabled:true,getAttribute:()=>null,contains:()=>false,
+ setAttribute:(k,v)=>attrs[k]=v,removeAttribute:k=>delete attrs[k]};
+global.HTMLInputElement=class {
+ get value(){return this._value||''} set value(v){this._value=v}
+ dispatchEvent(){button.disabled=this.value.length!==8}
+};
+const phone=new HTMLInputElement();
+for (const node of [button,phone]) node.getBoundingClientRect=()=>({width:30,height:20});
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.document={body:{innerText:verifiedText},elementFromPoint:()=>button,querySelectorAll:s=>
+ s==='button'?[button]:s==='input[type="tel"][name="phone-number"]'?[phone]:[]};
+const execute=async s=>JSON.parse(await eval(s));
+(async()=>{
+ const original=await execute(c.observe);
+ assert.equal(original.state,'phone');
+ const bound=s=>s.replaceAll('"fixture_digest"',JSON.stringify(original.session));
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ await execute(bound(c.fill));
+ assert.equal(phone.value,'90000000');
+ assert.equal((await execute(bound(c.gate))).ready,true);
+ document.elementFromPoint=()=>phone;
+ assert.equal((await execute(bound(c.hit))).ready,false);
+ document.body.innerText=verifiedText.replace('471.90','471.91');
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ document.body.innerText=verifiedText.replaceAll('MENY','Other');
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ document.body.innerText=verifiedText;
+ phone.value='81111111';
+ await execute(bound(c.fill));
+ assert.equal(phone.value,'81111111');
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ location.search='?token=different';
+ assert.equal((await execute(bound(c.observe_bound))).state,'absent');
+ document.body.innerText=verifiedText+"\nWe've sent a payment request to +47 9000 0000\nOpen Vipps";
+ assert.equal((await execute(c.observe)).state,'sent');
+ document.body.innerText='This payment request has expired';
+ assert.equal((await execute(c.observe)).state,'absent');
+ location.hostname='merchant.example';
+ assert.equal((await execute(c.observe)).state,'absent');
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        cases = {"observe": client._vipps_gateway("observe", 47190),
+                 "observe_bound": client._vipps_gateway("observe", 47190, "fixture_digest"),
+                 "gate": client._vipps_gateway("gate", 47190, "fixture_digest"),
+                 "hit": client._vipps_gateway("gate", 47190, "fixture_digest", (10, 10)),
+                 "fill": client._vipps_gateway("fill", 47190, "fixture_digest")}
+        subprocess.run(["node", "-e", "const c=" + json.dumps(cases) + ";\n" + script],
+                       text=True, capture_output=True, check=True)
 
     def test_vipps_submit_requires_the_private_phone_before_the_meny_click(self):
         client = self.client()
@@ -7965,15 +8036,11 @@ process.stdout.write(eval(script));
         client = self.client()
         client._locked_operation = mock.MagicMock()
         client._sleep = mock.Mock()
-        client._eval = mock.Mock(side_effect=[
-            {"waiting": True},
-            {"waiting": True},
-            {"waiting": False},
-        ])
-
-        self.assertFalse(client.checkout_payment_awaiting_user())
-        self.assertEqual(client._sleep.call_count, 2)
-        self.assertIn("We've sent a payment request to", client._eval.call_args.args[0])
+        client._eval = mock.Mock(side_effect=[{"state": "sent"}, {"state": "absent"}])
+        self.assertEqual(client.checkout_payment_handoff(47190), "sent")
+        self.assertIsNone(client.checkout_payment_handoff(47190))
+        client._sleep.assert_not_called()
+        self.assertIn("sent a payment request", client._eval.call_args.args[0])
 
     def test_checkout_submit_does_not_open_dispatch_fence_when_post_hover_gate_fails(self):
         client = self.client()
@@ -9330,6 +9397,29 @@ class FlowTests(unittest.TestCase):
             self.assertIsNone(store.read()["pending_cancellation"])
             self.assertTrue(all(call.kwargs.get("allow_recovery") is True for call in provider.call.call_args_list))
             self.assertEqual(provider.checkout_review_recovery, [True, True])
+
+    def test_uncertain_meny_handoff_preserves_the_live_tab_and_original_journal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            with store.locked() as state:
+                state["pending_checkout"]["status"] = "uncertain"
+            provider.checkout_payment_handoff = mock.Mock(return_value="phone")
+            provider.checkout_confirmation_order_id = mock.Mock(side_effect=AssertionError("tab navigated"))
+            provider.call = mock.Mock(side_effect=AssertionError("merchant history opened"))
+            for change in [None, {"order_id": "123"}]:
+                with store.locked() as state:
+                    state["pending_checkout"]["order_change"] = change
+                prior = store.read()["pending_checkout"]
+                result = app.handle({"operation": "checkout", "action": "reconcile",
+                                     "confirmation_id": prepared["confirmation_id"]})
+                self.assertTrue(result["awaiting_user_payment"])
+                self.assertFalse(result["retry_allowed"])
+                self.assertIn("open Vipps page", result["next"])
+                self.assertEqual(store.read()["pending_checkout"], prior)
+            self.assertEqual(provider.checkout_clicks, 0)
 
     def test_expired_unapproved_vipps_releases_the_checkout_for_a_fresh_prepare(self):
         started = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)

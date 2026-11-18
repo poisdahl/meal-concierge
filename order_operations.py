@@ -5352,6 +5352,33 @@ class OrderOperations:
             raise HouseholdError("no checkout attempt is pending")
         if pending.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}:
             raise HouseholdError("checkout has not reached reconciliation")
+        payment_expiry = pending.get("payment_expires_at")
+        try:
+            payment_expires_at = datetime.fromisoformat(str(payment_expiry or ""))
+        except ValueError:
+            payment_expires_at = None
+        if self.provider == "meny":
+            # A merchant handoff may already be open even when confirming the
+            # phone form timed out before the mobile-request timestamp existed.
+            # Limit tab preservation separately from financial expiry evidence.
+            preserve_until = payment_expires_at
+            if preserve_until is None:
+                try:
+                    preserve_until = datetime.fromisoformat(str(pending.get("expires_at") or "")) + MENY_VIPPS_EXPIRY_BUFFER
+                except ValueError:
+                    pass
+            if preserve_until and preserve_until.tzinfo and self._now() < preserve_until:
+                total = ((pending.get("browser_review") or {}).get("summary") or {}).get("total")
+                if isinstance(total, (int, float)):
+                    handoff = self.browser.checkout_payment_handoff(round(total * 100), deadline=deadline)
+                    if handoff:
+                        next_step = {
+                            "sent": "Approve the existing MENY request in Vipps, then reconcile.",
+                            "phone": "Finish the existing MENY payment in the open Vipps page, then reconcile.",
+                            "gateway": "Keep the Vipps page open. Verify the MENY merchant and reviewed total before continuing, then reconcile.",
+                        }[handoff]
+                        return {"confirmed": False, "expired": False, "order": None, "tracking": None,
+                                "retry_allowed": False, "awaiting_user_payment": True, "next": next_step}
         if pending.get("order_change"):
             if owner_payment_completed:
                 raise HouseholdError("Owner payment completion requires the exact original Oda order")
@@ -5536,26 +5563,6 @@ class OrderOperations:
             and ((active_attempt.get("payment_switch") or {}).get("closure") or {}).get("status") != "paid"
             and not owner_payment_completed
         )
-        payment_expiry = pending.get("payment_expires_at")
-        try:
-            payment_expires_at = datetime.fromisoformat(str(payment_expiry or ""))
-        except ValueError:
-            payment_expires_at = None
-        if (
-            self.provider == "meny"
-            and payment_expires_at is not None
-            and payment_expires_at.tzinfo is not None
-            and self._now() < payment_expires_at
-            and self.browser.checkout_payment_awaiting_user(deadline=deadline)
-        ):
-            return {
-                "confirmed": False,
-                "expired": False,
-                "order": None,
-                "tracking": None,
-                "retry_allowed": False,
-                "awaiting_user_payment": True,
-            }
         payment_not_dispatched = (
             self.provider == "meny"
             and pending.get("status") == "uncertain"
