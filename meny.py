@@ -2777,11 +2777,12 @@ __DELIVERY_BINDING__
         }
 
     def _checkout_confirmation_snapshot(self) -> dict[str, Any]:
-        return self._eval(r"""
+        script = r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
+  const accounts = [...document.querySelectorAll('button')].filter(x => norm(x.getAttribute('aria-label') || x.innerText || x.textContent).startsWith('Brukermeny'));
+  const authenticated = accounts.filter(visible);
   const main = [...document.querySelectorAll('main')].filter(visible);
   const url = new URL(location.href);
   const queryId = url.searchParams.get('orderid');
@@ -2797,14 +2798,35 @@ __DELIVERY_BINDING__
   const labelId = labels.length === 1 && numeric(labels[0]) ? labels[0] : null;
   const orderId = labels.length ? (labelId && (!queryId || labelId === queryId) ? labelId : null) : queryId;
   const detailPath = url.pathname.match(/^\/(?:trumf-)?profil\/nettbutikk\/bestilling\/(\d{1,20})$/);
-  const detailId = url.origin === 'https://meny.no' && !url.search && !url.hash &&
-    detailPath && detailPath[1] === labelId && authenticated.length === 1 ? labelId : null;
+  const detailUrl = url.origin === 'https://meny.no' && !url.search && !url.hash && detailPath ? url.href : null;
+  const detailId = detailUrl && detailPath[1] === labelId && authenticated.length === 1 ? labelId : null;
+  const exactUrl = receiptUrl || detailUrl;
+  const hiddenAccount = accounts.length > 0 && authenticated.length === 0;
   const blank = url.href === 'about:blank';
   const vippsGateway = url.origin === 'https://api.vipps.no' && url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
   const confirmed = main.length === 1 && /Takk for (?:din )?bestilling(?:en)?|Bestillingen (?:er|ble) (?:mottatt|oppdatert)|Ordrebekreftelse/i.test(norm(main[0].innerText));
-  return JSON.stringify({authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, detail_order_id:detailId, receipt_url:receiptUrl, order_id:confirmed && receiptUrl ? orderId : null});
+  return JSON.stringify({exact_url:exactUrl, hidden_account:!!exactUrl && hiddenAccount, authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, detail_order_id:detailId, receipt_url:receiptUrl, order_id:confirmed && receiptUrl ? orderId : null});
 })()
-""")
+"""
+        result = self._eval(script)
+        exact_url = result.get("exact_url")
+        if exact_url and result.get("hidden_account") is True:
+            # Wide headed windows can conceal the account header. Resize in
+            # place: opening a fresh route would lose an unretained receipt.
+            self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
+            for attempt in range(8):
+                result = self._eval(script)
+                if result.get("exact_url") != exact_url:
+                    raise HouseholdError("MENY order page changed during viewport recovery")
+                if result.get("authenticated") is True and (result.get("order_id") or result.get("detail_order_id")):
+                    break
+                if attempt < 7:
+                    self._sleep(0.25)
+            else:
+                if result.get("authenticated") is not True:
+                    raise HouseholdError("MENY login is required in the configured browser profile")
+                raise HouseholdError("MENY order identity did not finish rendering; keep this page open and reconcile again")
+        return result
 
     def checkout_confirmation_order_id(self, *, deadline: float | None = None) -> str | None:
         with self._locked_operation(MENY_READ_TIMEOUT, deadline):

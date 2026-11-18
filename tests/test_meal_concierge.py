@@ -8077,6 +8077,33 @@ const execute=async s=>JSON.parse(await eval(s));
             client.checkout_confirmation_order_id()
         self.assertEqual(client._invoke.call_args_list, [mock.call("reload")])
 
+    def test_checkout_hidden_account_recovers_exact_page_without_navigation(self):
+        detail = "https://meny.no/trumf-profil/nettbutikk/bestilling/7631908"
+        receipt = "https://meny.no/kassen/bekreftelse"
+        for url, key in ((detail, "detail_order_id"), (receipt, "order_id")):
+            with self.subTest(url=url):
+                client = self.client()
+                hidden = {"exact_url": url, "hidden_account": True, "authenticated": False}
+                rendered = {"exact_url": url, "authenticated": True}
+                client._eval = mock.Mock(side_effect=[hidden, hidden, rendered, {**rendered, key: "7631908"}])
+                client._invoke = mock.Mock()
+                client._sleep = mock.Mock()
+                self.assertEqual(client._checkout_confirmation_snapshot()[key], "7631908")
+                client._invoke.assert_called_once_with("set", "viewport", "1280", "900")
+                self.assertEqual(client._sleep.call_count, 2)
+
+        for after, error in (({"exact_url": receipt}, "page changed"),
+                             ({"exact_url": detail, "authenticated": False}, "login is required"),
+                             ({"exact_url": detail, "authenticated": True}, "identity did not finish")):
+            with self.subTest(after=after):
+                client = self.client()
+                client._eval = mock.Mock(side_effect=[{"exact_url": detail, "hidden_account": True}] + [after] * 8)
+                client._invoke = mock.Mock()
+                client._sleep = mock.Mock()
+                with self.assertRaisesRegex(HouseholdError, error):
+                    client._checkout_confirmation_snapshot()
+                client._invoke.assert_called_once_with("set", "viewport", "1280", "900")
+
     @unittest.skipUnless(shutil.which("node"), "Node executes the receipt URL boundary")
     def test_checkout_receipt_snapshot_requires_one_exact_receipt_identity(self):
         client = self.client()
@@ -8084,8 +8111,8 @@ const execute=async s=>JSON.parse(await eval(s));
         client._checkout_confirmation_snapshot()
         script = client._eval.call_args.args[0]
         harness = r"""
-const {script,url,receiptText='Bestillingen er oppdatert'}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
-const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:1,height:1})});
+const {script,url,receiptText='Bestillingen er oppdatert',hidden=false}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:hidden&&text==='Brukermeny'?0:1,height:1})});
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.location={href:url};
 global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[node(receiptText)]:[]};
@@ -8136,6 +8163,18 @@ process.stdout.write(eval(script));
                 self.assertIsNone(snapshot["order_id"])
                 self.assertEqual(snapshot["detail_order_id"], expected)
 
+        for url, eligible in ((detail, True), (receipt, True), (valid, True),
+                              (valid + "&other=1", False), (detail.replace("meny.no", "example.org"), False),
+                              ("https://api.vipps.no/dwo-api-application/v1/deeplink/vippsgateway", False),
+                              ("https://meny.no/kassen", False)):
+            with self.subTest(hidden_header_url=url):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "url": url, "hidden": True}),
+                                        text=True, capture_output=True, check=True)
+                snapshot = json.loads(result.stdout)
+                self.assertEqual(snapshot["hidden_account"], eligible)
+                self.assertFalse(snapshot["authenticated"])
+                self.assertIsNone(snapshot["detail_order_id"])
 
     def test_checkout_reconcile_keeps_the_vipps_waiting_page_alive(self):
         client = self.client()
