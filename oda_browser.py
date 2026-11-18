@@ -2368,7 +2368,8 @@ class OdaBrowser:
  }
  if(location.href===CHECKOUT_ENTRY)return JSON.stringify({action:'wait'});
  if(location.href===RECOMMENDATIONS){
-   if(dialogs.length||document.querySelector('input[type="password"]'))return blocked('destination_prompt');
+   const prompts=[...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')].filter(visible);
+   if(prompts.length||document.querySelector('input[type="password"]'))return blocked('destination_prompt');
    const controls=[...document.querySelectorAll('a')].filter(enabled);
    const next=controls.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett'&&x.href===CHECKOUT);
    if(!next.length)return pending('recommendations');

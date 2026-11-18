@@ -3024,9 +3024,11 @@ const submit=node('submit','Bekreft og betal 246,40 kr');
 const card=node('card');card.checked=true;
 const cardLabel=node('card-label','•••• 1111');cardLabel.contains=x=>x===card;cardLabel.querySelectorAll=()=>[card];card.labels=[cardLabel];
 const links=(c.linkUrls||[]).map((url,i)=>{const a=node('link-'+i,'Fortsett');a.href=url;a.hidden=c.hiddenLink===i;return a});
+const prompt=c.prompt?node('prompt'):null;
+if(prompt)prompt.hidden=!!c.hidePrompt;
 const document={title:c.title,body:{innerText:c.unrelatedStockWord?'utsolgt':''},
  querySelector:s=>s==='main'?(c.noMain?null:main):(c.login?{}:null),
- querySelectorAll:s=>s==='[role="alert"],[role="alertdialog"]'&&c.unavailable?[node('alert','utsolgt')]:s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='a'?links:s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
+ querySelectorAll:s=>prompt&&s.split(',').includes(c.prompt)?[prompt]:s==='[role="alert"],[role="alertdialog"]'&&c.unavailable?[node('alert','utsolgt')]:s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='a'?links:s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
 const location=new URL(c.url||'https://oda.com/no/checkout/modify/');
 location.assign=url=>{marked.push({navigation:url})};
 const getComputedStyle=x=>({display:x.hidden?'none':'block',visibility:'visible'});
@@ -3076,7 +3078,9 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
                            "linkUrls": [CHECKOUT_URL, CHECKOUT_URL], "hiddenLink": 0}
         active = [recommendations] * 4 + [{"url": CHECKOUT_URL}]
         navigations = []
+        navigation_scripts = []
         def visit(js):
+            navigation_scripts.append(js)
             result = evaluate(js, active.pop(0))
             navigations.extend(x["navigation"] for x in result["marked"] if "navigation" in x)
             return result["value"]
@@ -3086,6 +3090,11 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
         browser._click_action.assert_called_once_with("recommendations")
         self.assertEqual(navigations, [CHECKOUT_URL])
 
+        for prompt in ('[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', 'dialog[open]'):
+            for guard in [script, navigation_scripts[3]]:
+                check_idle(guard, {**recommendations, "prompt": prompt}, "blocked", "destination_prompt")
+            result = evaluate(script, {**recommendations, "prompt": prompt, "hidePrompt": True})
+            self.assertEqual(result["value"], {"action": "recommendations"})
         for link in ["https://wrong.example/no/checkout/confirm/", CHECKOUT_URL + "?orderNumber=123",
                      "https://oda.com/no/checkout/modify/"]:
             check_idle(script, {**recommendations, "linkUrls": [link]}, "wait", "recommendations")
