@@ -5154,9 +5154,15 @@ class PlanningOperations:
             "request_digest": mp.digest(pending["operations"]), "expected_digest": mp.digest(pending["expected"])}
         state.pop("pending_cart_change")
 
+    allow_observed_cart_recovery = True
+
+    def _can_reread_ordinary_cart(self):
+        return (self.allow_observed_cart_recovery and self.provider in {"oda", "mathem"}
+                and not callable(getattr(self.provider_client, "validate_cart_reconciliation", None)))
+
     def _matches_uncertain_cart_target(self, state, pending, live):
         """Check whether the observed cart satisfies an ordinary shopping operation."""
-        if (not pending or self.provider not in {"oda", "mathem"} or pending.get("provider") != self.provider
+        if (not pending or not self._can_reread_ordinary_cart() or pending.get("provider") != self.provider
                 or not pending.get("operation_id") or pending.get("dispatch_finished")
                 or pending.get("native_cart_binding") or pending.get("native_managed") or pending.get("clear_requested")
                 or state.get("order_change") or pending.get("order_change") or state.get("pending_checkout")
@@ -5177,7 +5183,7 @@ class PlanningOperations:
         state.pop("pending_cart_change")
 
     def _observed_managed_target(self, mutation_error, cart, expected, menu_ref, operations):
-        if mutation_error is None or self.provider not in {"oda", "mathem"}:
+        if mutation_error is None or not self._can_reread_ordinary_cart():
             return None
         try:
             quantities, _ = self._cart_lines(cart_contents(cart, require_quantities=True))
@@ -6295,7 +6301,7 @@ class PlanningOperations:
                     return {"ensured": False, "stopped": True, "reason": str(exc), "cart": cart,
                             "next": "The adapter stopped before the next click. Earlier additions are retained; resolve product availability before a new ensure."}
                 except (HouseholdError, OSError) as exc:
-                    if self.provider in {"oda", "mathem"} and not change and not pending.get("native_cart_binding") and action != "clear":
+                    if self._can_reread_ordinary_cart() and not change and not pending.get("native_cart_binding") and action != "clear":
                         try:
                             observed = self.provider_client.call("get_cart", {}, deadline=deadline)
                             recovery = self._complete_cart_write(pending, observed)

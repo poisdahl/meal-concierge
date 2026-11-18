@@ -324,6 +324,8 @@ class HostObservationShop:
 
 
 class MuseApplication(Application):
+    allow_observed_cart_recovery = False
+
     def handle(self, request):
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")

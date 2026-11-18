@@ -136,12 +136,15 @@ class CartRecoveryFixtureTests(unittest.TestCase):
             self.assertTrue(before["cart_write_pending"])
             self.assertEqual(before["items"][0]["quantity"], 2)
             self.assertEqual(before["operation_id"], journal["operation_id"])
-            self.assertEqual(self.cli("reconcile_change", expected=1)["outcome"], "unknown")
+            recovered = self.cli("reconcile_change")["result"]
+            self.assertTrue(recovered["cart_target_observed"])
+            self.assertEqual(recovered["operation_id"], journal["operation_id"])
+            self.assertEqual(recovered["dispatch_outcome"], "unknown")
             final_cart = self.cli("get")["result"]
-            self.assertTrue(final_cart["cart_write_pending"])
+            self.assertFalse(final_cart.get("cart_write_pending"))
             self.assertEqual([(row["product_id"], row["quantity"]) for row in final_cart["items"]], [(10, 2)])
             final = self.inspect()
-            self.assertEqual(final["pending_cart_change"], journal)
+            self.assertIsNone(final["pending_cart_change"])
             for key in ("cart_mutation_requests", "provider_attempts", "effects"):
                 self.assertEqual(final["counts"][key], 1)
             self.assertEqual(final["fixture"]["effect_count"], 1)

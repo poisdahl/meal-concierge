@@ -635,7 +635,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         operation = request.get("operation")
         pending_cart = self.store.read().get("pending_cart_change")
         if (pending_cart and operation == "checkout" and request.get("action") == "prepare"
-                and self.provider in {"oda", "mathem"} and pending_cart.get("provider") == self.provider
+                and self._can_reread_ordinary_cart() and pending_cart.get("provider") == self.provider
                 and not any(pending_cart.get(k) for k in ("order_change", "native_cart_binding", "native_managed", "clear_requested"))):
             with self.product_plan_lock:
                 try:
