@@ -1872,7 +1872,18 @@ class OdaBrowser:
             result = dict(surface)
             items = result.pop("items")
             actual_line_count, actual_product_quantity_count = _checkout_item_counts(items)
-            identity = self._review_checkout_identity(expected, surface, account_digest, identity_review)
+            try:
+                identity = self._review_checkout_identity(expected, surface, account_digest, identity_review)
+            except OdaCheckoutMismatchError:
+                if self.checkout_provider != "oda" or identity_review is None or surface["total_matches"] is not False:
+                    raise
+                # An approved display mapping includes the full checkout in
+                # its digest. Check whether ONLY the transient total flag
+                # invalidated it. The observed false flag still blocks this
+                # read, and acceptance always rechecks the actual surface.
+                identity = self._review_checkout_identity(
+                    expected, {**surface, "total_matches": True}, account_digest, identity_review,
+                )
             result["line_matches"] = identity["matched"]
             if identity.get("review"):
                 result["identity_review"] = identity["review"]

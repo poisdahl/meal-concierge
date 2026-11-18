@@ -2002,6 +2002,26 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "address does not match"):
             browser._review_checkout(cart)
 
+        mapped = {**extracted, "items": [{**extracted["items"][0], "title": "Gresk yoghurt®"}]}
+        unresolved = browser._review_checkout_identity(browser._cart_expectation(cart), mapped, "a" * 64)
+        decision = {"digest": unresolved["issue"]["digest"], "decisions": [
+            {"expected_index": 0, "actual_index": 0, "reason": "Reviewed merchant display wording"}]}
+        setup = [{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"}, {"expanded": True}]
+        stale = {**mapped, "total_matches": False}
+        for changed, accepted in [(mapped, True), ({**mapped, "payment_display": "•••• 5678"}, False)]:
+            browser._eval = mock.Mock(side_effect=[*setup, stale, changed, extracted_amounts])
+            if accepted:
+                observed = browser._review_checkout(cart, identity_review=decision)
+                self.assertEqual(observed["identity_review"], decision)
+                self.assertTrue(observed["surface"]["total_matches"])
+            else:
+                with self.assertRaisesRegex(OdaCheckoutMismatchError, "stale"):
+                    browser._review_checkout(cart, identity_review=decision)
+        browser._eval = mock.Mock(side_effect=[*setup, {**stale, "payment_display": "•••• 5678"}])
+        with self.assertRaisesRegex(OdaCheckoutMismatchError, "stale"):
+            browser._review_checkout(cart, identity_review=decision)
+        self.assertEqual(browser._eval.call_count, len(setup) + 1)
+
         for changes, message in [
             ({"authenticated": False}, "browser login could not be verified"),
             ({"address_matches": False}, "address does not match"),
