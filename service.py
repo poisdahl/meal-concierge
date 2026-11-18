@@ -865,7 +865,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             f"Use the household's private {self.provider.title()} sign-in. For a standalone installation, "
             "run ./install.sh store-login in the owner's terminal with the original --home. For a host-managed "
             "service, use its private login flow or have its runtime owner launch the active provider_oauth.py "
-            "with the configured token directory. Sign in to the same intended account as the checkout "
+            f"with the configured token directory. Sign in to the same intended {self.provider.title()} account as the checkout "
             "browser and confirm the original delivery address before resuming an interrupted cart or order. Then ask me to check again."
         )
         guidance = {
