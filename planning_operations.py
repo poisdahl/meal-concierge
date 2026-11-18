@@ -6205,7 +6205,10 @@ class PlanningOperations:
                     if review is not None:
                         return {**review, "cart": cart}
                 except (HouseholdError, OSError) as exc:
-                    error = HouseholdError("The original cart write is still uncertain. Use reconcile_change with the original dispatch ending and bound readback; never resend based on cart quantities.")
+                    guidance = ("Use cart get. If it offers accept_current, show the quantities and use that action when the household accepts them."
+                                if self._ordinary_cart_observation_allowed(state, pending) else
+                                "Use reconcile_change with the original dispatch ending and bound readback.")
+                    error = HouseholdError(f"The original cart write is still uncertain. {guidance} Never resend the delta.")
                     error.outcome_unknown = True
                     raise error from exc
                 return {"reconciled": True, "cart_write_pending": False, "cart": cart,
