@@ -5310,6 +5310,23 @@ class OrderOperations:
                 owner_payment_completed=owner_payment_completed,
             )
 
+    def _meny_order_created_during_checkout(self, order, pending):
+        """Return None when the merchant creation time cannot date this attempt."""
+        try:
+            review_expiry = datetime.fromisoformat(pending["expires_at"])
+            # The mobile request can follow creation of the order. Older journals
+            # have no dispatch time, so use the beginning of their review window.
+            start_text = pending.get("dispatch_started_at")
+            start = datetime.fromisoformat(start_text) if start_text else review_expiry - CHECKOUT_REVIEW_TTL
+            end_text = pending.get("payment_expires_at")
+            end = datetime.fromisoformat(end_text) if end_text else review_expiry + MENY_VIPPS_EXPIRY_BUFFER
+            created = datetime.fromisoformat(order["merchant_created_at"])
+            if any(value.utcoffset() is None for value in (start, created, end)):
+                return None
+            return start <= created <= min(end, self._now())
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def _meny_confirmation_before_navigation(self, pending, deadline):
         observed = self.browser.checkout_confirmation_order_id(deadline=deadline)
         captured = pending.get("meny_confirmation_order_id")
@@ -5742,23 +5759,22 @@ class OrderOperations:
         meny_receipt_cancelled = (confirmation_order_id and tracking_status == "cancelled"
                                   and order.get("status") == "cancelled"
                                   and meny_order_matches_checkout(order, pending["summary"]))
+        within_attempt = self._meny_order_created_during_checkout(order, pending) if exact_meny_id else None
+        if confirmation_order_id and order.get("merchant_created_at") is not None and within_attempt is not True:
+            if within_attempt is False:
+                # The receipt was saved before navigating so a failed detail read
+                # could be retried. Only a dated contradiction releases that ID.
+                with self.store.locked() as state:
+                    if canonical(state.get("pending_checkout")) != canonical(pending):
+                        raise HouseholdError("The checkout changed while verifying the MENY receipt")
+                    state["pending_checkout"].pop("meny_confirmation_order_id", None)
+                next_step = "This MENY receipt is outside the checkout window. Open the original receipt and reconcile."
+            else:
+                next_step = "The merchant creation time could not be verified. Reconcile the retained MENY receipt again."
+            return {"confirmed": False, "retry_allowed": False, "confirmation_id": pending["confirmation_id"],
+                    "next": next_step}
         if detail_hint:
-            # A detail page is only a discovery hint. Old cancelled orders
-            # were also absent from the pre-checkout, open-only history.
-            try:
-                review_expiry = datetime.fromisoformat(pending["expires_at"])
-                # MENY can create the order before Vipps finishes its phone handoff.
-                # Older journals lack the dispatch timestamp, so use the beginning
-                # of their original review window even if the mobile request was sent.
-                dispatch_time = pending.get("dispatch_started_at")
-                start = datetime.fromisoformat(dispatch_time) if dispatch_time else review_expiry - CHECKOUT_REVIEW_TTL
-                end_text = pending.get("payment_expires_at")
-                end = datetime.fromisoformat(end_text) if end_text else review_expiry + MENY_VIPPS_EXPIRY_BUFFER
-                created = datetime.fromisoformat(order["merchant_created_at"])
-                within_attempt = (all(value.utcoffset() is not None for value in (start, created, end))
-                                  and start <= created <= min(end, self._now()))
-            except (KeyError, TypeError, ValueError):
-                within_attempt = False
+            # An open order detail identifies a candidate but is not a receipt.
             if not (within_attempt and order.get("merchant_deleted") is True
                     and order.get("status") == tracking_status == "cancelled"
                     and meny_order_matches_checkout(order, pending["summary"])):

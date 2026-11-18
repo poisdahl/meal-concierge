@@ -548,13 +548,10 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
     description = str(payload.get("statusDescription") or "").strip().casefold()
     if description in {"deleted", "cancelled", "canceled"}:
         result["status"] = "cancelled"
-    if (str(payload.get("ngOrderId") or "") == order_id and description == "deleted"
-            and type(payload.get("status")) is int and payload["status"] == 99
-            and isinstance(payload.get("orderCreated"), str)):
-        # Creation, not orderUpdated (which changes on cancellation), binds a
-        # deleted order to the submitted payment window when the receipt is lost.
+    if str(payload.get("ngOrderId") or "") == order_id and isinstance(payload.get("orderCreated"), str):
         result["merchant_created_at"] = payload["orderCreated"]
-        result["merchant_deleted"] = True
+        if description == "deleted" and type(payload.get("status")) is int and payload["status"] == 99:
+            result["merchant_deleted"] = True
     totals = payload.get("totals")
     amount = totals.get("totalGrossAmount") if isinstance(totals, Mapping) else None
     if amount is not None:

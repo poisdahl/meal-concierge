@@ -5590,6 +5590,7 @@ process.stdout.write(eval(script));
             return meny_order_provider_details({"responseBody": json.dumps(payload)}, order_id)
         self.assertEqual(read(exact), {"status": "cancelled", "merchant_deleted": True,
                                        "merchant_created_at": at})
+        self.assertEqual(read({**exact, "statusDescription": "OPEN", "status": 1}), {"merchant_created_at": at})
         for change in ({"status": 98}, {"status": "99"}, {"orderCreated": None},
                        {"statusDescription": "OPEN"}, {"statusDescription": "CANCELLED"}):
             with self.subTest(change=change):
@@ -9384,6 +9385,51 @@ class FlowTests(unittest.TestCase):
             self.assertFalse(store.read().get("email_jobs"))
             self.assertTrue(app.handle(request)["cancelled"])
             self.assertEqual(provider.checkout_clicks, 1)
+
+    def test_meny_receipt_with_contradictory_creation_time_releases_only_its_order_id(self):
+        config = {**CONFIG, "provider": "meny"}
+        store = StateStore(Path(self.temp.name) / "meny", config)
+        provider = FakeMeny()
+        app = Application(store, provider, self.browser)
+        prepared = app.handle({"operation": "checkout", "action": "prepare"})
+        request = {"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]}
+        app.handle({**request, "action": "confirm"})
+        original = store.read()["pending_checkout"]
+        started = datetime.fromisoformat(original["dispatch_started_at"])
+        order = {"grossAmount": 40.0, "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                 "productQuantityCount": 1, "products": [{"identity": "Brokkoli 400g", "quantity": 1}]}
+        for index, status in enumerate(("confirmed", "cancelled")):
+            with self.subTest(status=status):
+                stale_id = str(99990002 + index)
+                provider.confirmation_order_id = stale_id
+                provider.tracking = status
+                provider.orders.append({**order, "orderNumber": stale_id, "status": status,
+                    "merchant_created_at": (started - timedelta(days=7)).isoformat()})
+                response = app.handle(request)
+                self.assertFalse(response["confirmed"])
+                self.assertFalse(response["retry_allowed"])
+                self.assertEqual(store.read()["pending_checkout"], original)
+                self.assertFalse(store.read()["email_jobs"])
+
+        correct_id = "99990004"
+        provider.confirmation_order_id = correct_id
+        provider.tracking = "cancelled"
+        provider.orders.append({**order, "orderNumber": correct_id, "status": "cancelled",
+                                "merchant_created_at": started.isoformat()})
+        def lost_detail(tool, arguments, **kwargs):
+            self.assertEqual(tool, "get_order")
+            provider.confirmation_order_id = None
+            raise HouseholdError("merchant detail temporarily unavailable")
+        with mock.patch.object(provider, "call", side_effect=lost_detail):
+            with self.assertRaisesRegex(HouseholdError, "temporarily unavailable"):
+                app.handle(request)
+        self.assertEqual(store.read()["pending_checkout"], {**original, "meny_confirmation_order_id": correct_id})
+        restarted = Application(StateStore(store.directory, config), provider, self.browser)
+        result = restarted.handle(request)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["order_id"], correct_id)
+        self.assertIsNone(store.read()["pending_checkout"])
+        self.assertEqual(provider.checkout_clicks, 1)
 
     def test_meny_detail_page_hint_only_closes_newly_placed_exact_deleted_order(self):
         with tempfile.TemporaryDirectory() as temp:
