@@ -14,9 +14,7 @@
       "sources": {
         "internal": true,
         "oda": true,
-        "meny": true,
-        "themealdb": true,
-        "wikibooks": true
+        "meny": true
       }
     }
   },

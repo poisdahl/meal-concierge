@@ -680,7 +680,7 @@ class PageBoundaryTests(unittest.TestCase):
                 provider = Provider()
                 provider.initial_timeout = discovered_by_status
                 app = muse.NativeReadMuseApplication(StateStore(home / "state", muse.load_home(home)),
-                                                     provider, None, external_recipe_sources={})
+                                                     provider, None)
                 if discovered_by_status:
                     provider.fail_on_probe = True
                 else:

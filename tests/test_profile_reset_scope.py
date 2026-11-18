@@ -14,7 +14,7 @@ class ProfileResetScopeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = StateStore(Path(self.temp.name), {"household": "Synthetic reset scope", "provider": "none"})
-        self.app = Application(self.store, None, None, external_recipe_sources={})
+        self.app = Application(self.store, None, None)
         self.store.update_profile({"meals": {"portions": 4}, "diet": {
             "rules": [{"kind": "allergy", "term": "egg"}], "avoid": ["cream"]}})
 

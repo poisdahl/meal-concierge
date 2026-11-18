@@ -2177,7 +2177,7 @@ process.stdout.write(eval(script));
             "history": [{"old": True}],
         }}
         state = migrate(CONFIG, planning, {"schedules": []})
-        self.assertEqual(state["version"], 14)
+        self.assertEqual(state["version"], 15)
         self.assertEqual(len(state["product_favorites"]), 1)
         self.assertNotIn("favorites", state)
         self.assertEqual(len(state["recurring_items"]), 1)
@@ -2188,7 +2188,7 @@ process.stdout.write(eval(script));
     def test_clean_state_and_skill_expose_only_product_favorites(self):
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp), CONFIG).read()
-        self.assertEqual(state["version"], 14)
+        self.assertEqual(state["version"], 15)
         self.assertEqual(state["schedule"]["delivery"]["strategy"], "cheapest")
         self.assertIsNone(state["delivery_selection"])
         self.assertEqual(state["product_favorites"], [])
@@ -2220,7 +2220,7 @@ process.stdout.write(eval(script));
 
             self.assertEqual(backup_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(backup_before), state)
-            self.assertEqual(migrated["version"], 14)
+            self.assertEqual(migrated["version"], 15)
             self.assertEqual(migrated["schedule"]["delivery"]["strategy"], "keep_selected")
             self.assertEqual(migrated["product_favorites"], items)
             self.assertNotIn("favorites", migrated)
@@ -2283,7 +2283,7 @@ process.stdout.write(eval(script));
 
             self.assertEqual(json.loads(backup), state)
             self.assertEqual(backup_path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(migrated["version"], 14)
+            self.assertEqual(migrated["version"], 15)
             self.assertEqual(migrated["schedule"]["delivery"]["strategy"], "keep_selected")
             self.assertIsNone(migrated["delivery_selection"])
 
@@ -2334,7 +2334,7 @@ process.stdout.write(eval(script));
 
             self.assertEqual(json.loads(backup), state)
             self.assertEqual(backup_path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(migrated["version"], 14)
+            self.assertEqual(migrated["version"], 15)
             self.assertEqual(
                 migrated["email_jobs"][0]["automation_key"],
                 "meal-concierge-email-0123456789abcdef",
@@ -2362,7 +2362,7 @@ process.stdout.write(eval(script));
             del state["product_favorites"]
             self.write_state(temp, state)
             migrated = StateStore(Path(temp), CONFIG).read()
-            self.assertEqual(migrated["version"], 14)
+            self.assertEqual(migrated["version"], 15)
             self.assertEqual(migrated["product_favorites"], state["favorites"])
             self.assertTrue((Path(temp) / "state-v4.backup.json").exists())
             self.assertTrue((Path(temp) / "state-v5.backup.json").exists())
@@ -2396,7 +2396,7 @@ process.stdout.write(eval(script));
             state = json.loads((root / "output" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(report["product_favorites_count"], 1)
             self.assertNotIn("favorites", report)
-            self.assertEqual(state["version"], 14)
+            self.assertEqual(state["version"], 15)
             self.assertEqual(state["product_favorites"][0]["product_id"], "1")
             self.assertNotIn("favorites", state)
 
@@ -8618,7 +8618,7 @@ class FlowTests(unittest.TestCase):
 
     def test_status_exposes_the_fresh_confirmation_default(self):
         status = self.app.handle({"operation": "status"})
-        self.assertEqual(status["state_version"], 14)
+        self.assertEqual(status["state_version"], 15)
         self.assertEqual(status["confirmation_policy"], "fresh")
         self.assertEqual(status["product_favorites_count"], 0)
         self.assertNotIn("favorites", status)

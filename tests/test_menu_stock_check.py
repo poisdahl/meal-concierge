@@ -20,7 +20,7 @@ class MenuStockCheckTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = StateStore(self.temp.name, {'household': 'Synthetic stock check', 'provider': 'none'})
-        self.app = Application(self.store, None, None, external_recipe_sources={})
+        self.app = Application(self.store, None, None)
         self.menu = {'menu_id': 'menu_stock', 'revision': 1, 'digest': 'a' * 64, 'phase': 'draft',
             'dishes': [{'shopping_requirements': [
                 {'item': 'olivenolje', 'quantity': 50, 'unit': 'ml', 'scalable': True, 'pantry': True},

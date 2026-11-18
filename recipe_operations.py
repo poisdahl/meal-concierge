@@ -495,9 +495,6 @@ class RecipeOperations:
         if self.provider in {"oda", "meny", "mathem"}:
             rows.append({"id": "store", "label": f"{self.provider.upper()} recipes", "kind": "store",
                          "enabled": sources[self.provider], "switch": self.provider})
-        for source, label in (("themealdb", "TheMealDB"), ("wikibooks", "Wikibooks Cookbook")):
-            rows.append({"id": source, "label": label, "kind": "open_database", "language": "en",
-                         "enabled": sources[source], "switch": source})
         rows.append({"id": "web", "label": "Recipe websites", "kind": "web", "enabled": web["enabled"],
                      "sites": [site["name"] for site in web["sites"] if site["enabled"]],
                      "sites_off": [site["name"] for site in web["sites"] if not site["enabled"]],
@@ -760,6 +757,8 @@ class RecipeOperations:
         gate = self._setup_gate(request)
         if gate is not None:
             return gate
+        if request.get("source") is not None and request["source"] not in SOURCE_IDS:
+            raise RecipeError("recipe discovery source must be the bank or a supported retailer")
         if request.get("projection") == "summary":
             return self._compact_discovery(request)
         if request.get("projection") not in {None, "full"}:
@@ -809,10 +808,6 @@ class RecipeOperations:
         for source in enabled:
             if source == "internal":
                 tasks[source] = lambda: self._internal_recipe_page(query, total_limit, state, week, offset=bank_offset)
-            elif source in {"themealdb", "wikibooks"}:
-                adapter = self.external_recipe_sources.get(source)
-                if adapter is not None:
-                    tasks[source] = lambda adapter=adapter, q=query, n=per_source: adapter.search(q, n)
             elif not busy:
                 tasks[source] = lambda source=source, q=query, n=per_source: self._provider_recipe_candidates(source, q, n)
         executor = ThreadPoolExecutor(max_workers=min(5, max(1, len(tasks))))

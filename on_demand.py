@@ -137,7 +137,7 @@ def _application(state, household):
             raise HouseholdError(GUIDANCE)
 
     return Application(StateStore(state, {"household": household, "provider": "oda"}),
-                       UnavailableProvider(), None, external_recipe_sources={})
+                       UnavailableProvider(), None)
 
 
 def create(value, root, input_directory=None):
