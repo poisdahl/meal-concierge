@@ -602,6 +602,7 @@ class OrderOperations:
         address_id: Any = None,
         allow_recovery: bool = False,
         display_metadata: dict[str, str] | None = None,
+        require_selected: bool = False,
         availability: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         calls = dates or [None]
@@ -611,6 +612,8 @@ class OrderOperations:
             if address_id is not None:
                 arguments["delivery_address_id"] = address_id
             if self.provider == "meny":
+                if require_selected:
+                    arguments["require_selected"] = True
                 result = self.provider_client.call(
                     "get_delivery_slots", arguments, deadline=deadline, allow_recovery=allow_recovery,
                 )
@@ -904,7 +907,7 @@ class OrderOperations:
             dates = [self._cart_delivery_window(cart_delivery, today=oda_today)["date"]]
         selected = [
             slot for slot in self._normalized_provider_slots(
-                dates, deadline=deadline, allow_recovery=allow_recovery,
+                dates, deadline=deadline, allow_recovery=allow_recovery, require_selected=True,
             )
             if slot["selected"]
         ]
@@ -1136,7 +1139,7 @@ class OrderOperations:
             state = self.store.read()
             current = [
                 slot for slot in self._normalized_provider_slots(
-                    [self._delivery_slot_date(expected_slot)], deadline=deadline,
+                    [self._delivery_slot_date(expected_slot)], deadline=deadline, require_selected=True,
                 )
                 if slot["selected"]
             ]
@@ -4875,7 +4878,10 @@ class OrderOperations:
 
                 if self.provider == "meny":
                     try:
-                        self._unchanged_delivery_binding(
+                        # The native submit can use this final slot observation
+                        # under the same browser operation, then independently
+                        # verify the delivery window and total on the pay page.
+                        current_delivery = self._unchanged_delivery_binding(
                             pending["summary"]["delivery"],
                             occurrence=str(pending.get("occurrence") or "") or None,
                             deadline=deadline,
@@ -4913,6 +4919,7 @@ class OrderOperations:
                         pending["browser_review"],
                         before_click,
                         order_change=pending_change or None,
+                        selected_slot=current_delivery["selected"],
                         deadline=deadline,
                     ) if self.provider == "meny" else self.browser.submit_checkout(
                         cart,

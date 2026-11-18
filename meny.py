@@ -969,7 +969,10 @@ class MenyClient:
             if tool == "manipulate_cart":
                 return self._change_cart(arguments)
             if tool == "get_delivery_slots":
-                return self._delivery_slots(str(arguments.get("delivery_date") or ""))
+                return self._delivery_slots(
+                    str(arguments.get("delivery_date") or ""),
+                    require_selected=arguments.get("require_selected") is True,
+                )
             if tool == "select_delivery_slot":
                 return self._select_delivery_slot(arguments.get("delivery_slot_id"))
             if tool == "get_orders":
@@ -2252,12 +2255,7 @@ __DELIVERY_BINDING__
             self._sleep(0.25)
         raise HouseholdError("MENY delivery selection is uncertain; inspect the selected slot before retrying")
 
-    def _delivery_slots(self, delivery_date: str = "") -> dict[str, Any]:
-        if delivery_date:
-            try:
-                date.fromisoformat(delivery_date)
-            except ValueError as exc:
-                raise HouseholdError("delivery date is invalid") from exc
+    def _read_delivery_picker(self) -> list[dict[str, Any]]:
         self._open_delivery_picker()
         result: dict[str, Any] = {}
         for _ in range(20):
@@ -2301,9 +2299,33 @@ __DELIVERY_BINDING__
             raise HouseholdError("MENY delivery slots are unavailable")
         self._invoke("click", '[data-meal-concierge-action="delivery-dismiss"]')
         self._wait_delivery_picker_closed()
-        slots = result["slots"]
+        return result["slots"]
+
+    def _delivery_slots(self, delivery_date: str = "", *, require_selected: bool = False) -> dict[str, Any]:
+        if delivery_date:
+            try:
+                date.fromisoformat(delivery_date)
+            except ValueError as exc:
+                raise HouseholdError("delivery date is invalid") from exc
+        # The picker can paint a complete list before its reservation marker
+        # settles. Reopen it once on an inconclusive checkout read. A normal
+        # listing may legitimately have no selection and needs only one read.
+        for _ in range(2 if require_selected else 1):
+            slots = self._read_delivery_picker()
+            if not require_selected:
+                break
+            selected_count = sum(slot.get("selected") is True for slot in slots)
+            if selected_count == 1:
+                break
+        else:
+            raise HouseholdError(
+                f"MENY shows {selected_count} selected delivery windows after rereading the picker. "
+                "Check or select the intended delivery window before checkout."
+            )
         if delivery_date:
             slots = [slot for slot in slots if slot.get("date") == delivery_date]
+            if require_selected and not any(slot.get("selected") is True for slot in slots):
+                raise HouseholdError("MENY has a different delivery date selected; review the window before checkout")
         normalized = [normalize_meny_delivery_slot(slot) for slot in slots]
         if len({slot["slot_ref"] for slot in normalized}) != len(normalized):
             raise HouseholdError("MENY delivery slot identity is ambiguous")
@@ -2325,31 +2347,18 @@ __DELIVERY_BINDING__
         self,
         required: Mapping[str, Any],
         guard: Mapping[str, Any] | None = None,
+        *,
+        selected_slot: Mapping[str, Any] | None = None,
     ) -> None:
-        required_display = required.get("display")
-        slots = self._delivery_slots().get("slots")
+        slots = [selected_slot] if selected_slot is not None else self._delivery_slots(require_selected=True)["slots"]
         selected = meny_selected_delivery(slots)
-        selected_display = selected.get("display") if selected is not None else None
-        if (
-            not isinstance(required_display, str)
-            or not isinstance(selected_display, str)
-            or meny_delivery_window_identity(required_display)
-            != meny_delivery_window_identity(selected_display)
-        ):
+        if selected is None:
             raise HouseholdError("MENY checkout delivery changed after review")
-        if isinstance(guard, Mapping):
-            expected = guard.get("selected")
-            selected_slots = [
-                validate_delivery_slot(slot)
-                for slot in slots
-                if isinstance(slot, Mapping) and slot.get("selected") is True
-            ] if isinstance(slots, list) else []
-            if (
-                not isinstance(expected, Mapping)
-                or len(selected_slots) != 1
-                or selected_slots[0] != validate_delivery_slot(expected)
-            ):
-                raise HouseholdError("MENY delivery price changed after review")
+        display = selected.pop("display")
+        if meny_delivery_window_identity(required.get("display")) != meny_delivery_window_identity(display):
+            raise HouseholdError("MENY checkout delivery changed after review")
+        if isinstance(guard, Mapping) and selected != validate_delivery_slot(guard.get("selected")):
+            raise HouseholdError("MENY delivery price changed after review")
 
     def _wait_for_delivery_reservation(self) -> None:
         requests: Any = {"requests": []}
@@ -3054,7 +3063,7 @@ __DELIVERY_BINDING__
         if not expected["items"]:
             raise HouseholdError("cart is empty")
         if expected.get("delivery") is None:
-            selected_delivery = meny_selected_delivery(self._delivery_slots().get("slots"))
+            selected_delivery = meny_selected_delivery(self._delivery_slots(require_selected=True)["slots"])
             requested = (order_change or {}).get("requested_delivery")
             if order_change and order_change.get("delivery_only") and requested:
                 # Explicit selection already reserved this window. A cart can
@@ -3319,7 +3328,7 @@ __DELIVERY_BINDING__
             "target_order_code": target_code or None,
         }
 
-    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Any = None, *, order_change: Mapping[str, Any] | None = None, deadline: float | None = None) -> dict[str, Any]:
+    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Any = None, *, order_change: Mapping[str, Any] | None = None, selected_slot: Mapping[str, Any] | None = None, deadline: float | None = None) -> dict[str, Any]:
         final_dispatched = False
         try:
             with self._locked_operation(MENY_ORDER_TIMEOUT, deadline):
@@ -3331,10 +3340,7 @@ __DELIVERY_BINDING__
                 # Bind the current account selection to the authorized window
                 # without changing provider state during protected submit.
                 guard = review.get("delivery_guard")
-                if isinstance(guard, Mapping):
-                    self._require_selected_delivery(review_delivery, guard)
-                else:
-                    self._require_selected_delivery(review_delivery)
+                self._require_selected_delivery(review_delivery, guard, selected_slot=selected_slot)
                 final_cart["delivery"] = dict(review_delivery)
                 try:
                     fresh = self._review_checkout(final_cart, order_change=order_change)

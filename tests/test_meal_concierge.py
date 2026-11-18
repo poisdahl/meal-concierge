@@ -373,7 +373,7 @@ class FakeMeny(FakeOda):
             "target_order_code": (order_change or {}).get("code"),
         }
 
-    def submit_checkout(self, cart, review, before_click=None, *, order_change=None, deadline=None):
+    def submit_checkout(self, cart, review, before_click=None, *, order_change=None, selected_slot=None, deadline=None):
         if before_click:
             before_click()
             before_click()
@@ -5070,6 +5070,48 @@ process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
         client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-dismiss"]')
         client._wait_delivery_picker_closed.assert_called_once_with()
 
+    def test_delivery_checkout_rereads_an_inconclusive_selection_without_reserving(self):
+        client = self.client()
+        client._select_delivery_slot = mock.Mock()
+        label = "fra 49 kr fra 49 kroner, 23. november klokka 16:00 til 20:00"
+        slot = {"slot_id": label, "display": label, "date": "2026-11-23",
+                "start": "16:00", "end": "20:00", "selected": True}
+        another_label = label.replace("23. november", "24. november")
+        another = {**slot, "date": "2026-11-24", "display": another_label, "slot_id": another_label}
+        for initial in ([{**slot, "selected": False}], [slot, another]):
+            with self.subTest(initial_count=len(initial)):
+                client._read_delivery_picker = mock.Mock(side_effect=[initial, [slot]])
+                result = client._delivery_slots("2026-11-23", require_selected=True)
+                self.assertEqual(result["slots"], [normalize_meny_delivery_slot(slot)])
+                self.assertEqual(client._read_delivery_picker.call_count, 2)
+
+                # Check ambiguity across the full picker before filtering by date.
+                client._read_delivery_picker = mock.Mock(return_value=initial)
+                with self.assertRaisesRegex(HouseholdError, "selected delivery windows after rereading"):
+                    client._delivery_slots("2026-11-23", require_selected=True)
+                self.assertEqual(client._read_delivery_picker.call_count, 2)
+        client._read_delivery_picker = mock.Mock(return_value=[another])
+        with self.assertRaisesRegex(HouseholdError, "different delivery date selected"):
+            client._delivery_slots("2026-11-23", require_selected=True)
+        client._read_delivery_picker.assert_called_once_with()
+        client._select_delivery_slot.assert_not_called()
+
+    def test_submit_uses_the_final_provider_slot_and_verifies_its_window_and_price(self):
+        client = self.client()
+        client._read_delivery_picker = mock.Mock(side_effect=AssertionError("redundant picker read"))
+        label = "fra 49 kr fra 49 kroner, 23. november klokka 16:00 til 20:00"
+        slot = normalize_meny_delivery_slot({"slot_id": label, "display": label, "date": "2026-11-23",
+                                            "start": "16:00", "end": "20:00", "selected": True})
+        guard = {"selected": slot}
+        required = {"display": "mandag 23. november kl. 16:00-20:00"}
+        client._require_selected_delivery(required, guard, selected_slot=slot)
+        with self.assertRaisesRegex(HouseholdError, "price changed"):
+            client._require_selected_delivery(required, guard, selected_slot={**slot, "price_ore": 5000})
+        with self.assertRaisesRegex(HouseholdError, "delivery changed"):
+            client._require_selected_delivery({"display": "mandag 23. november kl. 15:00-20:00"}, guard,
+                                              selected_slot=slot)
+        client._read_delivery_picker.assert_not_called()
+
     def test_meny_price_label_drift_changes_display_without_changing_identity(self):
         client = self.client()
         client._open_delivery_picker = mock.Mock()
@@ -7007,7 +7049,7 @@ process.stdout.write(eval(script));
         review = client._review_checkout(cart)
 
         self.assertEqual(review["summary"]["delivery"]["display"], "torsdag 3. september Kl. 07:00-08:00")
-        client._delivery_slots.assert_called_once_with()
+        client._delivery_slots.assert_called_once_with(require_selected=True)
         self.assertEqual(client._select_delivery_slot.call_args_list, [
             mock.call("meny:2026-09-03T07:00/08:00"),
             mock.call("meny:2026-09-03T07:00/08:00"),
@@ -7068,7 +7110,7 @@ process.stdout.write(eval(script));
         review = client._review_checkout(cart, order_change=change)
 
         self.assertEqual(review["summary"]["delivery"]["display"], "torsdag 3. september Kl. 07:00-08:00")
-        client._delivery_slots.assert_called_once_with()
+        client._delivery_slots.assert_called_once_with(require_selected=True)
         client._select_delivery_slot.assert_not_called()
         self.assertEqual(review["target_order_id"], "123")
         self.assertIn("Send oppdatering", client._eval.call_args.args[0])
@@ -7993,7 +8035,7 @@ process.stdout.write(eval(script));
             review["summary"]["delivery"],
         )
         self.assertIsNotNone(cart["delivery"])
-        client._require_selected_delivery.assert_called_once_with(review["summary"]["delivery"])
+        client._require_selected_delivery.assert_called_once_with(review["summary"]["delivery"], None, selected_slot=None)
         client._click_checkout_submit.assert_called_once()
         self.assertEqual(client._click_checkout_submit.call_args.args[0], review)
         self.assertTrue(callable(client._click_checkout_submit.call_args.args[1]))
@@ -9167,6 +9209,7 @@ class FlowTests(unittest.TestCase):
             store = StateStore(Path(temp), {**CONFIG, "provider": "meny", "confirmation_policy": "standing"})
             provider = FakeMeny()
             provider.call = mock.Mock(wraps=provider.call)
+            provider.submit_checkout = mock.Mock(wraps=provider.submit_checkout)
             app = Application(store, provider, self.browser)
             prepared = app.handle({"operation": "checkout", "action": "prepare"})
             provider.call.reset_mock()
@@ -9180,6 +9223,9 @@ class FlowTests(unittest.TestCase):
                 ["get_cart", "get_delivery_slots", "get_cart", "get_cart", "get_delivery_slots"],
             )
             self.assertEqual(provider.checkout_clicks, 1)
+            selected_requests = [call for call in provider.call.call_args_list if call.args[0] == "get_delivery_slots"]
+            self.assertTrue(all(call.args[1].get("require_selected") is True for call in selected_requests))
+            self.assertEqual(provider.submit_checkout.call_args.kwargs["selected_slot"], prepared["summary"]["delivery"]["slot"])
 
     def test_meny_confirmation_can_expire_during_final_browser_checks(self):
         started = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
