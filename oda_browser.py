@@ -2368,10 +2368,17 @@ class OdaBrowser:
  }
  if(location.href===CHECKOUT_ENTRY)return JSON.stringify({action:'wait'});
  if(location.href===RECOMMENDATIONS){
+   if(dialogs.length||document.querySelector('input[type="password"]'))return blocked('destination_prompt');
    const controls=[...document.querySelectorAll('a')].filter(enabled);
    const next=controls.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett'&&x.href===CHECKOUT);
    if(!next.length)return pending('recommendations');
    if(next.length!==1)return blocked('multiple_recommendation_links');
+   if(FOLLOW_LINK && ORDER===null){
+     // Follow the exact verified review link in this tab. An SPA click can
+     // finish without advancing the active recommendations page.
+     location.assign(next[0].href);
+     return JSON.stringify({action:'followed_recommendations'});
+   }
    next[0].setAttribute('data-oda-household-action','recommendations');
    return JSON.stringify({action:'recommendations'});
  }
@@ -2403,10 +2410,27 @@ class OdaBrowser:
 })()
 """.replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("FINAL_CONTROL", "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order").replace("ORDER", json.dumps(order_id))
         dispatched: set[str] = set()
+        recommendations_reads = 0
+        followed_link = False
         for _ in range(30):
             self._require_checkout_time()
-            surface = self._eval(script)
+            follow_link = order_id is None and recommendations_reads >= 3 and not followed_link
+            try:
+                surface = self._eval(script.replace("FOLLOW_LINK", json.dumps(follow_link)))
+            except HouseholdError:
+                if not follow_link:
+                    raise
+                # Navigation can destroy the JS context before eval returns.
+                # Spend the single fallback and only observe its destination.
+                followed_link = True
+                self._settle(0.5)
+                continue
             action = surface.get("action")
+            if action == "followed_recommendations":
+                followed_link = True
+                self._settle(0.5)
+                continue
+            recommendations_reads = recommendations_reads + 1 if action == "recommendations" else 0
             if action == "ready":
                 return
             if action == "payment_required":
@@ -2437,7 +2461,14 @@ class OdaBrowser:
             if action in {"new_order", "previous_order", "payment", "recommendations"}:
                 if action not in dispatched:
                     dispatched.add(action)
-                    self._click_action(action.replace("_", "-"))
+                    try:
+                        self._click_action(action.replace("_", "-"))
+                    except HouseholdError:
+                        if action != "recommendations" or order_id is not None:
+                            raise
+                        # A detached navigation link may already have worked.
+                        # Observe the active tab before considering a fallback.
+                        self._settle(0.5)
                 else:
                     self._settle(0.5)
                 continue
@@ -2448,6 +2479,9 @@ class OdaBrowser:
             "destination": "Oda did not finish showing the order destination and its continue control.",
             "recommendations": "Oda did not show the link from recommendations to checkout.",
         }
+        if surface.get("action") in {"recommendations", "followed_recommendations"}:
+            raise HouseholdError("Oda stayed on its recommendations page. Open the visible Fortsett link "
+                                 "in this checkout tab, then request a new checkout review.")
         reason = reasons.get(surface.get("reason"))
         raise HouseholdError(f"Oda checkout navigation timed out. {reason}" if reason else "Oda checkout navigation timed out")
 
