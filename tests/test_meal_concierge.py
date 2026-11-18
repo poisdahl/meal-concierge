@@ -8138,7 +8138,7 @@ process.stdout.write(eval(script));
         client = self.client()
         review = self.checkout_review()
         client._require_selected_delivery = mock.Mock()
-        client._review_checkout = mock.Mock(side_effect=[
+        client._review_checkout_wizard = mock.Mock(side_effect=[
             _CheckoutNotReadyError("MENY checkout cannot continue"),
             review,
         ])
@@ -8146,23 +8146,39 @@ process.stdout.write(eval(script));
         client._eval = mock.Mock(return_value={"ready": True})
         client._click_checkout_submit = mock.Mock(return_value=True)
 
-        result = client.submit_checkout({"items": [], "delivery": review["summary"]["delivery"]}, review)
+        result = client.submit_checkout(review["summary"], review)
 
         self.assertTrue(result["awaiting_user_payment"])
-        self.assertEqual(client._review_checkout.call_count, 2)
+        self.assertEqual(client._review_checkout_wizard.call_count, 2)
         client._reset_checkout_review.assert_called_once_with()
         client._click_checkout_submit.assert_called_once()
 
-    def test_meny_prepare_recovers_from_transient_disabled_checkout(self):
+    def test_meny_prepare_retries_disabled_step_without_reserving_delivery_again(self):
         client = self.client()
         review = self.checkout_review()
-        client._review_checkout = mock.Mock(side_effect=[_CheckoutNotReadyError("disabled"), review])
+        client._review_checkout_wizard = mock.Mock(side_effect=[_CheckoutNotReadyError("disabled"), review])
         client._reset_checkout_review = mock.Mock()
         client._locked_operation = mock.MagicMock()
-        cart = {"items": [], "delivery": review["summary"]["delivery"]}
+        slot = normalize_meny_delivery_slot({
+            "slot_id": "3. september klokka 07:00 til 08:00",
+            "date": "2026-09-03",
+            "start": "07:00",
+            "end": "08:00",
+            "display": "3. september klokka 07:00 til 08:00",
+            "selected": True,
+        })
+        client._delivery_slots = mock.Mock(return_value={"slots": [slot]})
+        client._select_delivery_slot = mock.Mock()
+        cart = {**review["summary"], "delivery": None}
+
         self.assertEqual(client.review_checkout(cart), review)
         client._reset_checkout_review.assert_called_once_with()
-        self.assertEqual(client._review_checkout.call_args_list, [mock.call(cart, order_change=None)] * 2)
+        expected = client._review_checkout_wizard.call_args.args[0]
+        self.assertEqual(expected["delivery"]["slot_ref"], slot["slot_ref"])
+        self.assertEqual(client._review_checkout_wizard.call_args_list, [mock.call(expected, order_change=None)] * 2)
+        client._delivery_slots.assert_called_once_with(require_selected=True)
+        client._select_delivery_slot.assert_called_once_with(slot["slot_ref"])
+        self.assertIsNone(cart["delivery"])
 
     def test_checkout_retry_reloads_the_exact_authenticated_wizard(self):
         client = self.client()

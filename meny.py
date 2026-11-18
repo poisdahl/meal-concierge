@@ -3052,16 +3052,7 @@ __DELIVERY_BINDING__
 
     def review_checkout(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None = None, deadline: float | None = None, allow_recovery: bool = False) -> dict[str, Any]:
         with self._locked_operation(MENY_ORDER_TIMEOUT, deadline, allow_recovery=allow_recovery):
-            return self._review_checkout_with_retry(cart, order_change=order_change)
-
-    def _review_checkout_with_retry(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None) -> dict[str, Any]:
-        try:
-            return self._review_checkout(cart, order_change=order_change)
-        except _CheckoutNotReadyError:
-            # MENY can leave Next disabled while the wizard refreshes. Both
-            # reads finish before payment, and explicit cart errors propagate.
-            self._reset_checkout_review()
-            return self._review_checkout(cart, order_change=order_change)
+            return self._review_checkout(cart, order_change=order_change, retry_disabled_step=True)
 
     def _reset_checkout_review(self) -> None:
         state = self._eval(r"""
@@ -3079,7 +3070,7 @@ __DELIVERY_BINDING__
         self._invoke("reload")
         self._sleep(0.8)
 
-    def _review_checkout(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _review_checkout(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None = None, retry_disabled_step: bool = False) -> dict[str, Any]:
         expected = cart_summary(cart)
         if not expected["items"]:
             raise HouseholdError("cart is empty")
@@ -3101,6 +3092,16 @@ __DELIVERY_BINDING__
             expected["delivery"] = selected_delivery
         if expected.get("delivery") is None:
             raise HouseholdError("select a MENY delivery slot before checkout")
+        try:
+            return self._review_checkout_wizard(expected, order_change=order_change)
+        except _CheckoutNotReadyError:
+            if not retry_disabled_step:
+                raise
+            # Reload the wizard against the same basket and reserved window.
+            self._reset_checkout_review()
+            return self._review_checkout_wizard(expected, order_change=order_change)
+
+    def _review_checkout_wizard(self, expected: Mapping[str, Any], *, order_change: Mapping[str, Any] | None) -> dict[str, Any]:
         target_order_id = str(order_change.get("order_id") or "") if order_change else ""
         target_code = str(order_change.get("code") or "") if order_change else ""
         if order_change and order_change.get("requested_delivery"):
@@ -3363,7 +3364,7 @@ __DELIVERY_BINDING__
                 guard = review.get("delivery_guard")
                 self._require_selected_delivery(review_delivery, guard, selected_slot=selected_slot)
                 final_cart["delivery"] = dict(review_delivery)
-                fresh = self._review_checkout_with_retry(final_cart, order_change=order_change)
+                fresh = self._review_checkout(final_cart, order_change=order_change, retry_disabled_step=True)
                 if not meny_checkout_reviews_match(review, fresh):
                     raise HouseholdError("MENY checkout changed after review")
                 ready = self._eval(r"""
