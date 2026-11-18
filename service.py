@@ -639,7 +639,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 and not any(pending_cart.get(k) for k in ("order_change", "native_cart_binding", "native_managed", "clear_requested"))):
             with self.product_plan_lock:
                 try:
-                    self._cart({"action": "reconcile_change", "_deadline": request.get("_deadline")})
+                    review = self._cart({"action": "reconcile_change", "_deadline": request.get("_deadline")})
+                    if review.get("reconciled") is False:
+                        return {**review, "prepared": False}
                 except (HouseholdError, OSError):
                     # The original cart can still be uncertain. No checkout was dispatched.
                     if not self.store.read().get("pending_cart_change"):
