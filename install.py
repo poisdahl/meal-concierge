@@ -1637,7 +1637,7 @@ def main():
 
 def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
     from build_identity import read
-    from runtime_rollback import arm, old_identity, preimage_fingerprint, state_fingerprint
+    from runtime_rollback import LOCKS, arm, old_identity, preimage_fingerprint, state_fingerprint
     pending = home / 'pending-install.json'
     maintenance = home / 'maintenance.json'
     prior_pending = bounded_json(pending, 8 * 1024 * 1024) if pending.exists() else {}
@@ -1670,7 +1670,17 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
             previous = bounded_json(path) if path.exists() and not prior_pending and not maintenance.exists() else None
             prior = Path(previous['release']) if previous and previous.get('release') else None
             destination = None
-            if Path(meta['paths']['state']).exists():
+            state = Path(meta['paths']['state'])
+            config = Path(meta['paths']['config'])
+            # Ownership creates state/ and its empty locks even on the first install.
+            if not config.exists():
+                has_existing_state = state.exists() and any(
+                    entry.name not in LOCKS or entry.is_symlink() or not entry.is_file() or entry.stat().st_size
+                    for entry in state.iterdir()
+                )
+                if path.exists() or settings is None or config.is_symlink() or has_existing_state:
+                    raise RuntimeError('missing household config; restore the existing config before installation')
+            elif state.exists():
                 destination = home / 'backups' / ('before-' + uuid.uuid4().hex)
                 backup(meta, destination)
                 sync_backup_tree(destination)

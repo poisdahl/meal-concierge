@@ -2291,34 +2291,47 @@ class OdaBrowser:
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
  const enabled=x=>visible(x)&&!x.disabled&&x.getAttribute('aria-disabled')!=='true';
  const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i;
+ const blocked=reason=>JSON.stringify({action:'blocked',reason});
+ if(location.origin!=='https://oda.com')return blocked('unexpected_origin');
+ const confirmPage=location.pathname==='/no/checkout/confirm/';
+ const routes=[STORE,CART,CHECKOUT_ENTRY,MODIFY,RECOMMENDATIONS];
+ const pending=reason=>JSON.stringify({action:'wait',reason});
+ if(!routes.includes(location.href)&&!confirmPage){
+   // Known routes with unexpected parameters are not the requested destination.
+   if(routes.some(url=>new URL(url).pathname===location.pathname))return blocked('unexpected_route');
+   // Oda can pass through another page on the way to checkout. Only observe it.
+   return pending(location.pathname==='/no/account/delivery/' || /^Adresser\s*[–-]\s*Oda$/i.test(document.title)
+     ? 'address' : 'transition');
+ }
  document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
- const confirmPage=location.origin==='https://oda.com'&&location.pathname==='/no/checkout/confirm/';
- if(![STORE,CART,CHECKOUT_ENTRY,MODIFY,RECOMMENDATIONS].includes(location.href)&&!confirmPage)return JSON.stringify({action:'blocked'});
  const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
- if([...document.querySelectorAll('[role="alert"],[role="alertdialog"]'),...dialogs].some(root=>visible(root)&&unavailable.test(norm(root.innerText||''))))return JSON.stringify({action:'blocked'});
+ if([...document.querySelectorAll('[role="alert"],[role="alertdialog"]'),...dialogs].some(root=>visible(root)&&unavailable.test(norm(root.innerText||''))))return blocked('stock_notice');
  if(location.href===MODIFY){
    // Bind the requested destination; Oda initially selects an existing order.
    const main=document.querySelector('main');
-   if(!main||!visible(main)||dialogs.length||document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
+   if(dialogs.length||document.querySelector('input[type="password"]'))return blocked('destination_prompt');
+   if(!main||!visible(main))return pending('destination');
    const radios=[...main.querySelectorAll('input[type="radio"]')];
    const selected=radios.filter(x=>x.checked);
+   if(!radios.length||!selected.length)return pending('destination');
    const existing=ORDER!==null;
    const candidates=radios.filter(x=>enabled(x)&&[...x.labels].filter(label=>{
      if(!visible(label)||!label.contains(x)||label.querySelectorAll('input[type="radio"]').length!==1)return false;
      const text=norm(label.innerText);
      return existing?/^Legg til i eksisterende bestilling(?:\s|$)/.test(text)&&text.split(/[^A-Za-z0-9_-]+/).filter(token=>token===ORDER).length===1:/^Lag en ny bestilling(?:\s|$)/.test(text);
    }).length===1);
-   if(candidates.length!==1||selected.length!==1||radios.some(x=>!visible(x)))return JSON.stringify({action:'blocked'});
+   if(candidates.length!==1||selected.length!==1||radios.some(x=>!visible(x)))return blocked('order_destination');
    const target=candidates[0];
    if(!target.checked){target.setAttribute('data-oda-household-action',existing?'previous-order':'new-order');return JSON.stringify({action:existing?'previous_order':'new_order'});}
    const payment=[...main.querySelectorAll('button')].filter(enabled).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===(existing?'Gå til betaling':'Fortsett'));
-   if(payment.length!==1)return JSON.stringify({action:'blocked'});
+   if(!payment.length)return pending('destination');
+   if(payment.length!==1)return blocked('order_destination');
    payment[0].setAttribute('data-oda-household-action','payment');
    return JSON.stringify({action:'payment'});
  }
  if(confirmPage){
    const expected=ORDER,actual=new URL(location.href).searchParams.get('orderNumber');
-   if(!((expected===null&&actual===null)||(expected!==null&&actual===expected)))return JSON.stringify({action:'blocked'});
+   if(!((expected===null&&actual===null)||(expected!==null&&actual===expected)))return blocked('different_order');
    const payment=JSON.parse(PAYMENT);
    if(payment.observed&&!payment.verified)return JSON.stringify({action:'payment_required'});
    const controls=[...document.querySelectorAll('button')].filter(enabled);
@@ -2327,14 +2340,15 @@ class OdaBrowser:
      if(payment.verified)return JSON.stringify({action:'ready'});
      return JSON.stringify({action:'wait'});
    }
-   if(submit.length>1)return JSON.stringify({action:'blocked'});
+   if(submit.length>1)return blocked('multiple_payment_controls');
    return JSON.stringify({action:'wait'});
  }
  if(location.href===CHECKOUT_ENTRY)return JSON.stringify({action:'wait'});
  if(location.href===RECOMMENDATIONS){
    const controls=[...document.querySelectorAll('a')].filter(enabled);
    const next=controls.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett'&&x.href===CHECKOUT);
-   if(next.length!==1)return JSON.stringify({action:'blocked'});
+   if(!next.length)return pending('recommendations');
+   if(next.length!==1)return blocked('multiple_recommendation_links');
    next[0].setAttribute('data-oda-household-action','recommendations');
    return JSON.stringify({action:'recommendations'});
  }
@@ -2350,7 +2364,7 @@ class OdaBrowser:
      return /^(Ny bestilling|Ny levering|separat(?: bestilling| levering)?|egen levering|Gå til betaling)$/i.test(label);
    });
  });
- if(roots.length>1)return JSON.stringify({action:'blocked'});
+ if(roots.length>1)return blocked('order_destination');
  if(roots.length===0)return JSON.stringify({action:'wait'});
  const controls=[...roots[0].querySelectorAll('button,a')].filter(enabled);
    const orderTokens=norm(roots[0].innerText||'').split(/[^A-Za-z0-9_-]+/).filter(Boolean);
@@ -2362,13 +2376,14 @@ class OdaBrowser:
    if(ORDER===null && newOrder.length===0 && previous.length===0 && payment.length===1){payment[0].setAttribute('data-oda-household-action','payment');return JSON.stringify({action:'payment'});}
    if(ORDER!==null && newOrder.length===0 && previous.length===1 && payment.length===0){previous[0].setAttribute('data-oda-household-action','previous-order');return JSON.stringify({action:'previous_order'});}
    if(ORDER!==null && newOrder.length===0 && previous.length===0 && payment.length===1){payment[0].setAttribute('data-oda-household-action','payment');return JSON.stringify({action:'payment'});}
-   return JSON.stringify({action:'blocked'});
+   return blocked('order_destination');
 })()
 """.replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("FINAL_CONTROL", "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order").replace("ORDER", json.dumps(order_id))
         dispatched: set[str] = set()
         for _ in range(30):
             self._require_checkout_time()
-            action = self._eval(script).get("action")
+            surface = self._eval(script)
+            action = surface.get("action")
             if action == "ready":
                 return
             if action == "payment_required":
@@ -2384,7 +2399,18 @@ class OdaBrowser:
                 self._settle(1)
                 continue
             if action == "blocked":
-                raise HouseholdError("Oda checkout navigation is ambiguous")
+                reasons = {
+                    "unexpected_origin": "the browser left Oda",
+                    "unexpected_route": "the Oda checkout route has unexpected parameters",
+                    "stock_notice": "Oda reports unavailable goods",
+                    "destination_prompt": "the order destination is behind a dialog or sign-in prompt",
+                    "order_destination": "the new or existing order destination could not be identified",
+                    "different_order": "the checkout belongs to a different order",
+                    "multiple_payment_controls": "the confirmation page has several payment buttons",
+                    "multiple_recommendation_links": "the recommendations page has several checkout links",
+                }
+                reason = reasons.get(surface.get("reason"), "the checkout controls could not be identified")
+                raise HouseholdError(f"Oda checkout navigation is ambiguous: {reason}")
             if action in {"new_order", "previous_order", "payment", "recommendations"}:
                 if action not in dispatched:
                     dispatched.add(action)
@@ -2393,7 +2419,14 @@ class OdaBrowser:
                     self._settle(0.5)
                 continue
             self._settle(0.5)
-        raise HouseholdError("Oda checkout navigation timed out")
+        reasons = {
+            "address": "Oda is still showing its address page. Check the intended delivery address in Oda, then request a new checkout review.",
+            "transition": "Oda stayed on an intermediate page. Complete any address or sign-in step in the checkout browser, then request a new checkout review.",
+            "destination": "Oda did not finish showing the order destination and its continue control.",
+            "recommendations": "Oda did not show the link from recommendations to checkout.",
+        }
+        reason = reasons.get(surface.get("reason"))
+        raise HouseholdError(f"Oda checkout navigation timed out. {reason}" if reason else "Oda checkout navigation timed out")
 
     def _checkout_dispatch_tab(self):
         try:

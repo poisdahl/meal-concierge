@@ -1576,14 +1576,17 @@ class MenyClient:
   const quantity = Number.parseInt(selected, 10) || 0;
   if (ACTION === 'read') return JSON.stringify({ready:true, page_ready:true, authenticated:authenticated.length === 1, quantity});
   const name = norm(heading.innerText);
+  const header = heading.closest('.ws-product-details__header');
+  const subtitles = header ? [...header.querySelectorAll(':scope > .ws-product-details__subtitle')] : [];
+  const subtitle = subtitles.length === 1 ? norm(subtitles[0].textContent) : '';
+  const fullName = subtitle ? `${name} ${subtitle}` : name;
   const buttons = [...document.querySelectorAll('main button')].filter(x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true' && between(x));
-  const candidates = buttons.filter(button => {
-    const label = norm(button.getAttribute('aria-label') || button.innerText);
-    return DELTA > 0
-      ? (label === `Legg ${name} i handlevognen` || label === `Legg til 1 stk ${name} i handlevognen`)
-      : label === `Fjern ${name} fra handlevognen`;
-  });
-  if (candidates.length !== 1 || (DELTA < 0 && quantity < 1)) return JSON.stringify({ready:false, page_ready:true, authenticated:authenticated.length === 1, quantity});
+  const labels = DELTA > 0 ? [
+    `Legg ${name} i handlevognen`, `Legg til 1 stk ${name} i handlevognen`,
+    `Legg til ${fullName} i handlevognen`, `Legg til 1 stk ${fullName} i handlevognen`,
+  ] : [quantity === 1 ? `Fjern ${name} fra handlevognen` : `Fjern 1 stk ${name} fra handlevognen`];
+  const candidates = buttons.filter(button => labels.includes(norm(button.getAttribute('aria-label') || button.innerText)));
+  if (candidates.length !== 1 || (DELTA < 0 && (quantity < 1 || !/^\d+(?: stk)?$/.test(selected)))) return JSON.stringify({ready:false, page_ready:true, authenticated:authenticated.length === 1, quantity});
   candidates[0].setAttribute('data-meal-concierge-action', 'cart');
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
   const label = norm(candidates[0].getAttribute('aria-label') || candidates[0].innerText);
@@ -3539,6 +3542,10 @@ __DELIVERY_BINDING__
                             return True
                     except HouseholdError:
                         pass
+                    if attempt == 0 and poll == 0 and self.cdp is None:
+                        # A wide headed window can hide MENY's account button.
+                        # Restore the working layout before considering a reload.
+                        self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
                     if poll < 19:
                         self._sleep(0.5)
             return False

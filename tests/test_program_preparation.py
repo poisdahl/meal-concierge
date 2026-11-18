@@ -49,6 +49,39 @@ class ProgramPreparationTests(unittest.TestCase):
         with patch.object(install, 'stage_release', return_value=self.release):
             return install.prepare_program(self.home, self.meta)
 
+    def test_fresh_external_install_uses_real_ownership_and_migrates_empty_home(self):
+        home = self.code.parent / 'fresh-home'
+        code = self.code.parent / 'fresh-code'
+        release = code / self.release.name
+        shutil.copytree(self.release, release, symlinks=True)
+        argv = ['install.py', 'install', '--manager', 'external', '--home', str(home),
+                '--code-root', str(code), '--provider', 'none', '--household', 'Fresh fixture']
+        with patch.object(sys, 'argv', argv), patch.object(install, 'stage_release', return_value=release), \
+             patch.dict('os.environ', {'HERMES_HOME': str(self.code.parent / 'hermes')}):
+            install.main()
+        self.assertEqual(install.bounded_json(home / 'config.json')['household'], 'Fresh fixture')
+        self.assertEqual(Path(install.bounded_json(home / 'runtime.json')['release']), release)
+        self.assertTrue((home / 'state/state.json').is_file())
+        self.assertTrue((home / 'state/recipes.sqlite3').is_file())
+        self.assertFalse((home / 'backups').exists())
+        self.assertFalse((home / 'pending-install.json').exists())
+
+    def test_orphaned_recipe_bank_requires_its_config_before_install(self):
+        home = self.code.parent / 'orphan-home'
+        bank = home / 'state/recipes.sqlite3'
+        bank.parent.mkdir(parents=True)
+        bank.write_bytes(b'existing bank')
+        argv = ['install.py', 'install', '--manager', 'external', '--home', str(home),
+                '--code-root', str(self.code.parent / 'orphan-code'), '--provider', 'none',
+                '--household', 'Another household']
+        with patch.object(sys, 'argv', argv), patch.object(install, 'stage_release', return_value=self.release), \
+             patch.dict('os.environ', {'HERMES_HOME': str(self.code.parent / 'hermes')}):
+            with self.assertRaisesRegex(RuntimeError, 'missing household config'):
+                install.main()
+        self.assertEqual(bank.read_bytes(), b'existing bank')
+        self.assertFalse((home / 'pending-install.json').exists())
+        self.assertFalse((home / 'config.json').exists())
+
     def test_cli_preparation_while_external_run_holds_lifecycle_and_service_ownership(self):
         home = self.home.resolve()
         meta = {**self.meta, 'home': str(home)}

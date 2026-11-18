@@ -2931,7 +2931,7 @@ process.stdout.write(eval(input.script));
                 browser._advance_checkout_path()
         self.assertIn("newOrder.length===1 && previous.length===0 && payment.length===0", scripts[0])
         self.assertIn("newOrder.length===0 && previous.length===1 && payment.length===0", scripts[0])
-        self.assertIn("return JSON.stringify({action:'blocked'})", scripts[0])
+        self.assertIn("return blocked('order_destination')", scripts[0])
         self.assertIn("orderTokens", scripts[0])
         self.assertNotIn("includes(ORDER)", scripts[0])
 
@@ -2971,7 +2971,7 @@ const main=node('main');main.querySelectorAll=s=>s==='input[type="radio"]'?radio
 const submit=node('submit','Bekreft og betal 246,40 kr');
 const card=node('card');card.checked=true;
 const cardLabel=node('card-label','•••• 1111');cardLabel.contains=x=>x===card;cardLabel.querySelectorAll=()=>[card];card.labels=[cardLabel];
-const document={body:{innerText:c.unrelatedStockWord?'utsolgt':''},
+const document={title:c.title,body:{innerText:c.unrelatedStockWord?'utsolgt':''},
  querySelector:s=>s==='main'?(c.noMain?null:main):(c.login?{}:null),
  querySelectorAll:s=>s==='[role="alert"],[role="alertdialog"]'&&c.unavailable?[node('alert','utsolgt')]:s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
 const location=new URL(c.url||'https://oda.com/no/checkout/modify/');
@@ -2996,29 +2996,49 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
                 self.assertEqual(result["value"], {"action": action})
                 self.assertEqual(result["marked"], [{"id": "new" if action == "new_order" else "payment",
                                                     "action": action.replace("_", "-")}])
-        for case in [{key: True} for key in ("noSelection", "doubleSelection", "disabled", "hidden",
-                     "hiddenLabel", "wrongLabel", "unbound", "mixedLabel", "duplicateLabel",
-                     "noRadios", "duplicateCandidate", "noMain", "login", "dialog", "unavailable")] + [
-                     {"newSelected": True, key: True} for key in ("disabledPayment", "duplicatePayment", "noPayment", "oldPaymentLabel")] + [
-                     {"url": url} for url in ("https://wrong.example/no/checkout/modify/",
-                     "https://oda.com/no/checkout/modify/?orderNumber=123", "https://oda.com/no/checkout/modify/#other",
-                     "https://oda.com/no/checkout/other/")]:
+        def check_idle(script, case, action, reason):
             with self.subTest(case=case):
-                self.assertEqual(evaluate(script, case), {"value": {"action": "blocked"}, "marked": []})
+                self.assertEqual(evaluate(script, case), {"value": {"action": action, "reason": reason}, "marked": []})
+
+        for key in ("doubleSelection", "disabled", "hidden", "hiddenLabel", "wrongLabel",
+                    "unbound", "mixedLabel", "duplicateLabel", "duplicateCandidate"):
+            check_idle(script, {key: True}, "blocked", "order_destination")
+        for key in ("noSelection", "noRadios", "noMain"):
+            check_idle(script, {key: True}, "wait", "destination")
+        for key in ("disabledPayment", "noPayment", "oldPaymentLabel"):
+            check_idle(script, {"newSelected": True, key: True}, "wait", "destination")
+        check_idle(script, {"newSelected": True, "duplicatePayment": True}, "blocked", "order_destination")
+        check_idle(script, {"login": True}, "blocked", "destination_prompt")
+        check_idle(script, {"dialog": True}, "blocked", "destination_prompt")
+        check_idle(script, {"unavailable": True}, "blocked", "stock_notice")
+        check_idle(script, {"url": "https://wrong.example/no/checkout/modify/"}, "blocked", "unexpected_origin")
+        for suffix in ("?orderNumber=123", "#other"):
+            check_idle(script, {"url": "https://oda.com/no/checkout/modify/" + suffix}, "blocked", "unexpected_route")
+        check_idle(script, {"url": "https://oda.com/no/checkout/other/"}, "wait", "transition")
+        address_page = {"url": "https://oda.com/no/intermediate/", "title": "Adresser – Oda"}
+        check_idle(script, address_page, "wait", "address")
+        check_idle(script, {"url": "https://oda.com/no/checkout/recommendations/"}, "wait", "recommendations")
+        # When the merchant advances itself, reread its normal confirm controls.
+        states = iter([address_page, {"url": CHECKOUT_URL}])
+        browser._eval = lambda js: evaluate(js, next(states))["value"]
+        browser._click_action = mock.Mock()
+        browser._advance_checkout_path()
+        browser._click_action.assert_not_called()
+
+        browser._eval = lambda script: scripts.append(script) or {"action": "ready"}
         browser._advance_checkout_path("123")
-        self.assertEqual(evaluate(scripts[-1], {}), {"value": {"action": "blocked"}, "marked": []})
         existing_script = scripts[-1]
+        check_idle(existing_script, {}, "blocked", "order_destination")
         for case, action in [({"existingLabel": True}, "payment"),
                              ({"existingLabel": True, "newSelected": True}, "previous_order")]:
             result = evaluate(existing_script, case)
             self.assertEqual(result["value"], {"action": action})
             self.assertEqual(result["marked"], [{"id": "old" if action == "previous_order" else "payment",
                                                 "action": action.replace("_", "-")}])
-        for key in ("wrongOrder", "duplicateExistingLabel", "disabledOld", "doubleSelection", "noSelection",
-                    "duplicatePayment", "disabledPayment", "noPayment"):
-            with self.subTest(existing_rejected=key):
-                self.assertEqual(evaluate(existing_script, {"existingLabel": True, key: True}),
-                                 {"value": {"action": "blocked"}, "marked": []})
+        for key in ("wrongOrder", "duplicateExistingLabel", "disabledOld", "doubleSelection", "duplicatePayment"):
+            check_idle(existing_script, {"existingLabel": True, key: True}, "blocked", "order_destination")
+        for key in ("noSelection", "disabledPayment", "noPayment"):
+            check_idle(existing_script, {"existingLabel": True, key: True}, "wait", "destination")
 
         for selection_takes_effect in (True, False):
             with self.subTest(selection_takes_effect=selection_takes_effect):
@@ -3087,7 +3107,8 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         self.assertEqual(evaluate(navigation, {}), {"action": "payment_required"})
         self.assertEqual(evaluate(navigation, {"loading": True}), {"action": "wait"})
         self.assertEqual(evaluate(navigation, {"cardSelected": True}), {"action": "ready"})
-        self.assertEqual(evaluate(navigation, {"url": CHECKOUT_URL + "?orderNumber=123"}), {"action": "blocked"})
+        self.assertEqual(evaluate(navigation, {"url": CHECKOUT_URL + "?orderNumber=123"}),
+                         {"action": "blocked", "reason": "different_order"})
         valid = evaluate(surface_script, {"cardSelected": True})
         self.assertTrue(valid["masked_payment"])
         self.assertEqual(valid["payment_display"], "•••• 1111")
@@ -3109,12 +3130,14 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         browser = OdaBrowser.__new__(OdaBrowser)
         evaluations = []
         sleeps = []
-        browser._eval = lambda _script: evaluations.append(None) or {"action": "wait"}
+        browser._eval = lambda _script: evaluations.append(None) or {"action": "wait", "reason": "address"}
+        browser._click_action = mock.Mock()
 
         with mock.patch("oda_browser.time.sleep", side_effect=sleeps.append):
-            with self.assertRaisesRegex(HouseholdError, "navigation timed out"):
+            with self.assertRaisesRegex(HouseholdError, "still showing its address page.*new checkout review"):
                 browser._advance_checkout_path()
 
+        browser._click_action.assert_not_called()
         self.assertEqual(len(evaluations), 30)
         self.assertEqual(sleeps, [0.5] * 30)
 
@@ -4641,8 +4664,35 @@ class MenyClientTests(unittest.TestCase):
         client._site_shell_ready = mock.Mock(side_effect=[HouseholdError("evaluation timed out"), True])
         client._sleep = mock.Mock()
         client._open("https://meny.no/varer")
-        self.assertEqual(client._invoke.call_args_list, [mock.call("open", "https://meny.no/varer")])
+        self.assertEqual(client._invoke.call_args_list, [
+            mock.call("open", "https://meny.no/varer"),
+            mock.call("set", "viewport", "1280", "900"),
+        ])
         self.assertEqual(client._site_shell_ready.call_count, 2)
+
+    def test_wide_profile_window_recovers_without_reloading_the_page(self):
+        client = self.client()
+        url = "https://meny.no/varer"
+        viewport = (1920, 1080)
+
+        def invoke(command, *args):
+            nonlocal viewport
+            if command == "open":
+                return {"url": url}
+            self.assertEqual((command, *args), ("set", "viewport", "1280", "900"))
+            viewport = tuple(map(int, args[1:]))
+            return {}
+
+        client._invoke = mock.Mock(side_effect=invoke)
+        client._site_shell_ready = lambda: viewport == (1280, 900)
+        client._sleep = mock.Mock()
+        client._open(url)
+        client._open(url)
+        self.assertEqual(client._invoke.call_args_list, [
+            mock.call("open", url),
+            mock.call("set", "viewport", "1280", "900"),
+            mock.call("open", url),
+        ])
 
     def test_authenticated_shell_can_recover_after_one_bounded_reload(self):
         client = self.client()
@@ -4652,6 +4702,7 @@ class MenyClientTests(unittest.TestCase):
         client._open("https://meny.no/varer")
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("open", "https://meny.no/varer"),
+            mock.call("set", "viewport", "1280", "900"),
             mock.call("reload"),
         ])
         self.assertEqual(client._site_shell_ready.call_count, 22)
@@ -6520,6 +6571,72 @@ process.stdout.write(eval(script));
         result = client._search("brokkoli", 5, "products")
         self.assertEqual(result["products"][0]["name"], "Brokkoli")
         client._sleep.assert_called_once_with(0.25)
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the MENY product-page controls")
+    def test_cart_button_matches_product_heading_and_subtitle(self):
+        client = self.client()
+        client._eval = lambda script: script
+        harness = r"""
+const {script, path, subtitle, labels, selected} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+global.location = new URL('https://meny.no' + path);
+global.Node = {DOCUMENT_POSITION_FOLLOWING: 4};
+global.getComputedStyle = () => ({display:'block', visibility:'visible'});
+function element(text, position) {
+  return {innerText:text, textContent:text, position, attributes:{},
+    getBoundingClientRect:() => ({width:30, height:20}),
+    compareDocumentPosition(other) { return position < other.position ? 4 : 2; },
+    getAttribute(key) { return this.attributes[key]; },
+    setAttribute(key, value) { this.attributes[key] = value; }};
+}
+const heading = element('Spaghetti', 1), about = element('Om produktet', 5);
+const select = element('', 3);
+select.selectedOptions = [element(selected, 3)];
+heading.closest = selector => selector === '.ws-product-details__header' ? {
+  querySelectorAll:s => s === ':scope > .ws-product-details__subtitle' && subtitle ? [element(subtitle, 2)] : []
+} : null;
+const buttons = labels.map(label => {
+  const button = element('Kjøp', 3); button.setAttribute('aria-label', label); return button;
+});
+global.document = {querySelectorAll(selector) {
+  switch (selector) {
+    case 'main h1': return [heading];
+    case 'main h2': return [about];
+    case 'button': return [element('Brukermeny', 0), ...buttons];
+    case 'main button': return buttons;
+    case 'main select[aria-label*="endre mengde"]': return selected ? [select] : [];
+    case '[data-meal-concierge-action="cart"]':
+      return buttons.filter(x => x.getAttribute('data-meal-concierge-action') === 'cart');
+    default: return [];
+  }
+}};
+process.stdout.write(eval(script));
+"""
+        full = "Legg til Spaghetti 500g Sopps i handlevognen"
+        other_size = "Legg til Spaghetti 1kg Sopps i handlevognen"
+        increase = "Legg til 1 stk Spaghetti 500g Sopps i handlevognen"
+        remove = "Fjern Spaghetti fra handlevognen"
+        decrease = "Fjern 1 stk Spaghetti fra handlevognen"
+        for delta, selected, subtitle, labels, expected in (
+            (1, "", "500g Sopps", [other_size, full], full),
+            (1, "", "500g Sopps", [other_size], None),
+            (1, "", "500g Sopps", [full, full], None),
+            (1, "1 stk", "500g Sopps", [increase], increase),
+            (1, "", "", ["Legg til Spaghetti i handlevognen"], "Legg til Spaghetti i handlevognen"),
+            (1, "", "500g Sopps", ["Legg Spaghetti i handlevognen"], "Legg Spaghetti i handlevognen"),
+            (-1, "1 stk", "500g Sopps", [remove], remove),
+            (-1, "2 stk", "500g Sopps", [decrease], decrease),
+            (-1, "2 stk", "500g Sopps", [remove], None),
+            (-1, "1,5 kg", "500g Sopps", [remove], None),
+        ):
+            with self.subTest(subtitle=subtitle, selected=selected, labels=labels):
+                script = client._product_control("mark", delta, MENY_PRODUCT)
+                run = subprocess.run(
+                    [shutil.which("node"), "-e", harness], text=True, capture_output=True, check=True,
+                    input=json.dumps(dict(script=script, path=MENY_PRODUCT, selected=selected,
+                                          subtitle=subtitle, labels=labels)),
+                )
+                result = json.loads(run.stdout)
+                self.assertEqual((result["ready"], result.get("label")), (expected is not None, expected))
 
     def test_cart_click_rechecks_login_before_and_after_mutation(self):
         client = self.client()
