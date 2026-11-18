@@ -2369,7 +2369,7 @@ process.stdout.write(eval(script));
 
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp), CONFIG).read()
-            state["version"] = 15
+            state["version"] += 1
             self.write_state(temp, state)
             with self.assertRaisesRegex(HouseholdError, "newer than"):
                 StateStore(Path(temp), CONFIG)
