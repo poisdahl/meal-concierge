@@ -294,7 +294,8 @@ If Oda or Mathem loses the reply to an ordinary grocery cart update, Meal
 Concierge reads the cart again. When the whole cart has the requested items
 and quantities, shopping can continue. The original write stays recorded as
 uncertain and is never resent by recovery. If that first read is unavailable,
-preparing checkout checks the cart again. If the quantities still differ, the original write remains pending.
+preparing checkout checks the cart again. If the quantities differ, Bob can show the cart. Tell Bob “use this cart and
+continue” to accept those contents. Bob checks them again before continuing.
 A cart observation cannot confirm payment or an existing order change.
 
 An explicit request to empty the cart uses its freshly observed digest. The menu

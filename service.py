@@ -634,7 +634,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def _handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         operation = request.get("operation")
         pending_cart = self.store.read().get("pending_cart_change")
-        if (pending_cart and operation == "checkout" and request.get("action") == "prepare"
+        if (pending_cart and operation == "checkout" and request.get("action", "prepare") == "prepare"
                 and self._can_reread_ordinary_cart() and pending_cart.get("provider") == self.provider
                 and not any(pending_cart.get(k) for k in ("order_change", "native_cart_binding", "native_managed", "clear_requested"))):
             with self.product_plan_lock:
@@ -648,7 +648,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                         raise
             pending_cart = self.store.read().get("pending_cart_change")
         if pending_cart and (
-            (operation == "cart" and request.get("action", "get") not in {"get", "reconcile_change"})
+            (operation == "cart" and request.get("action", "get") not in {"get", "reconcile_change", "accept_current"})
             or (operation == "products" and request.get("action") == "apply")
             or operation == "checkout"
             or (operation == "orders" and request.get("action") not in {None, "list", "get"})

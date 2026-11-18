@@ -809,7 +809,7 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     view = {"projection": "agent", "operation": "cart", "action": action}
     view.update(_fields(result, ("status", "reason", "next", "cart_digest", "cart_write_pending",
                                  "cleared", "ensured", "reconciled", "synced", "stopped", "idempotent",
-                                 "changed", "outcome_unknown", "operation_id", "cart_observation", "cart_target_observed", "dispatch_outcome", "cart_reconciliation_required", "decision",
+                                 "changed", "outcome_unknown", "operation_id", "cart_observation", "cart_target_observed", "accept_current_available", "dispatch_outcome", "cart_reconciliation_required", "decision",
                                  "product_plan_stale", "menu_binding_stale", "order_id", "applied_operations",
                                  "excluded_product_ids", "accepted_missing_product_ids", "default_suggestion")))
     if isinstance(result.get("cart_plan"), dict):
@@ -822,9 +822,14 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     except HouseholdError:
         # A provider can omit its total. Preserve the write outcome without
         # exposing raw provider internals or minting a writable cart digest.
-        view.pop("cart_digest", None)
-        view["cart_normalization"] = "unavailable"
-        return view
+        if result.get("accept_current_available") and result.get("cart_write_pending") and view.get("cart_digest"):
+            from core import cart_contents
+            summary = cart_contents(cart, require_quantities=True)
+            view["cart_normalization"] = "quantities_only"
+        else:
+            view.pop("cart_digest", None)
+            view["cart_normalization"] = "unavailable"
+            return view
     view.update(_fields(summary, ("count", "total", "delivery", "amounts")))
     lines = [_fields(item, ("product_id", "name", "quantity", "price"))
              for item in summary.get("items", []) if isinstance(item, dict)]

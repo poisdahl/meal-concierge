@@ -1507,6 +1507,11 @@ def cart_contents(cart: Mapping[str, Any], *, require_quantities: bool = False) 
             "quantity": int(numeric_quantity),
             "price": item.get("totalGrossAmount", item.get("price", product.get("price"))),
         })
+    if require_quantities:
+        units = sum(line["quantity"] for line in lines)
+        for key in ("productQuantityCount", "count"):
+            if key in cart and (type(cart[key]) is not int or cart[key] != units):
+                raise HouseholdError("Cart count is inconsistent with its product quantities")
     return {"items": lines}
 
 

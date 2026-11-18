@@ -4822,6 +4822,11 @@ class PlanningOperations:
             names[product_id] = name
         return quantities, names
 
+    def _observed_cart_lines(self, cart: Mapping[str, Any]) -> tuple[dict[str, int], dict[str, str]]:
+        if not isinstance(cart, Mapping):
+            raise HouseholdError("Cart items are unavailable")
+        return self._cart_lines(cart_contents(cart, require_quantities=True))
+
     @staticmethod
     def _cart_digest(quantities: Mapping[str, int]) -> str:
         return hashlib.sha256(canonical(dict(sorted(quantities.items()))).encode()).hexdigest()
@@ -5160,33 +5165,73 @@ class PlanningOperations:
         return (self.allow_observed_cart_recovery and self.provider in {"oda", "mathem"}
                 and not callable(getattr(self.provider_client, "validate_cart_reconciliation", None)))
 
-    def _matches_uncertain_cart_target(self, state, pending, live):
-        """Check whether the observed cart satisfies an ordinary shopping operation."""
+    @staticmethod
+    def _cart_operation_ref(pending):
+        # Older ordinary journals predate operation IDs. Bind their review to
+        # the complete, immutable journal rather than rewriting it on upgrade.
+        return pending.get("operation_id") or mp.digest(pending)
+
+    def _ordinary_cart_observation_allowed(self, state, pending):
+        cancellation = state.get("pending_cancellation")
         if (not pending or not self._can_reread_ordinary_cart() or pending.get("provider") != self.provider
-                or not pending.get("operation_id") or pending.get("dispatch_finished")
+                or not isinstance(pending.get("before"), dict) or not isinstance(pending.get("expected"), dict)
+                or not pending.get("operations") or "order_change" not in pending
                 or pending.get("native_cart_binding") or pending.get("native_managed") or pending.get("clear_requested")
                 or state.get("order_change") or pending.get("order_change") or state.get("pending_checkout")
-                or state.get("pending_cancellation") or pending.get("expected") != live
+                or (cancellation and cancellation.get("status") != "awaiting_confirmation")
                 or state.get("pending_cart_change") != pending):
             return False
-        if pending.get("managed_menu") and self._cart_menu_ref(state.get("menu")) != pending["managed_menu"]:
-            return False
-        return True
+        return not pending.get("managed_menu") or self._cart_menu_ref(state.get("menu")) == pending["managed_menu"]
 
-    def _archive_observed_cart_target(self, state, pending, live):
-        if not self._matches_uncertain_cart_target(state, pending, live):
+    def _matches_uncertain_cart_target(self, state, pending, live):
+        return (self._ordinary_cart_observation_allowed(state, pending) and not pending.get("dispatch_finished")
+                and pending["expected"] == live)
+
+    def _archive_observed_cart_target(self, state, pending, live, *, owner_accepted=False):
+        if not self._ordinary_cart_observation_allowed(state, pending) or (
+                not owner_accepted and not self._matches_uncertain_cart_target(state, pending, live)):
             raise HouseholdError("original cart changed during observation")
-        state.setdefault("cart_change_receipts", {})[pending["operation_id"]] = {
-            "status": "target_observed", "dispatch_outcome": "unknown", "original_operation": deepcopy(pending),
-            "observed_digest": self._cart_digest(live),
+        state.setdefault("cart_change_receipts", {})[self._cart_operation_ref(pending)] = {
+            "status": "owner_accepted_cart" if owner_accepted else "target_observed",
+            "dispatch_outcome": "finished" if pending.get("dispatch_finished") else "unknown",
+            "original_operation": deepcopy(pending), "observed_digest": self._cart_digest(live),
         }
         state.pop("pending_cart_change")
+
+    def _accept_current_cart(self, request, pending, deadline):
+        token = request.get("operation_id")
+        digest = request.get("cart_digest")
+        if not isinstance(token, str) or not isinstance(digest, str):
+            raise HouseholdError("accept_current needs the operation_id and cart_digest from cart get")
+        state = self.store.read()
+        if not pending:
+            receipt = state.get("cart_change_receipts", {}).get(token) or {}
+            if receipt.get("status") == "owner_accepted_cart" and receipt.get("observed_digest") == digest:
+                return {"reconciled": True, "status": "previously_accepted", "operation_id": token}
+        if (not self._ordinary_cart_observation_allowed(state, pending)
+                or self._cart_operation_ref(pending) != token):
+            raise HouseholdError("read the current pending grocery cart before accepting it")
+        cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
+        live, names = self._observed_cart_lines(cart)
+        if digest != self._cart_digest(live):
+            raise HouseholdError("cart changed since the review; show the current cart before accepting it")
+        with self.store.locked() as state:
+            self._archive_observed_cart_target(state, pending, live, owner_accepted=True)
+            plan = state.get("cart_plan")
+            if (isinstance(plan, dict) and plan.get("provider") == self.provider
+                    and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu"))):
+                self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
+                self._set_cart_needs_input(plan, live, names)
+                plan.update(status="active", approved_cart_digest=digest, pending_cart_digest=None)
+                plan.pop("ownership_review", None)
+        return {"reconciled": True, "cart_write_pending": False, "status": "owner_accepted_cart",
+                "operation_id": token, "cart_digest": digest, "cart": cart}
 
     def _observed_managed_target(self, mutation_error, cart, expected, menu_ref, operations):
         if mutation_error is None or not self._can_reread_ordinary_cart():
             return None
         try:
-            quantities, _ = self._cart_lines(cart_contents(cart, require_quantities=True))
+            quantities, _ = self._observed_cart_lines(cart)
         except HouseholdError:
             return None
         state = self.store.read()
@@ -5993,13 +6038,15 @@ class PlanningOperations:
         if not pending.get("dispatch_finished"):
             with self.store.locked() as state:
                 if self._matches_uncertain_cart_target(state, pending, quantities):
-                    self._cart_lines(cart_contents(cart, require_quantities=True))
+                    self._observed_cart_lines(cart)
                     self._archive_observed_cart_target(state, pending, quantities)
                     plan = state.get("cart_plan")
-                    if isinstance(plan, dict):
+                    if not pending.get("managed_menu"):
+                        self._record_supplemental_cart_change(state, pending["before"], quantities, names)
+                    elif isinstance(plan, dict):
                         self._set_cart_needs_input(plan, quantities, names)
                     return {"reconciled": True, "cart_write_pending": False, "cart_target_observed": True,
-                            "dispatch_outcome": "unknown", "operation_id": pending["operation_id"]}
+                            "dispatch_outcome": "unknown", "operation_id": self._cart_operation_ref(pending)}
         stopped_prefix = pending.get("stopped_before_next_click") is True
         finished = pending.get("dispatch_finished") is True
         if pending.get("managed_menu"):
@@ -6116,8 +6163,18 @@ class PlanningOperations:
             except HouseholdError:
                 # Keep incomplete retailer reads readable; never invent a writable identity.
                 observed_digest = {}
-            return {**cart, **observed_digest, **({"cart_write_pending": True, "operation_id": state["pending_cart_change"].get("operation_id")} if state.get("pending_cart_change") else {}), **({"meal_concierge_cart_plan": self._cart_plan_view(plan, cart_contents(cart))} if isinstance(plan, Mapping) else {})}
-        if action not in {"change", "apply", "set", "update", "clear", "ensure", "reconcile_change"}:
+            pending = state.get("pending_cart_change")
+            pending_view = {"cart_write_pending": True, "operation_id": self._cart_operation_ref(pending)} if pending else {}
+            if self._ordinary_cart_observation_allowed(state, pending):
+                try:
+                    self._observed_cart_lines(cart)
+                except HouseholdError:
+                    observed_digest = {}
+                else:
+                    pending_view["accept_current_available"] = True
+                    pending_view["next"] = "If the household accepts these quantities, use accept_current with this operation_id and cart_digest to continue without another write."
+            return {**cart, **observed_digest, **pending_view, **({"meal_concierge_cart_plan": self._cart_plan_view(plan, cart_contents(cart))} if isinstance(plan, Mapping) else {})}
+        if action not in {"change", "apply", "set", "update", "clear", "ensure", "reconcile_change", "accept_current"}:
             raise HouseholdError("unknown cart action")
         deadline = time.monotonic() + MENY_CART_TIMEOUT if self.provider == "meny" else request.get("_deadline")
         with self._browser_operation(deadline, allow_pending_cart=True):
@@ -6127,6 +6184,8 @@ class PlanningOperations:
             if (state.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}:
                 raise HouseholdError("reconcile the pending cancellation before changing the cart")
             pending = state.get("pending_cart_change")
+            if action == "accept_current":
+                return self._accept_current_cart(request, pending, deadline)
             if action == "reconcile_change":
                 if not pending:
                     return {"reconciled": True, "cart_write_pending": False}

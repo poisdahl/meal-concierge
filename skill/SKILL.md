@@ -595,6 +595,10 @@ request to empty the cart, call `get`, then `clear` with its top-level
 `cart_digest` and no operations. This keeps the saved menu and invalidates old
 product completion. Active order edits and uncertain operations must be resolved
 first. A lost cart-write result uses `reconcile_change`; never resend the delta.
+For an ordinary Oda or Mathem cart, continue automatically when the requested
+contents are observed. If they differ, show the current cart. When the user
+says to use it, call `cart accept_current` with the operation ID and digest
+from that cart read, then continue the requested workflow.
 
 Show material substitutions, exact variants, package sizes and counts. Separate
 merchandise estimates from final totals, pant and delivery fees. Unknown prices

@@ -9,7 +9,7 @@ are not confirmation of a new purchase or order change.
 
 | Situation | Existing tool path |
 |---|---|
-| Lost cart-write response | `cart reconcile_change` requires the original operation ending and a bound cart read. An unknown ending keeps the fence even if quantities match |
+| Lost cart-write response | `cart reconcile_change` reads the original cart. For supported ordinary Oda/Mathem groceries, a complete matching readback lets shopping continue. For a difference, show the cart from get and use accept_current with its operation_id and cart_digest when the household chooses to keep it. Other operations retain their receipt requirements |
 | Add goods to an existing order | `orders change_begin` with its exact `order_id`, then the supported cart update and checkout for that edit |
 | Change only delivery | `orders change_begin` with `delivery_only=true`; preserve the original goods, account and address |
 | Reduce an order | `orders remove_prepare` with desired remaining quantities, then unchanged review through `remove_confirm`; uncertain result uses `remove_reconcile` |
