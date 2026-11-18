@@ -53,6 +53,7 @@ from service_common import (
 
 
 DELIVERY_SNAPSHOT_TIMEOUT = 15.0
+CHECKOUT_REVIEW_TTL = timedelta(minutes=20)
 
 
 ODA_VIPPS_ORDER_BINDING_SOURCES = frozenset({
@@ -3280,7 +3281,7 @@ class OrderOperations:
                     "summary": summary,
                     "orders_before": before,
                     "browser_review": review,
-                    "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
+                    "expires_at": (self._now() + CHECKOUT_REVIEW_TTL).isoformat(),
                     "menu": menu_baseline,
                     "cart_plan": cart_plan_baseline,
                     "menu_ref": {
@@ -4770,6 +4771,9 @@ class OrderOperations:
                     self._pending_scheduler_guard(state, pending)
                     mp.require_calendar_eligible(state, pending.get("menu") or {})
                     state["pending_checkout"]["status"] = "clicking"
+                    if self.provider == "meny":
+                        pending["dispatch_started_at"] = self._now().isoformat()
+                        state["pending_checkout"]["dispatch_started_at"] = pending["dispatch_started_at"]
                     dispatch_started = True
                     if (self.provider in {"oda", "mathem"}
                             and (not pending_change.get("requested_delivery") or price_review["payable_ore"] > 0)
@@ -5588,11 +5592,16 @@ class OrderOperations:
                 return self._finalize_confirmed_checkout(state, pending, evidence["order_id"], None,
                                                          merchant_evidence=evidence)
         confirmation_order_id = None
+        detail_hint = None
         if self.provider == "meny":
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
-        # A retained merchant receipt addresses the exact order, including an
-        # order removed from the first history page after cancellation.
-        after = ({"orders": []} if confirmation_order_id else
+            hint_reader = getattr(self.browser, "checkout_order_detail_hint", None)
+            if not confirmation_order_id and callable(hint_reader):
+                detail_hint = hint_reader(deadline=deadline)
+        # A retained receipt or a detail page already open in the browser
+        # addresses an order that the open-only history may no longer include.
+        exact_meny_id = confirmation_order_id or detail_hint
+        after = ({"orders": []} if exact_meny_id else
                  self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline))
         before_ids = {str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") for item in pending["orders_before"].get("orders", []) if isinstance(item, Mapping)}
         abandoned_order_ids = self._abandoned_order_ids(self.store.read())
@@ -5685,10 +5694,10 @@ class OrderOperations:
             raise HouseholdError(
                 "This merchant order was explicitly abandoned and must never be reconciled"
             )
-        if confirmation_order_id is not None:
-            candidate_id = safe_order_id(confirmation_order_id)
-            if candidate_id in abandoned_order_ids:
-                raise HouseholdError("This MENY receipt belongs to an abandoned order")
+        if exact_meny_id is not None:
+            candidate_id = safe_order_id(exact_meny_id)
+            if candidate_id in abandoned_order_ids or candidate_id in before_ids:
+                raise HouseholdError("This MENY order was already known before the current checkout")
             order = self.provider_client.call("get_order", {"order_number": candidate_id}, deadline=deadline)
             tracking = self.provider_client.call("order_tracking", {"order_number": candidate_id}, deadline=deadline)
             require_provider_identity(order, candidate_id)
@@ -5733,6 +5742,30 @@ class OrderOperations:
         meny_receipt_cancelled = (confirmation_order_id and tracking_status == "cancelled"
                                   and order.get("status") == "cancelled"
                                   and meny_order_matches_checkout(order, pending["summary"]))
+        if detail_hint:
+            # A detail page is only a discovery hint. Old cancelled orders
+            # were also absent from the pre-checkout, open-only history.
+            try:
+                review_expiry = datetime.fromisoformat(pending["expires_at"])
+                # Older journals may record only the review expiry when the
+                # Vipps phone form failed after dispatch. Its creation time
+                # and the gateway allowance still bound the original attempt.
+                start_text = pending.get("dispatch_started_at") or pending.get("payment_requested_at")
+                start = datetime.fromisoformat(start_text) if start_text else review_expiry - CHECKOUT_REVIEW_TTL
+                end_text = pending.get("payment_expires_at")
+                end = datetime.fromisoformat(end_text) if end_text else review_expiry + MENY_VIPPS_EXPIRY_BUFFER
+                created = datetime.fromisoformat(order["merchant_created_at"])
+                within_attempt = (all(value.utcoffset() is not None for value in (start, created, end))
+                                  and start <= created <= min(end, self._now()))
+            except (KeyError, TypeError, ValueError):
+                within_attempt = False
+            if not (within_attempt and order.get("merchant_deleted") is True
+                    and order.get("status") == tracking_status == "cancelled"
+                    and meny_order_matches_checkout(order, pending["summary"])):
+                return {"confirmed": False, "retry_allowed": False,
+                        "confirmation_id": pending["confirmation_id"],
+                        "next": "The open order does not establish cancellation of this checkout. Preserve the attempt and open its MENY receipt or exact cancelled order."}
+            meny_receipt_cancelled = True
         if (oda_unpaid_cancelled or meny_receipt_cancelled) and not self.store.read().get("pending_cancellation"):
             if oda_unpaid_cancelled:
                 self._exact_checkout_order_for_cancellation(pending, candidate_id, deadline)

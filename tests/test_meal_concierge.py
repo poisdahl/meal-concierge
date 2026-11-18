@@ -5570,6 +5570,25 @@ process.stdout.write(eval(script));
                 self.assertLessEqual(len(body_reads), 8)
                 self.assertFalse(any(call.args[0] == "reload" for call in client._invoke.call_args_list))
 
+    def test_deleted_order_discovery_uses_bound_creation_time(self):
+        from meny import meny_order_provider_details
+        order_id = "99990001"
+        at = "2026-11-19T09:00:13.123+01:00"
+        exact = {"ngOrderId": order_id, "mwOrderId": "unrelated", "status": 99,
+                 "statusDescription": "DELETED", "orderCreated": at,
+                 "orderUpdated": "2026-11-19T11:25:15.278+01:00"}
+        def read(payload):
+            return meny_order_provider_details({"responseBody": json.dumps(payload)}, order_id)
+        self.assertEqual(read(exact), {"status": "cancelled", "merchant_deleted": True,
+                                       "merchant_created_at": at})
+        for change in ({"status": 98}, {"status": "99"}, {"orderCreated": None},
+                       {"statusDescription": "OPEN"}, {"statusDescription": "CANCELLED"}):
+            with self.subTest(change=change):
+                self.assertNotIn("merchant_deleted", read({**exact, **change}))
+        with self.assertRaisesRegex(HouseholdError, "different order"):
+            read({**exact, "ngOrderId": "99990002"})
+        self.assertNotIn("merchant_deleted", read({k: v for k, v in exact.items() if k != "ngOrderId"}))
+
     def test_order_details_read_bound_full_total_separately_from_payment_reservation(self):
         for identity, amount, dom_total, error in (
             ("99990001", 545.9, None, None),
@@ -8091,6 +8110,22 @@ process.stdout.write(eval(script));
                                         input=json.dumps({"script": script, "url": url, "receiptText": receipt_text}),
                                         text=True, capture_output=True, check=True)
                 self.assertEqual(json.loads(result.stdout)["order_id"], expected)
+        detail = "https://meny.no/trumf-profil/nettbutikk/bestilling/7631908"
+        for url, label, expected in (
+            (detail, "Ordrenummer\n7631908", "7631908"),
+            (detail, "Ordrenummer\n7631909", None),
+            (detail, "7631908", None),
+            (detail.replace("meny.no", "example.org"), "Ordrenummer\n7631908", None),
+            (detail + "?orderid=7631908", "Ordrenummer\n7631908", None),
+        ):
+            with self.subTest(detail_url=url, label=label):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "url": url, "receiptText": label}),
+                                        text=True, capture_output=True, check=True)
+                snapshot = json.loads(result.stdout)
+                self.assertIsNone(snapshot["order_id"])
+                self.assertEqual(snapshot["detail_order_id"], expected)
+
 
     def test_checkout_reconcile_keeps_the_vipps_waiting_page_alive(self):
         client = self.client()
@@ -9339,6 +9374,57 @@ class FlowTests(unittest.TestCase):
             self.assertIsNone(store.read()["pending_checkout"])
             self.assertFalse(store.read().get("email_jobs"))
             self.assertTrue(app.handle(request)["cancelled"])
+            self.assertEqual(provider.checkout_clicks, 1)
+
+    def test_meny_detail_page_hint_only_closes_newly_placed_exact_deleted_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            request = {"operation": "checkout", "action": "reconcile",
+                       "confirmation_id": prepared["confirmation_id"]}
+            app.handle({**request, "action": "confirm"})
+            order_id = "99990002"
+            provider.checkout_order_detail_hint = mock.Mock(return_value=order_id)
+            order = {"orderNumber": order_id, "status": "cancelled", "grossAmount": 40.0,
+                     "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                     "productQuantityCount": 1,
+                     "products": [{"identity": "Brokkoli 400g", "quantity": 1}]}
+            provider.orders.append(order)
+            provider.tracking = "cancelled"
+            # The historical Vipps phone-form failure predates the durable
+            # dispatch timestamp and occurred before a payment-request receipt.
+            with store.locked() as state:
+                journal = state["pending_checkout"]
+                placed = datetime.fromisoformat(journal.pop("dispatch_started_at"))
+                journal.pop("payment_requested_at")
+                journal.pop("payment_expires_at")
+                journal["status"] = "uncertain"
+            before = store.read()["pending_checkout"]
+            exact = {"merchant_created_at": placed.isoformat(), "merchant_deleted": True}
+            for invalid in (
+                {"merchant_created_at": (placed - timedelta(days=7)).isoformat()},
+                {"merchant_created_at": (placed + timedelta(days=1)).isoformat()},
+                {"merchant_created_at": None}, {"merchant_deleted": False},
+                {"status": "confirmed"}, {"grossAmount": 39.99},
+                {"deliverySlotDisplay": "fredag 4. sep. kl. 09:00-12:00"},
+                {"products": [{"identity": "Annen vare", "quantity": 1}]},
+            ):
+                with self.subTest(invalid=invalid):
+                    original = deepcopy(order)
+                    order.update({**exact, **invalid})
+                    response = app.handle(request)
+                    self.assertFalse(response["confirmed"])
+                    self.assertFalse(response["retry_allowed"])
+                    self.assertEqual(store.read()["pending_checkout"], before)
+                    order.clear()
+                    order.update(original)
+            order.update(exact)
+            self.assertTrue(app.handle(request)["cancelled"])
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertTrue(app.handle(request)["cancelled"])
+            self.assertFalse(store.read().get("email_jobs"))
             self.assertEqual(provider.checkout_clicks, 1)
 
     def test_standing_authorization_submits_meny_without_a_second_agent_confirmation(self):

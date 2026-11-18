@@ -548,6 +548,13 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
     description = str(payload.get("statusDescription") or "").strip().casefold()
     if description in {"deleted", "cancelled", "canceled"}:
         result["status"] = "cancelled"
+    if (str(payload.get("ngOrderId") or "") == order_id and description == "deleted"
+            and type(payload.get("status")) is int and payload["status"] == 99
+            and isinstance(payload.get("orderCreated"), str)):
+        # Creation, not orderUpdated (which changes on cancellation), binds a
+        # deleted order to the submitted payment window when the receipt is lost.
+        result["merchant_created_at"] = payload["orderCreated"]
+        result["merchant_deleted"] = True
     totals = payload.get("totals")
     amount = totals.get("totalGrossAmount") if isinstance(totals, Mapping) else None
     if amount is not None:
@@ -2758,7 +2765,8 @@ __DELIVERY_BINDING__
             "order_number": order_id,
             "id": order_id,
             "code": result.get("code"),
-            "status": provider_details.get("status") or result["status"],
+            "status": result["status"],
+            **provider_details,
             "grossAmount": result["total"],
             **({"order_total": order_total} if order_total is not None else {}),
             "deliverySlotDisplay": result["delivery"],
@@ -2786,10 +2794,13 @@ __DELIVERY_BINDING__
   });
   const labelId = labels.length === 1 && numeric(labels[0]) ? labels[0] : null;
   const orderId = labels.length ? (labelId && (!queryId || labelId === queryId) ? labelId : null) : queryId;
+  const detailPath = url.pathname.match(/^\/(?:trumf-)?profil\/nettbutikk\/bestilling\/(\d{1,20})$/);
+  const detailId = url.origin === 'https://meny.no' && !url.search && !url.hash &&
+    detailPath && detailPath[1] === labelId && authenticated.length === 1 ? labelId : null;
   const blank = url.href === 'about:blank';
   const vippsGateway = url.origin === 'https://api.vipps.no' && url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
   const confirmed = main.length === 1 && /Takk for (?:din )?bestilling(?:en)?|Bestillingen (?:er|ble) (?:mottatt|oppdatert)|Ordrebekreftelse/i.test(norm(main[0].innerText));
-  return JSON.stringify({authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, receipt_url:receiptUrl, order_id:confirmed && receiptUrl ? orderId : null});
+  return JSON.stringify({authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, detail_order_id:detailId, receipt_url:receiptUrl, order_id:confirmed && receiptUrl ? orderId : null});
 })()
 """)
 
@@ -2821,8 +2832,14 @@ __DELIVERY_BINDING__
             order_id = result.get("order_id")
             return str(order_id) if order_id is not None else None
 
+    def checkout_order_detail_hint(self, *, deadline: float | None = None) -> str | None:
+        """Identify the order already open in the authenticated browser, without navigating."""
+        with self._locked_operation(MENY_READ_TIMEOUT, deadline):
+            return self._checkout_confirmation_snapshot().get("detail_order_id")
+
     def checkout_payment_handoff(self, total_ore: int, *, deadline: float | None = None) -> str | None:
         """Identify a still-open hosted handoff before order-history navigation."""
+
 
         with self._locked_operation(MENY_READ_TIMEOUT, deadline):
             stage = self._eval(self._vipps_gateway("observe", total_ore)).get("state")
