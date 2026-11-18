@@ -4961,6 +4961,40 @@ class MenyClientTests(unittest.TestCase):
         self.assertIn("Brukermeny", scripts[-1])
         self.assertIn("dialogs.length !== 0", scripts[1])
 
+    @unittest.skipUnless(shutil.which("node"), "Node executes the signed-in MENY pickup picker")
+    def test_delivery_picker_identifies_pickup_without_reserving_or_changing_delivery_method(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._prepare_search = mock.Mock()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock()
+        harness = r"""
+global.location = new URL('https://meny.no/varer');
+global.getComputedStyle = () => ({display:'block', visibility:'visible'});
+const node = innerText => ({innerText, getAttribute:() => null,
+  getBoundingClientRect:() => ({width:40, height:20})});
+const dialog = node('');
+dialog.querySelectorAll = selector => selector === 'h1' ? [node('Når ønsker du å hente varene?')] : [];
+global.document = {querySelectorAll(selector) {
+  if (selector === 'button') return [node('Brukermeny')];
+  if (selector === 'dialog,[role="dialog"]') return [dialog];
+  return [];
+}};
+process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
+"""
+        def observe(script):
+            if 'data-meal-concierge-action' in script:
+                return {"ready": True, "identity": True, "authenticated": True}
+            result = subprocess.run([shutil.which("node"), "-e", harness], input=script,
+                                    text=True, capture_output=True, check=True)
+            return json.loads(result.stdout)
+
+        client._eval = observe
+        with self.assertRaisesRegex(HouseholdError, "pickup .*Levert på døren.*list delivery slots"):
+            client._delivery_slots()
+        client._sleep.assert_not_called()
+        client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-open"]')
+
     def test_delivery_picker_tolerates_a_slow_native_dialog(self):
         client = self.client()
         client._open = mock.Mock()

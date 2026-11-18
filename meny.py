@@ -2199,14 +2199,22 @@ __DELIVERY_BINDING__
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const identity = location.origin === 'https://meny.no' && location.pathname === '/varer' && !location.search && !location.hash;
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
-  const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible).filter(x => [...x.querySelectorAll('h1')].filter(visible).filter(h => norm(h.innerText) === 'Når skal vi levere til deg?').length === 1);
-  return JSON.stringify({ready:identity && authenticated.length === 1 && dialogs.length === 1, identity, authenticated:authenticated.length === 1});
+  const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible);
+  const headings = dialogs.length === 1 ? [...dialogs[0].querySelectorAll('h1')].filter(visible) : [];
+  const heading = headings.length === 1 ? norm(headings[0].innerText) : '';
+  return JSON.stringify({ready:heading === 'Når skal vi levere til deg?', pickup:heading === 'Når ønsker du å hente varene?', identity, authenticated:authenticated.length === 1});
 })()
 """)
             if ready.get("identity") is not True:
                 raise HouseholdError("MENY delivery route changed")
             if ready.get("authenticated") is not True:
                 raise HouseholdError("MENY login is required in the configured browser profile")
+            if ready.get("pickup") is True:
+                raise HouseholdError(
+                    "MENY is set to pickup (Hente selv). For home delivery, close the time picker in "
+                    "the dedicated MENY browser, open Velg leveringsalternativ, choose Levert på døren "
+                    "for the intended saved address, press Fortsett, then list delivery slots again."
+                )
             if ready.get("ready") is True:
                 return
             self._sleep(0.25)

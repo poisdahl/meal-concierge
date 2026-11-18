@@ -625,6 +625,15 @@ first suitable observed window. Keep a stated deadline or ask before widening
 it; explain any conflict with the menu start. Finding a later window does not
 authorize selecting it or submitting an order outside the user's request.
 
+MENY’s checkout uses home delivery. If the store opens its pickup-time picker
+and the user requested home delivery, close the time picker in the dedicated
+signed-in MENY browser. Open “Velg leveringsalternativ”, click the “Levert på
+døren” label for the intended saved address, then choose “Fortsett”. Ask the
+user to choose if several destinations fit. Re-read the cart and delivery slots after
+switching, since available products, prices and windows can change with the
+store. If the user wants pickup, keep that choice and direct them to MENY’s
+own checkout.
+
 Product preparation checks current observed availability and application refreshes
 it before adding goods. Report a returned `availability_description` when a
 product is unavailable; this retailer text is not a promise for every delivery
