@@ -7889,8 +7889,10 @@ const execute=async s=>JSON.parse(await eval(s));
  document.elementFromPoint=()=>phone;
  assert.equal((await execute(bound(c.hit))).ready,false);
  document.body.innerText=verifiedText.replace('471.90','471.91');
+ assert.equal((await execute(c.observe)).state,'mismatch');
  assert.equal((await execute(bound(c.gate))).ready,false);
  document.body.innerText=verifiedText.replaceAll('MENY','Other');
+ assert.equal((await execute(c.observe)).state,'mismatch');
  assert.equal((await execute(bound(c.gate))).ready,false);
  document.body.innerText=verifiedText;
  phone.value='81111111';
@@ -7901,6 +7903,10 @@ const execute=async s=>JSON.parse(await eval(s));
  assert.equal((await execute(bound(c.observe_bound))).state,'absent');
  document.body.innerText=verifiedText+"\nWe've sent a payment request to +47 9000 0000\nOpen Vipps";
  assert.equal((await execute(c.observe)).state,'sent');
+ document.body.innerText=document.body.innerText.replace('9000 0000','8000 0001');
+ assert.equal((await execute(c.observe)).state,'mismatch');
+ document.body.innerText='Loading…';
+ assert.equal((await execute(c.observe)).state,'gateway');
  document.body.innerText='This payment request has expired';
  assert.equal((await execute(c.observe)).state,'absent');
  location.hostname='merchant.example';
@@ -9444,6 +9450,28 @@ class FlowTests(unittest.TestCase):
                 self.assertIn("Remember choice", result["next"])
                 self.assertEqual(store.read()["pending_checkout"], prior)
             self.assertEqual(provider.checkout_clicks, 0)
+
+    def test_unrelated_vipps_page_preserves_journal_and_returns_to_original_meny_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            provider.checkout_payment_handoff = mock.Mock(return_value="mismatch")
+            provider.call = mock.Mock(side_effect=AssertionError("unrelated tab navigated"))
+            provider.checkout_confirmation_order_id = mock.Mock(side_effect=AssertionError("unrelated tab probed"))
+            for expiry in ("2000-01-01", "2100-01-01"):
+                with store.locked() as state:
+                    pending = state["pending_checkout"]
+                    pending["status"] = "uncertain"
+                    pending["payment_expires_at"] = expiry + "T00:00:00+00:00"
+                prior = store.read()["pending_checkout"]
+                result = app.handle({"operation": "checkout", "action": "reconcile",
+                                     "confirmation_id": prepared["confirmation_id"]})
+                self.assertFalse(result["awaiting_user_payment"])
+                self.assertFalse(result["retry_allowed"])
+                self.assertIn("original MENY checkout or receipt", result["next"])
+                self.assertEqual(store.read()["pending_checkout"], prior)
 
     def test_expired_unapproved_vipps_releases_the_checkout_for_a_fresh_prepare(self):
         started = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)

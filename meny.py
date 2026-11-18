@@ -1920,7 +1920,7 @@ __DELIVERY_BINDING__
   const norm = s => (s || '').normalize('NFC').replace(/\s+/g,' ').trim();
   const text = norm(document.body?.innerText);
   const state = value => JSON.stringify({state:value, session});
-  if (/(?:payment request|session|link) (?:has |is )?expired|(?:request|payment) (?:has been |was )?cancelled/i.test(text)) return absent();
+  const expired = /(?:payment request|session|link) (?:has |is )?expired|(?:request|payment) (?:has been |was )?cancelled/i.test(text);
   const visible = x => { const box=x.getBoundingClientRect(), style=getComputedStyle(x);
     return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0; };
   const amounts = [...text.matchAll(/(?:^|\s)(\d+(?:[ \u00a0]\d{3})*)[.,](\d{2})\s*NOK\b/gi)]
@@ -1928,12 +1928,17 @@ __DELIVERY_BINDING__
   const merchant = (document.body?.innerText || '').split(/\n/).some(s => /^MENY(?:\s|$)/i.test(norm(s)));
   const verified = merchant && amounts.length === 1 && amounts[0] === options.total;
   const recipient = text.match(/We['’]ve sent a payment request to\s+(\+47[ \u00a0-]*(?:\d[ \u00a0-]*){8})(?!\d)/i);
-  if (recipient && /Open Vipps/i.test(text)) {
-    const exactRecipient = recipient[1].replace(/\D/g,'') === '47' + options.phone;
-    return state(exactRecipient && (verified || (options.stage === 'ack' && options.session)) ? 'sent' : 'gateway');
-  }
   const phones = [...document.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible);
   const buttons = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.innerText) === 'Next');
+  const sent = recipient && /Open Vipps/i.test(text);
+  const otherRecipient = sent && options.phone && recipient[1].replace(/\D/g,'') !== '47' + options.phone;
+  const otherAmount = amounts.length === 1 && amounts[0] !== options.total;
+  const unverifiedMerchant = !merchant && amounts.length === 1 && (sent || (phones.length === 1 && buttons.length === 1));
+  if (otherAmount || otherRecipient || unverifiedMerchant) {
+    return options.stage === 'gate' ? absent() : state('mismatch');
+  }
+  if (expired) return absent();
+  if (sent) return state(options.phone && (verified || (options.stage === 'ack' && options.session)) ? 'sent' : 'gateway');
   if (!verified || phones.length !== 1 || buttons.length !== 1) {
     return options.stage === 'gate' ? absent() : state('gateway');
   }
@@ -1966,6 +1971,8 @@ __DELIVERY_BINDING__
             form = self._eval(self._vipps_gateway("observe", total_ore, session))
             if form.get("session") and not session:
                 session = form["session"]
+            if form.get("state") == "mismatch":
+                raise HouseholdError("This Vipps page does not match the reviewed MENY payment. Return to the original MENY checkout or receipt and reconcile.")
             if session and form.get("state") == "sent":
                 return
             if session and form.get("state") == "phone":
@@ -1973,7 +1980,7 @@ __DELIVERY_BINDING__
             if attempt < 89:
                 self._sleep(1)
         else:
-            raise HouseholdError("Vipps payment page did not finish rendering. Finish the existing Vipps handoff and reconcile this attempt.")
+            raise HouseholdError("Vipps payment page did not finish rendering. Return to the original MENY checkout or receipt and reconcile this attempt.")
         self._eval(self._vipps_gateway("fill", total_ore, session))
 
         def render(require_hit: bool, x: int = 0, y: int = 0) -> str:
@@ -1985,12 +1992,12 @@ __DELIVERY_BINDING__
             if attempt < 19:
                 self._sleep(0.25)
         else:
-            raise HouseholdError("Check the phone number and Remember choice on the open Vipps page, press Next yourself, then approve in Vipps and reconcile.")
+            raise HouseholdError("Return to the reviewed MENY payment. Verify its merchant, total, phone number and Remember choice before pressing Next, then approve in Vipps and reconcile.")
         x, y = self._wait_for_checkout_hit('[data-meal-concierge-action="vipps-next"]', render,
                                            "Vipps mobile request control changed or is obscured")
         self._invoke("mouse", "move", str(x), str(y))
         if self._eval(render(True, x, y)) != {"ready": True}:
-            raise HouseholdError("Vipps mobile request control changed. Check the phone number and Remember choice on the open Vipps page, finish there, then reconcile.")
+            raise HouseholdError("Vipps mobile request control changed. Return to the reviewed MENY payment or receipt and reconcile.")
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
         for attempt in range(40):
@@ -2806,7 +2813,7 @@ __DELIVERY_BINDING__
 
         with self._locked_operation(MENY_READ_TIMEOUT, deadline):
             stage = self._eval(self._vipps_gateway("observe", total_ore)).get("state")
-            return stage if stage in {"sent", "phone", "gateway"} else None
+            return stage if stage in {"sent", "phone", "gateway", "mismatch"} else None
 
     def checkout_payment_not_dispatched(self, review: Mapping[str, Any], *, deadline: float | None = None) -> bool:
         """Prove that a fenced click never left the unchanged MENY checkout page."""

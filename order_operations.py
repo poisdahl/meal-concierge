@@ -5367,18 +5367,21 @@ class OrderOperations:
                     preserve_until = datetime.fromisoformat(str(pending.get("expires_at") or "")) + MENY_VIPPS_EXPIRY_BUFFER
                 except ValueError:
                     pass
-            if preserve_until and preserve_until.tzinfo and self._now() < preserve_until:
-                total = ((pending.get("browser_review") or {}).get("summary") or {}).get("total")
-                if isinstance(total, (int, float)):
-                    handoff = self.browser.checkout_payment_handoff(round(total * 100), deadline=deadline)
-                    if handoff:
-                        next_step = {
-                            "sent": "Approve the existing MENY request in Vipps, then reconcile.",
-                            "phone": "On the open Vipps page, check the phone number and Remember choice, press Next, then approve the MENY payment in Vipps and reconcile.",
-                            "gateway": "Keep the Vipps page open. Verify the MENY merchant and reviewed total before continuing, then reconcile.",
-                        }[handoff]
-                        return {"confirmed": False, "expired": False, "order": None, "tracking": None,
-                                "retry_allowed": False, "awaiting_user_payment": True, "next": next_step}
+            total = ((pending.get("browser_review") or {}).get("summary") or {}).get("total")
+            if isinstance(total, (int, float)):
+                handoff = self.browser.checkout_payment_handoff(round(total * 100), deadline=deadline)
+                if handoff == "mismatch":
+                    return {"confirmed": False, "order": None, "tracking": None,
+                            "retry_allowed": False, "awaiting_user_payment": False,
+                            "next": "The open Vipps page does not match this MENY checkout. Return to the original MENY checkout or receipt in the checkout browser, then reconcile this attempt."}
+                if handoff and preserve_until and preserve_until.tzinfo and self._now() < preserve_until:
+                    next_step = {
+                        "sent": "Approve the existing MENY request in Vipps, then reconcile.",
+                        "phone": "On the open Vipps page, check the phone number and Remember choice, press Next, then approve the MENY payment in Vipps and reconcile.",
+                        "gateway": "Let the Vipps page finish loading, then reconcile this attempt.",
+                    }[handoff]
+                    return {"confirmed": False, "expired": False, "order": None, "tracking": None,
+                            "retry_allowed": False, "awaiting_user_payment": True, "next": next_step}
         if pending.get("order_change"):
             if owner_payment_completed:
                 raise HouseholdError("Owner payment completion requires the exact original Oda order")
