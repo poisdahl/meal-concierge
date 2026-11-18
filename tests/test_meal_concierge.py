@@ -1984,6 +1984,44 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "page changed"):
             browser._review_checkout(cart)
 
+        # Oda showed an old payment label immediately after navigation. It
+        # settled on the reviewed cart amount while the same page stayed open.
+        browser._navigate_to_checkout = mock.Mock()
+        browser._settle = mock.Mock()
+        reads = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"},
+                      {"expanded": True}, {**extracted, "total_matches": False},
+                      deepcopy(extracted), deepcopy(extracted_amounts)])
+        browser._eval = lambda _script: next(reads)
+        self.assertTrue(browser._review_checkout(cart)["total_matches"])
+        browser._navigate_to_checkout.assert_called_once_with()
+
+        reads = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"},
+                      {"expanded": True}, {**extracted, "total_matches": False},
+                      {**extracted, "address_matches": False}])
+        browser._eval = lambda _script: next(reads)
+        with self.assertRaisesRegex(HouseholdError, "address does not match"):
+            browser._review_checkout(cart)
+
+        mapped = {**extracted, "items": [{**extracted["items"][0], "title": "Gresk yoghurt®"}]}
+        unresolved = browser._review_checkout_identity(browser._cart_expectation(cart), mapped, "a" * 64)
+        decision = {"digest": unresolved["issue"]["digest"], "decisions": [
+            {"expected_index": 0, "actual_index": 0, "reason": "Reviewed merchant display wording"}]}
+        setup = [{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"}, {"expanded": True}]
+        stale = {**mapped, "total_matches": False}
+        for changed, accepted in [(mapped, True), ({**mapped, "payment_display": "•••• 5678"}, False)]:
+            browser._eval = mock.Mock(side_effect=[*setup, stale, changed, extracted_amounts])
+            if accepted:
+                observed = browser._review_checkout(cart, identity_review=decision)
+                self.assertEqual(observed["identity_review"], decision)
+                self.assertTrue(observed["surface"]["total_matches"])
+            else:
+                with self.assertRaisesRegex(OdaCheckoutMismatchError, "stale"):
+                    browser._review_checkout(cart, identity_review=decision)
+        browser._eval = mock.Mock(side_effect=[*setup, {**stale, "payment_display": "•••• 5678"}])
+        with self.assertRaisesRegex(OdaCheckoutMismatchError, "stale"):
+            browser._review_checkout(cart, identity_review=decision)
+        self.assertEqual(browser._eval.call_count, len(setup) + 1)
+
         for changes, message in [
             ({"authenticated": False}, "browser login could not be verified"),
             ({"address_matches": False}, "address does not match"),
@@ -1992,8 +2030,9 @@ process.stdout.write(eval(script));
             ({"total_matches": False}, "does not match the reviewed cart"),
         ]:
             with self.subTest(changes=changes):
-                responses = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"}, {"expanded": True},
-                                  {**deepcopy(extracted), **changes}])
+                snapshots = 5 if changes == {"total_matches": False} else 1
+                responses = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"},
+                                  {"expanded": True}, *[{**extracted, **changes}] * snapshots])
                 browser._eval = lambda _script: next(responses)
                 with self.assertRaisesRegex(HouseholdError, message):
                     browser._review_checkout(cart)
@@ -2041,6 +2080,7 @@ process.stdout.write(eval(script));
             browser._expand_checkout_items = mock.Mock(return_value="items")
             browser._expand_checkout_amount_summary = mock.Mock()
             browser._read_checkout_amounts = mock.Mock(return_value={})
+            browser._settle = mock.Mock()
             browser._eval = mock.Mock(return_value=deepcopy(surface))
             return browser._review_checkout({})
 
@@ -2922,6 +2962,18 @@ process.stdout.write(eval(input.script));
             ("eval", "ready"),
         ])
 
+    def test_checkout_recommendations_fallback_is_spent_once_even_if_tab_stalls(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser._settle = mock.Mock()
+        browser._click_action = mock.Mock()
+        outcomes = [{"action": "recommendations"}] * 3 + [HouseholdError("page navigated")]
+        browser._eval = mock.Mock(side_effect=outcomes + [{"action": "recommendations"}] * 26)
+        with self.assertRaisesRegex(HouseholdError, "Open the visible Fortsett"):
+            browser._advance_checkout_path()
+        browser._click_action.assert_called_once_with("recommendations")
+        self.assertEqual(sum("if(true && null===null)" in call.args[0]
+                             for call in browser._eval.call_args_list), 1)
+
     def test_checkout_route_script_rejects_mixed_new_and_existing_controls(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         scripts = []
@@ -2971,10 +3023,14 @@ const main=node('main');main.querySelectorAll=s=>s==='input[type="radio"]'?radio
 const submit=node('submit','Bekreft og betal 246,40 kr');
 const card=node('card');card.checked=true;
 const cardLabel=node('card-label','•••• 1111');cardLabel.contains=x=>x===card;cardLabel.querySelectorAll=()=>[card];card.labels=[cardLabel];
+const links=(c.linkUrls||[]).map((url,i)=>{const a=node('link-'+i,'Fortsett');a.href=url;a.hidden=c.hiddenLink===i;return a});
+const prompt=c.prompt?node('prompt'):null;
+if(prompt)prompt.hidden=!!c.hidePrompt;
 const document={title:c.title,body:{innerText:c.unrelatedStockWord?'utsolgt':''},
  querySelector:s=>s==='main'?(c.noMain?null:main):(c.login?{}:null),
- querySelectorAll:s=>s==='[role="alert"],[role="alertdialog"]'&&c.unavailable?[node('alert','utsolgt')]:s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
+ querySelectorAll:s=>prompt&&s.split(',').includes(c.prompt)?[prompt]:s==='[role="alert"],[role="alertdialog"]'&&c.unavailable?[node('alert','utsolgt')]:s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='a'?links:s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
 const location=new URL(c.url||'https://oda.com/no/checkout/modify/');
+location.assign=url=>{marked.push({navigation:url})};
 const getComputedStyle=x=>({display:x.hidden?'none':'block',visibility:'visible'});
 process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked}));
 """
@@ -3018,6 +3074,31 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
         address_page = {"url": "https://oda.com/no/intermediate/", "title": "Adresser – Oda"}
         check_idle(script, address_page, "wait", "address")
         check_idle(script, {"url": "https://oda.com/no/checkout/recommendations/"}, "wait", "recommendations")
+        recommendations = {"url": "https://oda.com/no/checkout/recommendations/",
+                           "linkUrls": [CHECKOUT_URL, CHECKOUT_URL], "hiddenLink": 0}
+        active = [recommendations] * 4 + [{"url": CHECKOUT_URL}]
+        navigations = []
+        navigation_scripts = []
+        def visit(js):
+            navigation_scripts.append(js)
+            result = evaluate(js, active.pop(0))
+            navigations.extend(x["navigation"] for x in result["marked"] if "navigation" in x)
+            return result["value"]
+        browser._eval = visit
+        browser._click_action = mock.Mock(side_effect=HouseholdError("link detached"))
+        browser._advance_checkout_path()
+        browser._click_action.assert_called_once_with("recommendations")
+        self.assertEqual(navigations, [CHECKOUT_URL])
+
+        for prompt in ('[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', 'dialog[open]'):
+            for guard in [script, navigation_scripts[3]]:
+                check_idle(guard, {**recommendations, "prompt": prompt}, "blocked", "destination_prompt")
+            result = evaluate(script, {**recommendations, "prompt": prompt, "hidePrompt": True})
+            self.assertEqual(result["value"], {"action": "recommendations"})
+        for link in ["https://wrong.example/no/checkout/confirm/", CHECKOUT_URL + "?orderNumber=123",
+                     "https://oda.com/no/checkout/modify/"]:
+            check_idle(script, {**recommendations, "linkUrls": [link]}, "wait", "recommendations")
+        check_idle(script, {**recommendations, "hiddenLink": -1}, "blocked", "multiple_recommendation_links")
         # When the merchant advances itself, reread its normal confirm controls.
         states = iter([address_page, {"url": CHECKOUT_URL}])
         browser._eval = lambda js: evaluate(js, next(states))["value"]
