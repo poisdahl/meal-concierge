@@ -6668,6 +6668,7 @@ process.stdout.write(eval(script));
             (1, "", "500g Sopps", [other_size], None),
             (1, "", "500g Sopps", [full, full], None),
             (1, "1 stk", "500g Sopps", [increase], increase),
+            (1, "2 stk", "500g Sopps", [increase], increase),
             (1, "", "", ["Legg til Spaghetti i handlevognen"], "Legg til Spaghetti i handlevognen"),
             (1, "", "500g Sopps", ["Legg Spaghetti i handlevognen"], "Legg Spaghetti i handlevognen"),
             (-1, "1 stk", "500g Sopps", [remove], remove),
@@ -7194,6 +7195,64 @@ process.stdout.write(eval(script));
                     self.assertNotIsInstance(caught.exception, MenyCartStoppedError)
                     self.assertIn("uncertain", str(caught.exception))
                     self.assertIn(("mouse", "down"), calls)
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the MENY cart pre-dispatch checks")
+    def test_repeated_increment_from_two_rebinds_a_replaced_stepper_before_dispatch(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._sleep = mock.Mock()
+        client._resolve_order_route = mock.Mock()
+        label = "Legg til 1 stk Spaghetti 500g Sopps i handlevognen"
+        quantity = 2
+        mark_count = 0
+        clicks = []
+
+        def product_control(action, delta, product):
+            nonlocal mark_count
+            self.assertEqual((product, delta), (MENY_PRODUCT, 1))
+            if action == "mark":
+                mark_count += 1
+            return {"ready": True, "authenticated": True, "quantity": quantity, "label": label}
+
+        harness = r"""
+const {script, path, label, marked} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+global.location = new URL('https://meny.no' + path);
+global.getComputedStyle = () => ({display:'block', visibility:'visible'});
+const button = text => ({getBoundingClientRect:() => ({width:20, height:10}),
+  getAttribute:key => key === 'aria-label' ? text : null});
+const account = button('Brukermeny'), stepper = button(label);
+global.document = {
+  querySelectorAll:selector => selector === 'button' ? [account, stepper] :
+    selector === '[data-meal-concierge-action="cart"]' && marked ? [stepper] : [],
+  elementFromPoint:() => stepper,
+};
+process.stdout.write(eval(script));
+"""
+        def observe(script):
+            # MENY replaces the first marked DOM node as the cart finishes rendering.
+            result = subprocess.run(
+                [shutil.which("node"), "-e", harness], text=True, capture_output=True, check=True,
+                input=json.dumps(dict(script=script, path=MENY_PRODUCT, label=label, marked=mark_count > 1)),
+            )
+            return json.loads(result.stdout)
+
+        def invoke(*arguments):
+            nonlocal quantity
+            if arguments[:2] == ("get", "box"):
+                return {"box": {"x": 100, "y": 200, "width": 20, "height": 10}}
+            if arguments[:2] == ("mouse", "up"):
+                clicks.append(mark_count)
+                quantity += 1
+            return {}
+
+        client._product_control = product_control
+        client._eval = observe
+        client._invoke = invoke
+        client._read_settled_cart = lambda: {"count": quantity}
+        self.assertEqual(client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]}),
+                         {"count": 4})
+        self.assertEqual(clicks, [2, 3])
 
     def test_cart_batch_preserves_first_click_when_second_is_obscured(self):
         from meny import MenyCartStoppedError

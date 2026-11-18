@@ -186,6 +186,10 @@ def _bounded_browser_stderr():
         os.close(read_fd)
 
 
+class _CartControlReplaced(HouseholdError):
+    """The product page replaced the marked control before mouse dispatch."""
+
+
 class _DeliveryReservationError(HouseholdError):
     pass
 
@@ -1364,28 +1368,6 @@ class MenyClient:
         raise HouseholdError("MENY cart quantities did not settle")
 
     def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None) -> None:
-        try:
-            self._open(BASE_URL + product)
-            self._assert_authenticated()
-            before: dict[str, Any] = {}
-            for _ in range(20):
-                before = self._product_control("mark", delta, product)
-                if before.get("authenticated") is not True:
-                    raise HouseholdError("MENY login is required in the configured browser profile")
-                if before.get("ready") is True:
-                    break
-                self._sleep(0.25)
-            previous = before.get("quantity")
-            if before.get("ready") is True and (isinstance(previous, bool) or not isinstance(previous, int) or previous < 0):
-                raise HouseholdError("MENY product quantity is invalid")
-        except HouseholdError as exc:
-            raise MenyCartStoppedError(str(exc)) from exc
-        if before.get("ready") is not True:
-            if delta < 0:
-                self._remove_one_from_cart(product, order_change_code)
-                return
-            raise MenyCartStoppedError("MENY product control is unavailable")
-        expected = previous + delta
         dispatched = False
 
         def before_dispatch() -> None:
@@ -1393,16 +1375,43 @@ class MenyClient:
             dispatched = True
 
         try:
-            self._click_cart_control(product, str(before.get("label") or ""), before_dispatch)
-            self._resolve_order_route(order_change_code)
-            observed = self._wait_for_quantity(expected, previous, product)
-            if observed != expected:
-                raise HouseholdError("MENY product quantity did not settle")
+            self._open(BASE_URL + product)
             self._assert_authenticated()
+            previous = self._activate_product_control(product, delta, before_dispatch)
+            if previous is not None:
+                expected = previous + delta
+                self._resolve_order_route(order_change_code)
+                if self._wait_for_quantity(expected, previous, product) != expected:
+                    raise HouseholdError("MENY product quantity did not settle")
+                self._assert_authenticated()
+                return
         except HouseholdError as exc:
             if dispatched:
                 raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
             raise MenyCartStoppedError(str(exc)) from exc
+
+        if delta < 0:
+            self._remove_one_from_cart(product, order_change_code)
+            return
+        raise MenyCartStoppedError("MENY product control is unavailable")
+
+    def _activate_product_control(self, product: str, delta: int, before_dispatch: Any) -> int | None:
+        for attempt in range(20):
+            before = self._product_control("mark", delta, product)
+            if before.get("authenticated") is not True:
+                raise HouseholdError("MENY login is required in the configured browser profile")
+            if before.get("ready") is True:
+                previous = before.get("quantity")
+                if isinstance(previous, bool) or not isinstance(previous, int) or previous < 0:
+                    raise HouseholdError("MENY product quantity is invalid")
+                try:
+                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch)
+                    return previous
+                except _CartControlReplaced:
+                    if attempt == 19:
+                        raise
+            self._sleep(0.25)
+        return None
 
     def _resolve_order_route(self, order_change_code: str | None) -> None:
         result = self._eval(r"""
@@ -1610,9 +1619,13 @@ class MenyClient:
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
   const target = marked[0];
-  return JSON.stringify({ready:authenticated.length === 1 && location.origin === 'https://meny.no' && location.pathname === PRODUCT && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL});
+  const samePage = location.origin === 'https://meny.no' && location.pathname === PRODUCT && authenticated.length === 1;
+  if (samePage && marked.length === 0) return JSON.stringify({replaced:true});
+  return JSON.stringify({ready:samePage && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL});
 })()
 """, PRODUCT=product, LABEL=label))
+        if ready == {"replaced": True}:
+            raise _CartControlReplaced("MENY cart control changed")
         if ready != {"ready": True}:
             raise HouseholdError("MENY cart control changed")
         self._invoke("scrollintoview", selector)
