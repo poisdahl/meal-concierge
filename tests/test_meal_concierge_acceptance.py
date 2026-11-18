@@ -416,6 +416,53 @@ class GroceryTopupTests(unittest.TestCase):
         flow_fixture.CartPlanTests.sync(app, product, 4)
         self.assertEqual(self.quantities(app, provider), {product: 5})
 
+    def test_reducing_same_menu_removes_only_acknowledged_additions(self):
+        for observed in (True, False):
+            with self.subTest(observed=observed):
+                store, provider, _, app, product = self.household()
+                original = provider.call
+
+                def update_cart(tool, args, **kwargs):
+                    result = original(tool, args, **kwargs)
+                    if tool == "manipulate_cart" and observed:
+                        raise HouseholdError("lost write reply")
+                    return result
+
+                with mock.patch.object(provider, "call", side_effect=update_cart):
+                    first = flow_fixture.CartPlanTests.sync(app, product, 2, start_as_extra_product_ids=[product])
+                self.assertTrue(first["synced"])
+                self.assertEqual(self.quantities(app, provider), {product: 3})
+                self.assertEqual(store.read()["cart_plan"]["added_quantities"], {} if observed else {product: 2})
+                changed = flow_fixture.CartPlanTests.sync(app, product, 1)
+                self.assertTrue(changed["synced"])
+                self.assertEqual(self.quantities(app, provider), {product: 3 if observed else 2})
+                self.assertEqual(changed["applied_operations"], [] if observed else [{"productId": int(product), "quantity": -1}])
+
+    def test_accepted_unrelated_groceries_survive_same_menu_requirement_change(self):
+        store, provider, _, app, product = self.household()
+        flow_fixture.CartPlanTests.sync(app, product, 2)
+        original = provider.call
+
+        def concurrent_edit(tool, args, **kwargs):
+            result = original(tool, args, **kwargs)
+            if tool == "manipulate_cart":
+                provider._mutate_cart({"operations": [{"productId": 99, "quantity": 2}]})
+                raise HouseholdError("lost write reply")
+            return result
+
+        with mock.patch.object(provider, "call", side_effect=concurrent_edit):
+            with self.assertRaisesRegex(HouseholdError, "lost write reply"):
+                self.ensure(app, "20", 1)
+        view = app.handle({"operation": "cart", "action": "get"})
+        accepted = app.handle({"operation": "cart", "action": "accept_current",
+                               "operation_id": view["operation_id"], "cart_digest": view["cart_digest"]})
+        self.assertEqual(accepted["status"], "owner_accepted_cart")
+        result = flow_fixture.CartPlanTests.sync(app, product, 1)
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["applied_operations"], [{"productId": int(product), "quantity": -1}])
+        self.assertEqual(self.quantities(app, provider), {product: 1, "20": 1, "99": 2})
+        self.assertFalse(store.read().get("pending_cart_change"))
+
     def test_inconsistent_observed_count_keeps_raw_and_managed_write_pending(self):
         for managed, count_key in ((False, "productQuantityCount"), (True, "count")):
             with self.subTest(managed=managed):

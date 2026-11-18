@@ -5389,6 +5389,14 @@ class PlanningOperations:
                 "cart_plan": self._cart_plan_view(current, first_summary),
             }
         target = self._cart_target(current)
+        # A household may keep groceries added by another shopper or seen
+        # after a lost reply. Only acknowledged menu additions are removable.
+        for product_id, quantity in first_live.items():
+            removable = min(current["added_quantities"].get(product_id, 0),
+                            self._menu_owned_capacity(current, first_live, product_id))
+            protected = quantity - removable
+            if protected > target.get(product_id, 0):
+                target[product_id] = protected
         operations = []
         for product_id in sorted(set(target) | set(first_live)):
             missing = target.get(product_id, 0) - first_live.get(product_id, 0)
