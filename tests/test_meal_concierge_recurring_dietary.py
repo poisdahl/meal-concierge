@@ -108,7 +108,7 @@ class RecurringDietaryTests(unittest.TestCase):
                 'recipe': recipes_fixture.recipe(f'Gulrotgryte {index}', f'batch-{index}'), 'idempotency_key': f'recipe-{index}'})['recipe']
             candidates.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
         self.candidates = candidates
-        self.profile(recipes={'sources': {'oda': False, 'meny': False, 'mathem': False, 'themealdb': False, 'wikibooks': False}})
+        self.profile(recipes={'sources': {'oda': False, 'meny': False, 'mathem': False}})
         return self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {'week': '2026-W37'}})['plan']
 
     def test_recurring_writes_are_atomic_visible_and_repair_legacy_state(self):

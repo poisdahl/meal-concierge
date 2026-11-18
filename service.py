@@ -110,9 +110,6 @@ from recipe_libraries import (
 )
 from recipe_sources import (
     SOURCE_IDS,
-    TheMealDBSource,
-    WikibooksSource,
-    provider_recipe_candidates,
     validate_source_settings,
 )
 
@@ -180,7 +177,6 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def __init__(
         self, store: StateStore, provider_client: Any, browser: OdaBrowser | None,
         *, email_provider_clients: Mapping[str, Any] | None = None,
-        external_recipe_sources: Mapping[str, Any] | None = None,
         recipe_library_adapters: Mapping[str, RecipeLibraryAdapter] | None = None,
         recipe_pack_inbox: Path | None = None,
         products_apply_budget_seconds: float = PRODUCT_OPERATION_TIMEOUT,
@@ -215,10 +211,6 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self._planner_result_cache = None
         self.browser_lock = threading.Lock()
         self.email_automation_profile = str(store.config.get("email_automation_profile") or "").strip()
-        self.external_recipe_sources = dict({
-            "themealdb": TheMealDBSource(api_key=os.environ.get("THEMEALDB_API_KEY", "1")),
-            "wikibooks": WikibooksSource(),
-        } if external_recipe_sources is None else external_recipe_sources)
         self.integration: dict[str, Any]
         if self.provider == "none":
             self.integration = {"status": "not_configured", "provider": "none",

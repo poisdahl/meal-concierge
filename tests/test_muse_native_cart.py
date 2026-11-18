@@ -68,7 +68,7 @@ sys.argv = sys.argv[1:]
         self.thread.start()
         self.addCleanup(self.finish)
         self.app = muse.NativeCartMuseApplication(self.store,
-            MuseNativeCartProvider(self.ops, "synthetic-original-task"), None, external_recipe_sources={})
+            MuseNativeCartProvider(self.ops, "synthetic-original-task"), None)
 
     def rpc(self, request, *, ok=True):
         if sys.platform.startswith("linux"):

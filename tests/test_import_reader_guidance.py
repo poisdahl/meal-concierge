@@ -3,12 +3,9 @@ import json
 from pathlib import Path
 import sys
 import unittest
-from unittest import mock
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 from recipe_import_readers import RecipeImportReaderError, read_transcript, read_webpage, read_webpage_jsonld
-from recipe_sources import WikibooksSource
-from test_meal_concierge_recipes import full_recipe
 
 
 class SourceQuoteNormalizationTests(unittest.TestCase):
@@ -46,14 +43,6 @@ class SourceQuoteNormalizationTests(unittest.TestCase):
                                                source_url="https://recipes.example/soup")), 1)
 
 
-class WikibooksQueryTests(unittest.TestCase):
-    def test_a_category_lower_bound_does_not_make_unrelated_titles_search_hits(self):
-        titles = ["Cookbook:Lamb Vindaloo", "Cookbook:Lasagne", "Cookbook:Laks soup"]
-        source = WikibooksSource(transport=lambda *args, **kwargs: {"query": {"categorymembers": [{"title": t} for t in titles]}})
-        with mock.patch.object(source, "_fetch_recipe", side_effect=lambda title: full_recipe(title)) as fetch:
-            results = source.search("laks", 5)
-        self.assertEqual([r["name"] for r in results], ["Cookbook:Laks soup"])
-        fetch.assert_called_once_with("Cookbook:Laks soup")
 
 
 if __name__ == "__main__":

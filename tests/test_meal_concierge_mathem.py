@@ -1789,7 +1789,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
                         'idempotency_key': 'saved-dinner-' + str(i)})['recipe']
                     refs.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
                 app.handle({'operation': 'profile', 'action': 'update', 'changes': {'recipes': {'sources': {
-                    'oda': False, 'mathem': False, 'meny': False, 'themealdb': False, 'wikibooks': False}}}})
+                    'oda': False, 'mathem': False, 'meny': False}}}})
                 plan = app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
                     'week': '2026-W38', 'dates': [f'2026-09-{14+i}' for i in range(7)],
                     'portions': 2, 'candidates': refs}})['plan']
@@ -2569,7 +2569,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
                                     'idempotency_key': 'egg-week-' + str(index)})['recipe']
             refs.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
         self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'recipes': {'sources': {
-            'oda': False, 'mathem': False, 'meny': False, 'themealdb': False, 'wikibooks': False}}}})
+            'oda': False, 'mathem': False, 'meny': False}}}})
         plan = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
             'week': '2026-W38', 'dates': [f'2026-09-{14+i}' for i in range(7)], 'portions': 2, 'candidates': refs}})['plan']
         menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_ref': plan['save_ref']})['menu']

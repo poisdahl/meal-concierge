@@ -218,7 +218,6 @@ other source is normal. The setting is `profile.recipes.preferred_sources` and
 | `collection:<pack_id>` | One installed collection in the bank. |
 | `store` | The selected store's recipes. |
 | `web` | Recipes found through recipe-website discovery. |
-| `themealdb`, `wikibooks` | The two open English-language databases. |
 
 A group can be in one list only, and the two lists hold at most 16 groups in
 total. Preferences do not switch anything on or off; `recipes.sources` and

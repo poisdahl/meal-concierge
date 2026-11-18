@@ -10,14 +10,15 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 from core import StateStore
 from recipes import RecipeError
 from service import Application
-from test_recipe_source_preferences import recipe, StaticSource
+from test_recipe_source_preferences import recipe
+from test_meal_concierge_products import FakeProvider
 
 
 class DiscoveryBankContinuationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.app = Application(StateStore(Path(self.temp.name), {"household": "Synthetic", "provider": "none"}), None, None)
+        self.app = Application(StateStore(Path(self.temp.name), {"household": "Synthetic", "provider": "oda"}), FakeProvider(), None)
         self.app.handle({"operation": "setup", "action": "apply", "keep_current": True})
         with self.app.store.locked() as state:
             state["profile"]["recipes"]["sources"] = {key: key == "internal" for key in state["profile"]["recipes"]["sources"]}
@@ -64,28 +65,29 @@ class DiscoveryBankContinuationTests(unittest.TestCase):
     def test_unused_source_slots_are_filled_and_continuation_does_not_repeat_external_search(self):
         for i in range(12):
             self.add(f"Bank soup {i}")
-        empty = StaticSource("themealdb", [])
-        self.app.external_recipe_sources["themealdb"] = empty
+        empty = mock.Mock(return_value=[])
+        self.app._provider_recipe_candidates = empty
         with self.app.store.locked() as state:
-            state["profile"]["recipes"]["sources"]["themealdb"] = True
+            state["profile"]["recipes"]["sources"]["oda"] = True
         first = self.discover(limit=8)
         self.assertEqual(len(first["recipes"]), 8)
-        self.assertEqual(len(empty.limits), 1)
+        self.assertEqual(empty.call_count, 1)
         second = self.discover(limit=8, cursor=first["next_cursor"])
         self.assertEqual(len(second["recipes"]), 4)
-        self.assertEqual(len(empty.limits), 1)
+        self.assertEqual(empty.call_count, 1)
         self.assertTrue(second["bank_exhausted"])
         self.assertFalse({row["id"] for row in first["recipes"]} & {row["id"] for row in second["recipes"]})
-        self.assertEqual(next(s for s in second["sources"] if s["source"] == "themealdb")["status"], "not_requested")
+        self.assertEqual(next(s for s in second["sources"] if s["source"] == "oda")["status"], "not_requested")
 
     def test_source_preferences_and_unreturned_bank_candidates_survive_the_cursor(self):
         bank = self.add("Own soup")
-        self.app.external_recipe_sources["themealdb"] = StaticSource("themealdb", ["Preferred discovery"])
+        self.app._provider_recipe_candidates = mock.Mock(return_value=[
+            recipe("Preferred discovery", kind="oda", url="https://oda.com/no/recipes/1-soup/")])
         with self.app.store.locked() as state:
-            state["profile"]["recipes"]["sources"]["themealdb"] = True
-            state["profile"]["recipes"]["preferred_sources"] = ["themealdb"]
+            state["profile"]["recipes"]["sources"]["oda"] = True
+            state["profile"]["recipes"]["preferred_sources"] = ["store"]
         first = self.discover(limit=1)
-        self.assertEqual(first["recipes"][0]["discovery_source"], "themealdb")
+        self.assertEqual(first["recipes"][0]["discovery_source"], "oda")
         self.assertEqual(first["next_cursor"]["offset"], 0)
         second = self.discover(limit=1, cursor=first["next_cursor"])
         self.assertEqual(second["recipes"][0]["id"], bank["id"])

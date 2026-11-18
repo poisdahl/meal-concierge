@@ -42,14 +42,29 @@ class CancellationPreconditionError(HouseholdError):
     """Cancellation stopped before the final provider control was dispatched."""
 
 
-STATE_VERSION = 14
+STATE_VERSION = 15
 
-RECIPE_SOURCE_IDS = ("internal", "oda", "meny", "mathem", "themealdb", "wikibooks")
+RECIPE_SOURCE_IDS = ("internal", "oda", "meny", "mathem")
+RETIRED_RECIPE_SOURCES = ("themealdb", "wikibooks")
 DEFAULT_RECIPE_SOURCES = {source: source != "mathem" for source in RECIPE_SOURCE_IDS}
 # What a household can prefer or use only occasionally. The bank is split into
 # its own saved recipes and each installed collection; "store" is the selected
 # store's recipes and "web" is recipe-website discovery.
-RECIPE_SOURCE_GROUP = re.compile(r"own|store|themealdb|wikibooks|web|collection:[^\x00-\x1f\x7f]{1,128}")
+RECIPE_SOURCE_GROUP = re.compile(r"own|store|web|collection:[^\x00-\x1f\x7f]{1,128}")
+
+
+def _remove_retired_recipe_sources(profile: Mapping[str, Any]) -> None:
+    """Drop obsolete runtime switches from loaded state and old installation defaults."""
+    recipes = profile.get("recipes")
+    if not isinstance(recipes, dict):
+        return
+    if isinstance(recipes.get("sources"), dict):
+        for source in RETIRED_RECIPE_SOURCES:
+            recipes["sources"].pop(source, None)
+    for field in ("preferred_sources", "occasional_sources"):
+        values = recipes.get(field)
+        if isinstance(values, list):
+            recipes[field] = [value for value in values if value not in RETIRED_RECIPE_SOURCES]
 
 
 def recipe_source_preference(recipes: Mapping[str, Any], group: str) -> str:
@@ -65,7 +80,7 @@ def _validate_recipe_source_preferences(recipes: Mapping[str, Any]) -> None:
         if (not isinstance(values, list) or len(values) > 16
                 or any(not isinstance(value, str) or RECIPE_SOURCE_GROUP.fullmatch(value) is None for value in values)
                 or len(set(values)) != len(values)):
-            raise HouseholdError("recipe source preferences must list distinct sources: own, store, web, themealdb, wikibooks or collection:<pack_id>")
+            raise HouseholdError("recipe source preferences must list distinct sources: own, store, web or collection:<pack_id>")
     if len(preferred) + len(occasional) > 16:
         raise HouseholdError("recipe source preferences can name at most 16 sources in total")
     if set(preferred) & set(occasional):
@@ -225,7 +240,10 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
         profile["recipes"]["sources"].update(oda=False, meny=False, mathem=True)
     if config.get("provider") == "none":
         profile["recipes"]["sources"].update(oda=False, meny=False, mathem=False)
-    _merge(profile, config.get("profile_overrides", {}))
+    overrides = deepcopy(config.get("profile_overrides", {}))
+    if isinstance(overrides, Mapping):
+        _remove_retired_recipe_sources(overrides)
+    _merge(profile, overrides)
     validate_profile(profile)
     return {
         "version": STATE_VERSION,
@@ -780,6 +798,7 @@ def _migrate_state(
     before_v12: Callable[[Mapping[str, Any]], None] | None = None,
     before_v13: Callable[[Mapping[str, Any]], None] | None = None,
     before_v14: Callable[[Mapping[str, Any]], None] | None = None,
+    before_v15: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     original_profile = state.get("profile")
     original_recipes = original_profile.get("recipes") if isinstance(original_profile, dict) else None
@@ -976,8 +995,13 @@ def _migrate_state(
             raise HouseholdError("household recipe profile is invalid")
         for field in ("preferred_sources", "occasional_sources"):
             recipes.setdefault(field, [])
-        _validate_recipe_source_preferences(recipes)
         state["version"] = 14
+    if state["version"] == 14:
+        if before_v15 is not None:
+            before_v15(state)
+        if isinstance(state.get("profile"), Mapping):
+            _remove_retired_recipe_sources(state["profile"])
+        state["version"] = 15
     # Additive migration: do not rewrite legacy settings, frozen email jobs or
     # receipts, and never enqueue an occurrence merely by opening old state.
     state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment", config.get("checkout_payment")), str(state.get("provider") or config.get("provider") or "oda").casefold())
@@ -1208,6 +1232,12 @@ class StateStore:
                     if not backup.exists():
                         _atomic_json(backup, value)
 
+            def backup_v14(value: Mapping[str, Any]) -> None:
+                if source_version == 14:
+                    backup = self.directory / "state-v14.backup.json"
+                    if not backup.exists():
+                        _atomic_json(backup, value)
+
             _migrate_state(
                 state,
                 self.config,
@@ -1220,6 +1250,7 @@ class StateStore:
                 before_v12=backup_v11,
                 before_v13=backup_v12,
                 before_v14=backup_v13,
+                before_v15=backup_v14,
             )
             state_household = state.get("household")
             configured_household = str(self.config["household"])

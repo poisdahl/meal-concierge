@@ -363,7 +363,7 @@ class CoreTests(Fixture):
         home = self.make_home()
         settings = muse.load_home(home)
         store = StateStore(home/'state',settings)
-        app = muse.ProtectedMuseApplication(store,self.client(seconds=0.7),None,external_recipe_sources={})
+        app = muse.ProtectedMuseApplication(store,self.client(seconds=0.7),None)
         self.mode = 'lost_ack'
         request = {'operation':'cart','action':'change','operations':[{'product_id':9212,'quantity':1}]}
         with self.assertRaises(HouseholdError):
@@ -374,7 +374,7 @@ class CoreTests(Fixture):
             app.handle(request)
         self.assertEqual(self.changes,1)
         self.mode = 'json'
-        reopened = muse.ProtectedMuseApplication(StateStore(home/'state',settings),self.client(),None,external_recipe_sources={})
+        reopened = muse.ProtectedMuseApplication(StateStore(home/'state',settings),self.client(),None)
         with self.assertRaisesRegex(HouseholdError, 'still uncertain'):
             reopened.handle({'operation':'cart','action':'reconcile_change'})
         self.assertTrue(store.read().get('pending_cart_change'))
@@ -384,7 +384,7 @@ class CoreTests(Fixture):
     def test_startup_denial_stays_terminal_and_checkout_recipe_fetch_remain_unavailable(self):
         home = self.make_home()
         self.mode = '401'
-        app = muse.ProtectedMuseApplication(StateStore(home/'state',muse.load_home(home)),self.client(),None,external_recipe_sources={})
+        app = muse.ProtectedMuseApplication(StateStore(home/'state',muse.load_home(home)),self.client(),None)
         for _ in range(2):
             result = app.handle({'operation':'status'})
             self.assertEqual(result['integration']['status'],'unavailable')
@@ -406,7 +406,7 @@ class CoreTests(Fixture):
 
     def test_later_auth_refusal_latches_followups_and_invalidates_readiness(self):
         home = self.make_home()
-        app = muse.ProtectedMuseApplication(StateStore(home/'state',muse.load_home(home)),self.client(),None,external_recipe_sources={})
+        app = muse.ProtectedMuseApplication(StateStore(home/'state',muse.load_home(home)),self.client(),None)
         self.assertEqual(app.integration['status'],'ready')
         self.mode = '401'
         with self.assertRaises(HouseholdError):

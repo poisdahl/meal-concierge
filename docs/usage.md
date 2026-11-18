@@ -174,7 +174,7 @@ quantities stay visible. Ask to edit, favorite or archive a saved recipe.
 - “Prefer my own cookbooks, and use the store's recipes only occasionally.”
 
 Recipes come from your own saved recipes, any installed collections, your
-store, recipe websites and two open English-language databases. Each source can
+store and recipe websites. Each source can
 be switched on or off, and marked as **preferred** (considered first) or
 **occasional** (considered after the others). Everything else is normal. A
 preference decides between comparable dishes; it never overrides your dietary

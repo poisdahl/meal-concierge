@@ -40,7 +40,7 @@ class RecipeSaveTests(unittest.TestCase):
         store = StateStore(Path(self.temp.name) / "state", {
             "instance": "save-identity", "household": "Synthetic household",
             "provider": "oda", "profile_overrides": {}})
-        self.app = Application(store, FakeProvider(), object(), external_recipe_sources={})
+        self.app = Application(store, FakeProvider(), object())
         self.app.handle({"operation": "setup", "action": "apply", "keep_current": True})
 
     def call(self, **request):

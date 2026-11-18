@@ -146,22 +146,11 @@ runpy.run_path(sys.argv[0], run_name='__main__')
                 self.assertEqual(code, 1, result)
                 self.assertFalse(self.root.exists())
 
-    def test_empty_sources_do_not_construct_optional_clients(self):
-        import service
-        with mock.patch.object(service, "TheMealDBSource", side_effect=AssertionError("external source")), \
-             mock.patch.object(service, "WikibooksSource", side_effect=AssertionError("external source")):
-            app = on_demand._application(self.root, "Synthetic")
-        self.assertEqual(app.external_recipe_sources, {})
+    def test_on_demand_starts_without_optional_source_clients(self):
+        app = on_demand._application(self.root, "Synthetic")
         self.assertEqual(app.integration["status"], "unavailable")
         self.assertIsNone(app.browser)
-        from core import StateStore
-        with mock.patch.object(service, "TheMealDBSource") as mealdb, \
-             mock.patch.object(service, "WikibooksSource") as wiki:
-            default = service.Application(StateStore(self.directory / "defaults", {"household": "Synthetic"}),
-                                          app.provider_client, None)
-        mealdb.assert_called_once()
-        wiki.assert_called_once()
-        self.assertEqual(set(default.external_recipe_sources), {"themealdb", "wikibooks"})
+        self.assertEqual(set(app.store.read()["profile"]["recipes"]["sources"]), {"internal", "oda", "meny", "mathem"})
 
     def test_interrupted_completed_publication_remains_incomplete_without_replay(self):
         # Stop the actual child at the publication boundary after it writes the
