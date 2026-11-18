@@ -5221,6 +5221,7 @@ class PlanningOperations:
             plan = state.get("cart_plan")
             if pending.get("clear_requested"):
                 state.pop("product_plan_completion", None)
+                self._clear_persisted_product_plan(plan)
             if (isinstance(plan, dict) and plan.get("provider") == self.provider
                     and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
                     and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu"))):
