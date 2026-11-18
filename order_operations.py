@@ -5747,11 +5747,11 @@ class OrderOperations:
             # were also absent from the pre-checkout, open-only history.
             try:
                 review_expiry = datetime.fromisoformat(pending["expires_at"])
-                # Older journals may record only the review expiry when the
-                # Vipps phone form failed after dispatch. Its creation time
-                # and the gateway allowance still bound the original attempt.
-                start_text = pending.get("dispatch_started_at") or pending.get("payment_requested_at")
-                start = datetime.fromisoformat(start_text) if start_text else review_expiry - CHECKOUT_REVIEW_TTL
+                # MENY can create the order before Vipps finishes its phone handoff.
+                # Older journals lack the dispatch timestamp, so use the beginning
+                # of their original review window even if the mobile request was sent.
+                dispatch_time = pending.get("dispatch_started_at")
+                start = datetime.fromisoformat(dispatch_time) if dispatch_time else review_expiry - CHECKOUT_REVIEW_TTL
                 end_text = pending.get("payment_expires_at")
                 end = datetime.fromisoformat(end_text) if end_text else review_expiry + MENY_VIPPS_EXPIRY_BUFFER
                 created = datetime.fromisoformat(order["merchant_created_at"])

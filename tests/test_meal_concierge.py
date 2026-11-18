@@ -9436,6 +9436,39 @@ class FlowTests(unittest.TestCase):
             self.assertFalse(store.read().get("email_jobs"))
             self.assertEqual(provider.checkout_clicks, 1)
 
+    def test_meny_legacy_order_created_before_mobile_request_can_be_reconciled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            checkout = {"operation": "checkout"}
+            confirmation = app.handle({**checkout, "action": "prepare"})["confirmation_id"]
+            checkout["confirmation_id"] = confirmation
+            app.handle({**checkout, "action": "confirm"})
+
+            with store.locked() as state:
+                pending = state["pending_checkout"]
+                pending.pop("dispatch_started_at")
+                requested = datetime.fromisoformat(pending["payment_requested_at"])
+                placed = requested - timedelta(seconds=30)
+                # Review began one minute before the merchant created the order.
+                pending["expires_at"] = (placed + timedelta(minutes=19)).isoformat()
+            order_id = "99990003"
+            provider.checkout_order_detail_hint = mock.Mock(return_value=order_id)
+            provider.tracking = "cancelled"
+            order = {"orderNumber": order_id, "status": "cancelled", "grossAmount": 40.0,
+                     "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                     "productQuantityCount": 1, "products": [{"identity": "Brokkoli 400g", "quantity": 1}],
+                     "merchant_created_at": (placed - timedelta(minutes=2)).isoformat(), "merchant_deleted": True}
+            provider.orders.append(order)
+            reconcile = {**checkout, "action": "reconcile"}
+            self.assertFalse(app.handle(reconcile).get("cancelled"))
+            self.assertIsNotNone(store.read()["pending_checkout"])
+            order["merchant_created_at"] = placed.isoformat()
+            self.assertTrue(app.handle(reconcile)["cancelled"])
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertEqual(provider.checkout_clicks, 1)
+
     def test_standing_authorization_submits_meny_without_a_second_agent_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
             store = StateStore(Path(temp), {**CONFIG, "provider": "meny", "confirmation_policy": "standing"})
