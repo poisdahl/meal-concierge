@@ -42,7 +42,7 @@ class ScriptPlaceholderTests(unittest.TestCase):
                 for script in (ready, hit_test):
                     self.assertIn(f"location.pathname === {json.dumps(product)} ", script)
                     self.assertIn(f"=== {json.dumps(label)}", script)
-                self.assertIn("document.elementFromPoint(640.5, 420.5)", hit_test)
+                self.assertIn("document.elementFromPoint(640, 420)", hit_test)
                 self.assertEqual(dispatched, [True])
 
     def test_order_removal_script_keeps_product_names_that_contain_placeholder_words(self):

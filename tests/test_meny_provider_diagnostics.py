@@ -190,3 +190,24 @@ class MenyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(rows[1]['candidate_search']['candidates'], [])
         self.assertIn('do not treat them as empty catalogs', reduced['next'])
         self.assertIn('For successful searches', reduced['next'])
+
+    def test_reduced_plans_retain_search_exclusions_across_selection_states(self):
+        from mcp_server import _compact_product_plan, _issues_only_product_plan, _minimal_product_plan
+
+        evidence = {'excluded_candidate_count': 2, 'excluded_candidate_reason': 'price_evidence_unavailable'}
+        observed = {'query': 'pasta', 'products': [{'product_ref': '/varer/pasta-1234'}]}
+        plan = {'status': 'needs_input', 'unresolved_requirements': [], 'requirements': [
+            {'requirement_id': 'chosen', 'status': 'selected', 'observation': {**observed, **evidence}},
+            {'requirement_id': 'partial', 'status': 'needs_input', 'observation': {**observed, **evidence}},
+            {'requirement_id': 'complete', 'status': 'selected', 'observation': observed},
+        ]}
+        for project, field in ((_compact_product_plan, 'observation'), (_minimal_product_plan, 'observation'),
+                               (_issues_only_product_plan, 'candidate_search')):
+            with self.subTest(project=project.__name__):
+                chosen, partial, complete = project(plan, candidate_limit=0)['requirements']
+                for row in (chosen, partial):
+                    for key, value in evidence.items():
+                        self.assertEqual(row[field][key], value)
+                self.assertEqual(partial[field]['omitted_products'], 1)
+                for key in evidence:
+                    self.assertNotIn(key, complete.get(field, {}))

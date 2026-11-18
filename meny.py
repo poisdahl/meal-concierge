@@ -31,7 +31,7 @@ from core import (
     oslo_local_timestamp,
     validate_delivery_slot,
 )
-from product_observations import normalize_meny_product_search
+from product_observations import MenyProductPriceError, normalize_meny_product_search
 from rpc_client import normalize_provider_failure
 
 
@@ -184,6 +184,10 @@ def _bounded_browser_stderr():
         stopped.set()
         reader.join()
         os.close(read_fd)
+
+
+class _CartControlReplaced(HouseholdError):
+    """The product page replaced the marked control before mouse dispatch."""
 
 
 class _DeliveryReservationError(HouseholdError):
@@ -538,10 +542,16 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
         raise HouseholdError("MENY browser order response changed") from exc
     if not isinstance(payload, Mapping):
         raise HouseholdError("MENY browser order response changed")
+    if "ngOrderId" in payload and str(payload["ngOrderId"]) != order_id:
+        raise HouseholdError("MENY response belongs to a different order")
     result = {}
     description = str(payload.get("statusDescription") or "").strip().casefold()
     if description in {"deleted", "cancelled", "canceled"}:
         result["status"] = "cancelled"
+    if str(payload.get("ngOrderId") or "") == order_id and isinstance(payload.get("orderCreated"), str):
+        result["merchant_created_at"] = payload["orderCreated"]
+        if description == "deleted" and type(payload.get("status")) is int and payload["status"] == 99:
+            result["merchant_deleted"] = True
     totals = payload.get("totals")
     amount = totals.get("totalGrossAmount") if isinstance(totals, Mapping) else None
     if amount is not None:
@@ -965,7 +975,10 @@ class MenyClient:
             if tool == "manipulate_cart":
                 return self._change_cart(arguments)
             if tool == "get_delivery_slots":
-                return self._delivery_slots(str(arguments.get("delivery_date") or ""))
+                return self._delivery_slots(
+                    str(arguments.get("delivery_date") or ""),
+                    require_selected=arguments.get("require_selected") is True,
+                )
             if tool == "select_delivery_slot":
                 return self._select_delivery_slot(arguments.get("delivery_slot_id"))
             if tool == "get_orders":
@@ -1144,14 +1157,7 @@ class MenyClient:
         response = {"provider": "meny", "query": query, kind: values}
         if kind != "products":
             return response
-        for product in values:
-            if (
-                product.get("available") is True
-                and isinstance(product.get("price"), str)
-                and re.fullmatch(r"(?:0|[1-9]\d{0,6}),\d{2}\s*kr", product["price"], re.IGNORECASE)
-            ):
-                product.update(self._product_price_details(product))
-        normalized = normalize_meny_product_search(response)
+        normalized = normalize_meny_product_search(response, read_price_details=self._product_price_details)
         normalized["scope"]["requested_size"] = limit
         return normalized
 
@@ -1199,20 +1205,20 @@ class MenyClient:
         if result.get("authenticated") is not True:
             self._require_login()
         if result.get("ready") is not True:
-            raise HouseholdError("MENY product price details did not finish rendering")
+            raise MenyProductPriceError("MENY product price details did not finish rendering")
         current_labels = result["current_labels"]
         original_labels = result["original_labels"]
         recycle = result["recycle"]
         if not isinstance(current_labels, list) or len(current_labels) != 1:
-            raise HouseholdError("MENY product price details changed")
+            raise MenyProductPriceError("MENY product price details changed")
         if not isinstance(original_labels, list) or len(original_labels) > 1:
-            raise HouseholdError("MENY product price details changed")
+            raise MenyProductPriceError("MENY product price details changed")
         if recycle == []:
             deposit_status = "none"
         elif recycle == ["+ pant"]:
             deposit_status = "present_unknown"
         else:
-            raise HouseholdError("MENY product deposit details changed")
+            raise MenyProductPriceError("MENY product deposit details changed")
         return {
             "detail_price": current_labels[0],
             "detail_original_price": original_labels[0] if original_labels else None,
@@ -1364,28 +1370,6 @@ class MenyClient:
         raise HouseholdError("MENY cart quantities did not settle")
 
     def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None) -> None:
-        try:
-            self._open(BASE_URL + product)
-            self._assert_authenticated()
-            before: dict[str, Any] = {}
-            for _ in range(20):
-                before = self._product_control("mark", delta, product)
-                if before.get("authenticated") is not True:
-                    raise HouseholdError("MENY login is required in the configured browser profile")
-                if before.get("ready") is True:
-                    break
-                self._sleep(0.25)
-            previous = before.get("quantity")
-            if before.get("ready") is True and (isinstance(previous, bool) or not isinstance(previous, int) or previous < 0):
-                raise HouseholdError("MENY product quantity is invalid")
-        except HouseholdError as exc:
-            raise MenyCartStoppedError(str(exc)) from exc
-        if before.get("ready") is not True:
-            if delta < 0:
-                self._remove_one_from_cart(product, order_change_code)
-                return
-            raise MenyCartStoppedError("MENY product control is unavailable")
-        expected = previous + delta
         dispatched = False
 
         def before_dispatch() -> None:
@@ -1393,16 +1377,43 @@ class MenyClient:
             dispatched = True
 
         try:
-            self._click_cart_control(product, str(before.get("label") or ""), before_dispatch)
-            self._resolve_order_route(order_change_code)
-            observed = self._wait_for_quantity(expected, previous, product)
-            if observed != expected:
-                raise HouseholdError("MENY product quantity did not settle")
+            self._open(BASE_URL + product)
             self._assert_authenticated()
+            previous = self._activate_product_control(product, delta, before_dispatch)
+            if previous is not None:
+                expected = previous + delta
+                self._resolve_order_route(order_change_code)
+                if self._wait_for_quantity(expected, previous, product) != expected:
+                    raise HouseholdError("MENY product quantity did not settle")
+                self._assert_authenticated()
+                return
         except HouseholdError as exc:
             if dispatched:
                 raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
             raise MenyCartStoppedError(str(exc)) from exc
+
+        if delta < 0:
+            self._remove_one_from_cart(product, order_change_code)
+            return
+        raise MenyCartStoppedError("MENY product control is unavailable")
+
+    def _activate_product_control(self, product: str, delta: int, before_dispatch: Any) -> int | None:
+        for attempt in range(20):
+            before = self._product_control("mark", delta, product)
+            if before.get("authenticated") is not True:
+                raise HouseholdError("MENY login is required in the configured browser profile")
+            if before.get("ready") is True:
+                previous = before.get("quantity")
+                if isinstance(previous, bool) or not isinstance(previous, int) or previous < 0:
+                    raise HouseholdError("MENY product quantity is invalid")
+                try:
+                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch)
+                    return previous
+                except _CartControlReplaced:
+                    if attempt == 19:
+                        raise
+            self._sleep(0.25)
+        return None
 
     def _resolve_order_route(self, order_change_code: str | None) -> None:
         result = self._eval(r"""
@@ -1598,46 +1609,53 @@ class MenyClient:
         if not label:
             raise HouseholdError("MENY cart control identity is unavailable")
         selector = '[data-meal-concierge-action="cart"]'
-        def fill(template, **values):
-            # One pass: an inserted path or product name is never searched for another placeholder.
-            return re.sub("|".join(values), lambda match: json.dumps(values[match[0]]), template)
 
-        ready = self._eval(fill(r"""
+        gate = r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
+  const samePage = location.origin === 'https://meny.no' && location.pathname === PRODUCT && !location.search && !location.hash && authenticated.length === 1;
+  if (samePage && marked.length === 0) return JSON.stringify({replaced:true});
   const target = marked[0];
-  return JSON.stringify({ready:authenticated.length === 1 && location.origin === 'https://meny.no' && location.pathname === PRODUCT && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL});
+  const bound = samePage && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL;
+  if (!__CHECK_HIT__) return JSON.stringify({ready:bound});
+  const hit = document.elementFromPoint(__HIT_X__, __HIT_Y__);
+  return JSON.stringify({clear:bound && Boolean(hit) && (hit === target || target.contains(hit))});
 })()
-""", PRODUCT=product, LABEL=label))
+"""
+        def observe(x: int | None = None, y: int | None = None) -> dict[str, Any]:
+            values = {"PRODUCT": product, "LABEL": label, "__CHECK_HIT__": x is not None,
+                      "__HIT_X__": x, "__HIT_Y__": y}
+            # Fill in one pass so a product label can contain placeholder text.
+            script = re.sub("|".join(values), lambda match: json.dumps(values[match[0]]), gate)
+            return self._eval(script)
+
+        ready = observe()
+        if ready == {"replaced": True}:
+            raise _CartControlReplaced("MENY cart control changed")
         if ready != {"ready": True}:
             raise HouseholdError("MENY cart control changed")
-        self._invoke("scrollintoview", selector)
-        box = self._find_box(self._invoke("get", "box", selector))
-        if not box or box["width"] <= 0 or box["height"] <= 0:
-            raise HouseholdError("MENY cart control is not clickable")
-        x = box["x"] + box["width"] / 2
-        y = box["y"] + box["height"] / 2
-        # Single-letter coordinate placeholders used to be replaced inside the
-        # product names "Yoghurt" and "X-tra" after the label was inserted.
-        clear = self._eval(fill(r"""
-(() => {
-  const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
-  const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
-  const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
-  const target = marked[0], hit = document.elementFromPoint(__HIT_X__, __HIT_Y__);
-  return JSON.stringify({clear:authenticated.length === 1 && location.origin === 'https://meny.no' && location.pathname === PRODUCT && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL && Boolean(hit) && (hit === target || target.contains(hit))});
-})()
-""", PRODUCT=product, LABEL=label, __HIT_X__=x, __HIT_Y__=y))
+        try:
+            self._invoke("scrollintoview", selector)
+            box = self._find_box(self._invoke("get", "box", selector))
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                raise HouseholdError("MENY cart control is not clickable")
+        except HouseholdError:
+            if observe() == {"replaced": True}:
+                raise _CartControlReplaced("MENY cart control changed")
+            raise
+        x = round(box["x"] + box["width"] / 2)
+        y = round(box["y"] + box["height"] / 2)
+        self._require_time(3)
+        self._invoke("mouse", "move", str(x), str(y))
+        clear = observe(x, y)
+        if clear == {"replaced": True}:
+            raise _CartControlReplaced("MENY cart control changed")
         if clear != {"clear": True}:
             raise HouseholdError("MENY cart control is obscured or changed")
-        self._require_time(3)
-        self._invoke("mouse", "move", str(round(x)), str(round(y)))
         before_dispatch()
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
@@ -1853,10 +1871,10 @@ __DELIVERY_BINDING__
   return JSON.stringify({reservation_expired:location.href === 'https://meny.no/kassen' && authenticated.length === 1 && notices.length === 1});
 })()
 """),
-            target_order_id=review.get("target_order_id"),
+            target_order_id=review.get("target_order_id"), total_ore=round(review_summary["total"] * 100),
         )
 
-    def _wait_for_vipps_dispatch(self, exact_checkout: Any = None, known_failure: Any = None, *, target_order_id: str | None = None) -> bool:
+    def _wait_for_vipps_dispatch(self, exact_checkout: Any = None, known_failure: Any = None, *, total_ore: int, target_order_id: str | None = None) -> bool:
         requests: Any = {"requests": []}
         for attempt in range(40):
             requests = self._invoke("network", "requests")
@@ -1868,7 +1886,7 @@ __DELIVERY_BINDING__
             # Its acknowledgement alone does not establish a Vipps handoff.
             if (vipps_dispatch_acknowledged(requests)
                     and (snapshot is None or snapshot.get("vipps_gateway") is True)):
-                self._complete_vipps_request()
+                self._complete_vipps_request(total_ore)
                 return True
             if attempt < 39:
                 self._sleep(0.25)
@@ -1888,75 +1906,108 @@ __DELIVERY_BINDING__
             "the outcome is uncertain and must be reconciled; do not retry"
         )
 
-    def _complete_vipps_request(self) -> None:
-        form: dict[str, Any] = {}
-        for attempt in range(40):
-            form = self._eval(r"""
-(() => {
-  document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
-  const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
-  const identity = location.origin === 'https://api.vipps.no' && location.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
-  const text = norm(document.body.innerText);
-  const sent = identity && /We've sent a payment request to/i.test(text) && /Open Vipps/i.test(text);
-  const phones = [...document.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible).filter(x => x.maxLength === 8 && x.autocomplete === 'tel-national');
-  const buttons = [...document.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === 'Next');
-  const remember = [...document.querySelectorAll('input[type="checkbox"]')].filter(visible);
-  const ready = identity && !sent && /Continue to pay with Vipps/i.test(text) && phones.length === 1 && buttons.length === 1 && remember.length === 1 && remember[0].checked === false;
-  if (ready) buttons[0].setAttribute('data-meal-concierge-action', 'vipps-next');
-  return JSON.stringify({identity, ready, sent});
+    def _vipps_gateway(self, stage: str, total_ore: int, session: str | None = None,
+                       hit: tuple[int, int] | None = None) -> str:
+        # The identity digest stays local. Neither the gateway token nor the
+        # private phone number is returned by browser evaluation.
+        options = {"stage": stage, "total": total_ore, "session": session, "hit": hit,
+                   "phone": self.vipps_phone_number}
+        return r"""
+(async () => {
+  const options = __OPTIONS__;
+  const url = new URL(location.href);
+  const official = url.origin === 'https://api.vipps.no' && !url.username && !url.password &&
+    url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
+  const absent = () => JSON.stringify(options.stage === 'gate' ? {ready:false} : {state:'absent'});
+  if (!official) return absent();
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url.href));
+  const session = Array.from(new Uint8Array(bytes), x => x.toString(16).padStart(2,'0')).join('');
+  if (location.href !== url.href || (options.session && session !== options.session)) return absent();
+  const norm = s => (s || '').normalize('NFC').replace(/\s+/g,' ').trim();
+  const text = norm(document.body?.innerText);
+  const state = value => JSON.stringify({state:value, session});
+  const expired = /(?:payment request|session|link) (?:has |is )?expired|(?:request|payment) (?:has been |was )?cancelled/i.test(text);
+  const visible = x => { const box=x.getBoundingClientRect(), style=getComputedStyle(x);
+    return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0; };
+  const amounts = [...text.matchAll(/(?:^|\s)(\d+(?:[ \u00a0]\d{3})*)[.,](\d{2})\s*NOK\b/gi)]
+    .map(m => Number(m[1].replace(/\s/g,'')) * 100 + Number(m[2]));
+  const merchant = (document.body?.innerText || '').split(/\n/).some(s => /^MENY(?:\s|$)/i.test(norm(s)));
+  const verified = merchant && amounts.length === 1 && amounts[0] === options.total;
+  const recipient = text.match(/We['’]ve sent a payment request to\s+(\+47[ \u00a0-]*(?:\d[ \u00a0-]*){8})(?!\d)/i);
+  const phones = [...document.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible);
+  const buttons = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.innerText) === 'Next');
+  const sent = recipient && /Open Vipps/i.test(text);
+  const otherRecipient = sent && options.phone && recipient[1].replace(/\D/g,'') !== '47' + options.phone;
+  const otherAmount = amounts.length === 1 && amounts[0] !== options.total;
+  const unverifiedMerchant = !merchant && amounts.length === 1 && (sent || (phones.length === 1 && buttons.length === 1));
+  if (otherAmount || otherRecipient || unverifiedMerchant) {
+    return options.stage === 'gate' ? absent() : state('mismatch');
+  }
+  if (expired) return absent();
+  if (sent) return state(options.phone && (verified || (options.stage === 'ack' && options.session)) ? 'sent' : 'gateway');
+  if (!verified || phones.length !== 1 || buttons.length !== 1) {
+    return options.stage === 'gate' ? absent() : state('gateway');
+  }
+  const phone = phones[0], button = buttons[0];
+  const digits = () => phone.value.replace(/\D/g,'');
+  const matches = () => digits() === options.phone || digits() === '47' + options.phone;
+  const rememberSelected = [...document.querySelectorAll('input[type="checkbox"]')].some(x => x.checked);
+  if (options.stage === 'fill' && !matches() && !digits() && !phone.disabled && !phone.readOnly && !rememberSelected) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(phone,options.phone);
+    phone.dispatchEvent(new Event('input',{bubbles:true}));
+    phone.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+  if (options.stage === 'gate') {
+    document.querySelectorAll('[data-meal-concierge-action="vipps-next"]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
+    const hit = options.hit ? document.elementFromPoint(...options.hit) : button;
+    const ready = matches() && !rememberSelected && !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+      hit && (hit === button || button.contains(hit));
+    if (ready) button.setAttribute('data-meal-concierge-action','vipps-next');
+    return JSON.stringify({ready:Boolean(ready)});
+  }
+  return state('phone');
 })()
-""")
-            if form.get("identity") is True and (form.get("ready") is True or form.get("sent") is True):
+""".replace("__OPTIONS__", json.dumps(options))
+
+    def _complete_vipps_request(self, total_ore: int) -> None:
+        session = None
+        # The hosted page can take a minute to hydrate after MENY acknowledges
+        # the order. Observe it without repeating either payment action.
+        for attempt in range(90):
+            form = self._eval(self._vipps_gateway("observe", total_ore, session))
+            if form.get("session") and not session:
+                session = form["session"]
+            if form.get("state") == "mismatch":
+                raise HouseholdError("This Vipps page does not match the reviewed MENY payment. Return to the original MENY checkout or receipt and reconcile.")
+            if session and form.get("state") == "sent":
+                return
+            if session and form.get("state") == "phone":
                 break
-            if attempt < 39:
-                self._sleep(0.25)
-        if form.get("sent") is True:
-            return
-        if form.get("identity") is not True or form.get("ready") is not True:
-            raise HouseholdError("Vipps payment page did not finish rendering; the outcome is uncertain; do not retry")
-        try:
-            self._invoke("fill", 'input[name="phone-number"]', self.vipps_phone_number)
-        except HouseholdError as exc:
-            raise HouseholdError("Vipps mobile number could not be entered; the outcome is uncertain; do not retry") from exc
-        selector = '[data-meal-concierge-action="vipps-next"]'
-        gate = r"""
-(() => {
-  document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
-  const requireHit = __REQUIRE_HIT__;
-  const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
-  const phone = document.querySelector('input[type="tel"][name="phone-number"]');
-  const remember = [...document.querySelectorAll('input[type="checkbox"]')].filter(visible);
-  const buttons = [...document.querySelectorAll('button')].filter(enabled).filter(x => (x.innerText || '').trim() === 'Next');
-  const exact = location.origin === 'https://api.vipps.no' && location.pathname === '/dwo-api-application/v1/deeplink/vippsgateway' && phone && phone.value.replace(/\D/g,'') === __PHONE__ && remember.length === 1 && remember[0].checked === false && buttons.length === 1;
-  const target = exact ? buttons[0] : null;
-  if (target) target.setAttribute('data-meal-concierge-action', 'vipps-next');
-  const hit = requireHit ? document.elementFromPoint(__HIT_X__, __HIT_Y__) : target;
-  return JSON.stringify({ready:Boolean(target && hit && (hit === target || target.contains(hit)))});
-})()
-"""
+            if attempt < 89:
+                self._sleep(1)
+        else:
+            raise HouseholdError("Vipps payment page did not finish rendering. Return to the original MENY checkout or receipt and reconcile this attempt.")
+        self._eval(self._vipps_gateway("fill", total_ore, session))
 
         def render(require_hit: bool, x: int = 0, y: int = 0) -> str:
-            return gate.replace("__REQUIRE_HIT__", "true" if require_hit else "false").replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y)).replace("__PHONE__", json.dumps(self.vipps_phone_number))
+            return self._vipps_gateway("gate", total_ore, session, (x, y) if require_hit else None)
 
-        if self._eval(render(False)) != {"ready": True}:
-            raise HouseholdError("Vipps mobile request control changed; the outcome is uncertain; do not retry")
-        x, y = self._wait_for_checkout_hit(selector, render, "Vipps mobile request control changed or is obscured")
+        for attempt in range(20):
+            if self._eval(render(False)) == {"ready": True}:
+                break
+            if attempt < 19:
+                self._sleep(0.25)
+        else:
+            raise HouseholdError("Return to the reviewed MENY payment. Verify its merchant, total, phone number and Remember choice before pressing Next, then approve in Vipps and reconcile.")
+        x, y = self._wait_for_checkout_hit('[data-meal-concierge-action="vipps-next"]', render,
+                                           "Vipps mobile request control changed or is obscured")
         self._invoke("mouse", "move", str(x), str(y))
         if self._eval(render(True, x, y)) != {"ready": True}:
-            raise HouseholdError("Vipps mobile request control changed or is obscured; the outcome is uncertain; do not retry")
+            raise HouseholdError("Vipps mobile request control changed. Return to the reviewed MENY payment or receipt and reconcile.")
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
         for attempt in range(40):
-            sent = self._eval(r"""
-(() => {
-  const text = (document.body.innerText || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  return JSON.stringify({sent:location.origin === 'https://api.vipps.no' && location.pathname === '/dwo-api-application/v1/deeplink/vippsgateway' && /We've sent a payment request to/i.test(text) && /Open Vipps/i.test(text)});
-})()
-""")
-            if sent == {"sent": True}:
+            if self._eval(self._vipps_gateway("ack", total_ore, session)).get("state") == "sent":
                 return
             if attempt < 39:
                 self._sleep(0.25)
@@ -2199,14 +2250,24 @@ __DELIVERY_BINDING__
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const identity = location.origin === 'https://meny.no' && location.pathname === '/varer' && !location.search && !location.hash;
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
-  const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible).filter(x => [...x.querySelectorAll('h1')].filter(visible).filter(h => norm(h.innerText) === 'Når skal vi levere til deg?').length === 1);
-  return JSON.stringify({ready:identity && authenticated.length === 1 && dialogs.length === 1, identity, authenticated:authenticated.length === 1});
+  const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible);
+  const delivery = 'Når skal vi levere til deg?', pickup = 'Når ønsker du å hente varene?';
+  const headings = dialogs.flatMap(dialog => [...dialog.querySelectorAll('h1')].filter(visible)
+    .map(h => norm(h.innerText)).filter(text => text === delivery || text === pickup));
+  const heading = headings.length === 1 ? headings[0] : '';
+  return JSON.stringify({ready:heading === delivery, pickup:heading === pickup, identity, authenticated:authenticated.length === 1});
 })()
 """)
             if ready.get("identity") is not True:
                 raise HouseholdError("MENY delivery route changed")
             if ready.get("authenticated") is not True:
                 raise HouseholdError("MENY login is required in the configured browser profile")
+            if ready.get("pickup") is True:
+                raise HouseholdError(
+                    "MENY is set to pickup (Hente selv). For home delivery, close the time picker in "
+                    "the dedicated MENY browser, open Velg leveringsalternativ, choose Levert på døren "
+                    "for the intended saved address, press Fortsett, then list delivery slots again."
+                )
             if ready.get("ready") is True:
                 return
             self._sleep(0.25)
@@ -2233,12 +2294,7 @@ __DELIVERY_BINDING__
             self._sleep(0.25)
         raise HouseholdError("MENY delivery selection is uncertain; inspect the selected slot before retrying")
 
-    def _delivery_slots(self, delivery_date: str = "") -> dict[str, Any]:
-        if delivery_date:
-            try:
-                date.fromisoformat(delivery_date)
-            except ValueError as exc:
-                raise HouseholdError("delivery date is invalid") from exc
+    def _read_delivery_picker(self) -> list[dict[str, Any]]:
         self._open_delivery_picker()
         result: dict[str, Any] = {}
         for _ in range(20):
@@ -2282,9 +2338,33 @@ __DELIVERY_BINDING__
             raise HouseholdError("MENY delivery slots are unavailable")
         self._invoke("click", '[data-meal-concierge-action="delivery-dismiss"]')
         self._wait_delivery_picker_closed()
-        slots = result["slots"]
+        return result["slots"]
+
+    def _delivery_slots(self, delivery_date: str = "", *, require_selected: bool = False) -> dict[str, Any]:
+        if delivery_date:
+            try:
+                date.fromisoformat(delivery_date)
+            except ValueError as exc:
+                raise HouseholdError("delivery date is invalid") from exc
+        # The picker can paint a complete list before its reservation marker
+        # settles. Reopen it once on an inconclusive checkout read. A normal
+        # listing may legitimately have no selection and needs only one read.
+        for _ in range(2 if require_selected else 1):
+            slots = self._read_delivery_picker()
+            if not require_selected:
+                break
+            selected_count = sum(slot.get("selected") is True for slot in slots)
+            if selected_count == 1:
+                break
+        else:
+            raise HouseholdError(
+                f"MENY shows {selected_count} selected delivery windows after rereading the picker. "
+                "Check or select the intended delivery window before checkout."
+            )
         if delivery_date:
             slots = [slot for slot in slots if slot.get("date") == delivery_date]
+            if require_selected and not any(slot.get("selected") is True for slot in slots):
+                raise HouseholdError("MENY has a different delivery date selected; review the window before checkout")
         normalized = [normalize_meny_delivery_slot(slot) for slot in slots]
         if len({slot["slot_ref"] for slot in normalized}) != len(normalized):
             raise HouseholdError("MENY delivery slot identity is ambiguous")
@@ -2306,31 +2386,18 @@ __DELIVERY_BINDING__
         self,
         required: Mapping[str, Any],
         guard: Mapping[str, Any] | None = None,
+        *,
+        selected_slot: Mapping[str, Any] | None = None,
     ) -> None:
-        required_display = required.get("display")
-        slots = self._delivery_slots().get("slots")
+        slots = [selected_slot] if selected_slot is not None else self._delivery_slots(require_selected=True)["slots"]
         selected = meny_selected_delivery(slots)
-        selected_display = selected.get("display") if selected is not None else None
-        if (
-            not isinstance(required_display, str)
-            or not isinstance(selected_display, str)
-            or meny_delivery_window_identity(required_display)
-            != meny_delivery_window_identity(selected_display)
-        ):
+        if selected is None:
             raise HouseholdError("MENY checkout delivery changed after review")
-        if isinstance(guard, Mapping):
-            expected = guard.get("selected")
-            selected_slots = [
-                validate_delivery_slot(slot)
-                for slot in slots
-                if isinstance(slot, Mapping) and slot.get("selected") is True
-            ] if isinstance(slots, list) else []
-            if (
-                not isinstance(expected, Mapping)
-                or len(selected_slots) != 1
-                or selected_slots[0] != validate_delivery_slot(expected)
-            ):
-                raise HouseholdError("MENY delivery price changed after review")
+        display = selected.pop("display")
+        if meny_delivery_window_identity(required.get("display")) != meny_delivery_window_identity(display):
+            raise HouseholdError("MENY checkout delivery changed after review")
+        if isinstance(guard, Mapping) and selected != validate_delivery_slot(guard.get("selected")):
+            raise HouseholdError("MENY delivery price changed after review")
 
     def _wait_for_delivery_reservation(self) -> None:
         requests: Any = {"requests": []}
@@ -2628,7 +2695,13 @@ __DELIVERY_BINDING__
   const delivery = valueAfter('Varene leveres') || (deliveredDates.length === 1 ? deliveredDates[0] : null);
   const code = valueAfter('Bestillingskode (for henting/levering)') || heading[0]?.replace(/^Bestilling\s+/, '') || null;
   const text = norm(root.innerText);
-  const status = /bestillingen er kansellert|kansellert bestilling/i.test(text) ? 'cancelled' : deliveredDates.length === 1 ? 'delivered' : /bestillingen kan oppdateres|bekreftet/i.test(text) ? 'confirmed' : 'unknown';
+  const cancelButtons = [...root.querySelectorAll('button')].filter(visible).filter(x =>
+    !x.disabled && x.getAttribute('aria-disabled') !== 'true' && norm(x.innerText) === 'Kanseller bestilling');
+  const currentOrder = location.origin === 'https://meny.no' && actual === expected &&
+    [`/trumf-profil/nettbutikk/bestilling/${expected}`, `/profil/nettbutikk/bestilling/${expected}`].includes(location.pathname);
+  const hasDialog = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"]')].some(visible);
+  const canCancel = currentOrder && cancelButtons.length === 1 && !hasDialog;
+  const status = /bestillingen er kansellert|kansellert bestilling/i.test(text) ? 'cancelled' : deliveredDates.length === 1 ? 'delivered' : /bestillingen kan oppdateres/i.test(text) || canCancel ? 'confirmed' : 'unknown';
   const itemButtons = [...root.querySelectorAll('button')].filter(visible).map(x => norm(x.innerText)).map(x => x.match(/^Bestilte varer \((\d+)\)$/)).filter(Boolean);
   const itemCount = itemButtons.length === 1 ? Number(itemButtons[0][1]) : null;
   const tables = [...root.querySelectorAll('table')].filter(visible).filter(table => {
@@ -2651,8 +2724,7 @@ __DELIVERY_BINDING__
   const buttons = [...root.querySelectorAll('button')].filter(visible).filter(x => /^Bestilte varer \(\d+\)$/.test(norm(x.innerText)));
   const expand = !rowsReady && buttons.length === 1 && buttons[0].getAttribute('aria-expanded') !== 'true';
   if (expand) buttons[0].setAttribute('data-meal-concierge-action', 'order-items');
-  const orderPaths = [`/trumf-profil/nettbutikk/bestilling/${expected}`, `/profil/nettbutikk/bestilling/${expected}`];
-  const baseReady = actual === expected && orderPaths.includes(location.pathname) && heading.length === 1 && Number.isFinite(total) && Boolean(delivery) && Number.isInteger(itemCount) && itemCount > 0;
+  const baseReady = currentOrder && heading.length === 1 && Number.isFinite(total) && Boolean(delivery) && Number.isInteger(itemCount) && itemCount > 0;
   return JSON.stringify({ready:baseReady && rowsReady, expand:baseReady && expand, authenticated:true, order_number:actual, code, status, total, order_total:orderTotal, delivery, item_count:itemCount, products});
 })()
 """.replace("EXPECTED", json.dumps(order_id))
@@ -2695,7 +2767,8 @@ __DELIVERY_BINDING__
             "order_number": order_id,
             "id": order_id,
             "code": result.get("code"),
-            "status": provider_details.get("status") or result["status"],
+            "status": result["status"],
+            **provider_details,
             "grossAmount": result["total"],
             **({"order_total": order_total} if order_total is not None else {}),
             "deliverySlotDisplay": result["delivery"],
@@ -2704,20 +2777,56 @@ __DELIVERY_BINDING__
         }
 
     def _checkout_confirmation_snapshot(self) -> dict[str, Any]:
-        return self._eval(r"""
+        script = r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
+  const accounts = [...document.querySelectorAll('button')].filter(x => norm(x.getAttribute('aria-label') || x.innerText || x.textContent).startsWith('Brukermeny'));
+  const authenticated = accounts.filter(visible);
   const main = [...document.querySelectorAll('main')].filter(visible);
-  const url = new URL(location.href), orderId = url.origin === 'https://meny.no' && url.pathname === '/kassen/bekreftelse' ? url.searchParams.get('orderid') : null;
-  const receiptUrl = /^\d{1,20}$/.test(orderId || '') && !url.hash && [...url.searchParams.keys()].length === 1 ? url.href : null;
+  const url = new URL(location.href);
+  const queryId = url.searchParams.get('orderid');
+  const numeric = value => /^\d{1,20}$/.test(value || '');
+  const queryValid = numeric(queryId) && [...url.searchParams.keys()].length === 1;
+  const receiptUrl = url.origin === 'https://meny.no' && url.pathname === '/kassen/bekreftelse' &&
+    !url.hash && (!url.search || queryValid) ? url.href : null;
+  const lines = (main.length === 1 ? main[0].innerText : '').split(/\n+/).map(norm).filter(Boolean);
+  const labels = lines.flatMap((line,i) => {
+    const match = line.match(/^Ordrenummer\s*:?\s*(.*)$/i);
+    return match ? [match[1] || lines[i+1] || ''] : [];
+  });
+  const labelId = labels.length === 1 && numeric(labels[0]) ? labels[0] : null;
+  const orderId = labels.length ? (labelId && (!queryId || labelId === queryId) ? labelId : null) : queryId;
+  const detailPath = url.pathname.match(/^\/(?:trumf-)?profil\/nettbutikk\/bestilling\/(\d{1,20})$/);
+  const detailUrl = url.origin === 'https://meny.no' && !url.search && !url.hash && detailPath ? url.href : null;
+  const detailId = detailUrl && detailPath[1] === labelId && authenticated.length === 1 ? labelId : null;
+  const exactUrl = receiptUrl || detailUrl;
+  const hiddenAccount = accounts.length > 0 && authenticated.length === 0;
   const blank = url.href === 'about:blank';
   const vippsGateway = url.origin === 'https://api.vipps.no' && url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
   const confirmed = main.length === 1 && /Takk for (?:din )?bestilling(?:en)?|Bestillingen (?:er|ble) (?:mottatt|oppdatert)|Ordrebekreftelse/i.test(norm(main[0].innerText));
-  return JSON.stringify({authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, receipt_url:receiptUrl, order_id:confirmed && receiptUrl ? orderId : null});
+  return JSON.stringify({exact_url:exactUrl, hidden_account:!!exactUrl && hiddenAccount, authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, detail_order_id:detailId, receipt_url:receiptUrl, order_id:confirmed && receiptUrl ? orderId : null});
 })()
-""")
+"""
+        result = self._eval(script)
+        exact_url = result.get("exact_url")
+        if exact_url and result.get("hidden_account") is True:
+            # Wide headed windows can conceal the account header. Resize in
+            # place: opening a fresh route would lose an unretained receipt.
+            self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
+            for attempt in range(8):
+                result = self._eval(script)
+                if result.get("exact_url") != exact_url:
+                    raise HouseholdError("MENY order page changed during viewport recovery")
+                if result.get("authenticated") is True and (result.get("order_id") or result.get("detail_order_id")):
+                    break
+                if attempt < 7:
+                    self._sleep(0.25)
+            else:
+                if result.get("authenticated") is not True:
+                    raise HouseholdError("MENY login is required in the configured browser profile")
+                raise HouseholdError("MENY order identity did not finish rendering; keep this page open and reconcile again")
+        return result
 
     def checkout_confirmation_order_id(self, *, deadline: float | None = None) -> str | None:
         with self._locked_operation(MENY_READ_TIMEOUT, deadline):
@@ -2747,26 +2856,18 @@ __DELIVERY_BINDING__
             order_id = result.get("order_id")
             return str(order_id) if order_id is not None else None
 
-    def checkout_payment_awaiting_user(self, *, deadline: float | None = None) -> bool:
-        """Keep an acknowledged Vipps page alive while mobile approval is pending."""
+    def checkout_order_detail_hint(self, *, deadline: float | None = None) -> str | None:
+        """Identify the order already open in the authenticated browser, without navigating."""
+        with self._locked_operation(MENY_READ_TIMEOUT, deadline):
+            return self._checkout_confirmation_snapshot().get("detail_order_id")
+
+    def checkout_payment_handoff(self, total_ore: int, *, deadline: float | None = None) -> str | None:
+        """Identify a still-open hosted handoff before order-history navigation."""
+
 
         with self._locked_operation(MENY_READ_TIMEOUT, deadline):
-            for attempt in range(120):
-                result = self._eval(r"""
-(() => {
-  const text = (document.body.innerText || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  const url = new URL(location.href);
-  const waiting = url.origin === 'https://api.vipps.no' &&
-    url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway' &&
-    /We've sent a payment request to/i.test(text) && /Open Vipps/i.test(text);
-  return JSON.stringify({waiting});
-})()
-""")
-                if result != {"waiting": True}:
-                    return False
-                if attempt < 119:
-                    self._sleep(0.25)
-            return True
+            stage = self._eval(self._vipps_gateway("observe", total_ore)).get("state")
+            return stage if stage in {"sent", "phone", "gateway", "mismatch"} else None
 
     def checkout_payment_not_dispatched(self, review: Mapping[str, Any], *, deadline: float | None = None) -> bool:
         """Prove that a fenced click never left the unchanged MENY checkout page."""
@@ -3012,7 +3113,7 @@ __DELIVERY_BINDING__
 
     def review_checkout(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None = None, deadline: float | None = None, allow_recovery: bool = False) -> dict[str, Any]:
         with self._locked_operation(MENY_ORDER_TIMEOUT, deadline, allow_recovery=allow_recovery):
-            return self._review_checkout(cart, order_change=order_change)
+            return self._review_checkout(cart, order_change=order_change, retry_disabled_step=True)
 
     def _reset_checkout_review(self) -> None:
         state = self._eval(r"""
@@ -3030,12 +3131,12 @@ __DELIVERY_BINDING__
         self._invoke("reload")
         self._sleep(0.8)
 
-    def _review_checkout(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _review_checkout(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None = None, retry_disabled_step: bool = False) -> dict[str, Any]:
         expected = cart_summary(cart)
         if not expected["items"]:
             raise HouseholdError("cart is empty")
         if expected.get("delivery") is None:
-            selected_delivery = meny_selected_delivery(self._delivery_slots().get("slots"))
+            selected_delivery = meny_selected_delivery(self._delivery_slots(require_selected=True)["slots"])
             requested = (order_change or {}).get("requested_delivery")
             if order_change and order_change.get("delivery_only") and requested:
                 # Explicit selection already reserved this window. A cart can
@@ -3052,6 +3153,16 @@ __DELIVERY_BINDING__
             expected["delivery"] = selected_delivery
         if expected.get("delivery") is None:
             raise HouseholdError("select a MENY delivery slot before checkout")
+        try:
+            return self._review_checkout_wizard(expected, order_change=order_change)
+        except _CheckoutNotReadyError:
+            if not retry_disabled_step:
+                raise
+            # Reload the wizard against the same basket and reserved window.
+            self._reset_checkout_review()
+            return self._review_checkout_wizard(expected, order_change=order_change)
+
+    def _review_checkout_wizard(self, expected: Mapping[str, Any], *, order_change: Mapping[str, Any] | None) -> dict[str, Any]:
         target_order_id = str(order_change.get("order_id") or "") if order_change else ""
         target_code = str(order_change.get("code") or "") if order_change else ""
         if order_change and order_change.get("requested_delivery"):
@@ -3300,7 +3411,7 @@ __DELIVERY_BINDING__
             "target_order_code": target_code or None,
         }
 
-    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Any = None, *, order_change: Mapping[str, Any] | None = None, deadline: float | None = None) -> dict[str, Any]:
+    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Any = None, *, order_change: Mapping[str, Any] | None = None, selected_slot: Mapping[str, Any] | None = None, deadline: float | None = None) -> dict[str, Any]:
         final_dispatched = False
         try:
             with self._locked_operation(MENY_ORDER_TIMEOUT, deadline):
@@ -3312,20 +3423,9 @@ __DELIVERY_BINDING__
                 # Bind the current account selection to the authorized window
                 # without changing provider state during protected submit.
                 guard = review.get("delivery_guard")
-                if isinstance(guard, Mapping):
-                    self._require_selected_delivery(review_delivery, guard)
-                else:
-                    self._require_selected_delivery(review_delivery)
+                self._require_selected_delivery(review_delivery, guard, selected_slot=selected_slot)
                 final_cart["delivery"] = dict(review_delivery)
-                try:
-                    fresh = self._review_checkout(final_cart, order_change=order_change)
-                except _CheckoutNotReadyError:
-                    # The live site once exposed a transient disabled checkout
-                    # immediately after a successful prepare. Reset the
-                    # same-URL wizard before one full retry; neither attempt
-                    # reaches payment.
-                    self._reset_checkout_review()
-                    fresh = self._review_checkout(final_cart, order_change=order_change)
+                fresh = self._review_checkout(final_cart, order_change=order_change, retry_disabled_step=True)
                 if not meny_checkout_reviews_match(review, fresh):
                     raise HouseholdError("MENY checkout changed after review")
                 ready = self._eval(r"""
