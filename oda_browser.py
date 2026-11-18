@@ -1854,52 +1854,71 @@ class OdaBrowser:
         self._expand_checkout_items(len(expected["lines"]))
         self._expand_checkout_amount_summary()
         script = _oda_checkout_surface_script(expected, payment)
-        result = self._eval(script)
         required = {"url", "authenticated", "available", "items", "total_matches", "delivery_roots", "address_matches", "masked_payment", "payment_display", "submit_controls"}
         expected_url = CHECKOUT_URL if order_id is None else f"{CHECKOUT_URL}?orderNumber={order_id}"
-        if set(result) != required or result["url"] != expected_url or type(result["submit_controls"]) is not int:
-            raise HouseholdError("Oda checkout page changed")
-        if result["authenticated"] is not True:
-            raise HouseholdError("Oda browser login could not be verified; log the dedicated browser into the same intended account as Oda OAuth, then request a new checkout review")
-        if result["available"] is not True:
-            raise OdaCheckoutMismatchError("Oda checkout has unavailable items or details; review the current cart before checkout")
-        if result["address_matches"] is not True:
-            raise HouseholdError("Oda browser delivery address does not match the reviewed cart; check the intended account and address in Oda, then request a new checkout review")
-        if result["masked_payment"] is not True:
-            raise HouseholdError("Oda configured payment selection could not be verified; review checkout_payment in setup, then request a new checkout review")
-        surface = dict(result)
-        items = result.pop("items")
-        actual_line_count, actual_product_quantity_count = _checkout_item_counts(items)
-        identity = self._review_checkout_identity(expected, surface, account_digest, identity_review)
-        result["line_matches"] = identity["matched"]
-        if identity.get("review"):
-            result["identity_review"] = identity["review"]
-        result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"), bound_address=expected.get("delivery_address"))
-        if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:
-            diagnostics = {
-                "line_matches": result["line_matches"] is True,
-                "line_difference": identity.get("issue"),
-                "total_matches": result["total_matches"] is True,
-                "delivery_matches": result["delivery_matches"] is True,
-                "submit_controls": (
-                    result["submit_controls"]
-                    if 0 <= result["submit_controls"] <= 1_000_000 else None
-                ),
-                "expected_line_count": len(expected["lines"]),
-                "actual_line_count": actual_line_count,
-                "expected_product_quantity_count": expected["product_count"],
-                "actual_product_quantity_count": actual_product_quantity_count,
-            }
-            quote_only = (result["total_matches"] is False
-                          and all(result[key] is True for key in (
-                              "authenticated", "available", "line_matches", "delivery_matches",
-                              "address_matches", "masked_payment"))
-                          and result["submit_controls"] == 1)
-            error = OdaCheckoutQuoteMismatchError if quote_only else OdaCheckoutMismatchError
-            raise error(
-                "Oda checkout does not match the reviewed cart "
-                + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
-            )
+        for attempt in range(5):
+            result = self._eval(script)
+            if set(result) != required or result["url"] != expected_url or type(result["submit_controls"]) is not int:
+                raise HouseholdError("Oda checkout page changed")
+            if result["authenticated"] is not True:
+                raise HouseholdError("Oda browser login could not be verified; log the dedicated browser into the same intended account as Oda OAuth, then request a new checkout review")
+            if result["available"] is not True:
+                raise OdaCheckoutMismatchError("Oda checkout has unavailable items or details; review the current cart before checkout")
+            if result["address_matches"] is not True:
+                raise HouseholdError("Oda browser delivery address does not match the reviewed cart; check the intended account and address in Oda, then request a new checkout review")
+            if result["masked_payment"] is not True:
+                raise HouseholdError("Oda configured payment selection could not be verified; review checkout_payment in setup, then request a new checkout review")
+            surface = result
+            result = dict(surface)
+            items = result.pop("items")
+            actual_line_count, actual_product_quantity_count = _checkout_item_counts(items)
+            try:
+                identity = self._review_checkout_identity(expected, surface, account_digest, identity_review)
+            except OdaCheckoutMismatchError:
+                if self.checkout_provider != "oda" or identity_review is None or surface["total_matches"] is not False:
+                    raise
+                # An approved display mapping includes the full checkout in
+                # its digest. Check whether ONLY the transient total flag
+                # invalidated it. The observed false flag still blocks this
+                # read, and acceptance always rechecks the actual surface.
+                identity = self._review_checkout_identity(
+                    expected, {**surface, "total_matches": True}, account_digest, identity_review,
+                )
+            result["line_matches"] = identity["matched"]
+            if identity.get("review"):
+                result["identity_review"] = identity["review"]
+            result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"), bound_address=expected.get("delivery_address"))
+            if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:
+                diagnostics = {
+                    "line_matches": result["line_matches"] is True,
+                    "line_difference": identity.get("issue"),
+                    "total_matches": result["total_matches"] is True,
+                    "delivery_matches": result["delivery_matches"] is True,
+                    "submit_controls": (
+                        result["submit_controls"]
+                        if 0 <= result["submit_controls"] <= 1_000_000 else None
+                    ),
+                    "expected_line_count": len(expected["lines"]),
+                    "actual_line_count": actual_line_count,
+                    "expected_product_quantity_count": expected["product_count"],
+                    "actual_product_quantity_count": actual_product_quantity_count,
+                }
+                quote_only = (result["total_matches"] is False
+                              and all(result[key] is True for key in (
+                                  "authenticated", "available", "line_matches", "delivery_matches",
+                                  "address_matches", "masked_payment"))
+                              and result["submit_controls"] == 1)
+                if self.checkout_provider == "oda" and quote_only and attempt < 4:
+                    # The payment label can briefly retain an earlier cart total.
+                    # Keep this page open and revalidate the complete surface.
+                    self._settle(0.5)
+                    continue
+                error = OdaCheckoutQuoteMismatchError if quote_only else OdaCheckoutMismatchError
+                raise error(
+                    "Oda checkout does not match the reviewed cart "
+                    + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
+                )
+            break
         if addition_expectation is not None:
             amounts = self._eval(_retail_addition_amount_script(addition_expectation, provider=self.checkout_provider, vipps=bool(payment and payment.get("method") == "vipps")))
             if amounts.get("amounts_valid") is not True:
@@ -2349,10 +2368,18 @@ class OdaBrowser:
  }
  if(location.href===CHECKOUT_ENTRY)return JSON.stringify({action:'wait'});
  if(location.href===RECOMMENDATIONS){
+   const prompts=[...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')].filter(visible);
+   if(prompts.length||document.querySelector('input[type="password"]'))return blocked('destination_prompt');
    const controls=[...document.querySelectorAll('a')].filter(enabled);
    const next=controls.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett'&&x.href===CHECKOUT);
    if(!next.length)return pending('recommendations');
    if(next.length!==1)return blocked('multiple_recommendation_links');
+   if(FOLLOW_LINK && ORDER===null){
+     // Follow the exact verified review link in this tab. An SPA click can
+     // finish without advancing the active recommendations page.
+     location.assign(next[0].href);
+     return JSON.stringify({action:'followed_recommendations'});
+   }
    next[0].setAttribute('data-oda-household-action','recommendations');
    return JSON.stringify({action:'recommendations'});
  }
@@ -2384,10 +2411,27 @@ class OdaBrowser:
 })()
 """.replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("FINAL_CONTROL", "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order").replace("ORDER", json.dumps(order_id))
         dispatched: set[str] = set()
+        recommendations_reads = 0
+        followed_link = False
         for _ in range(30):
             self._require_checkout_time()
-            surface = self._eval(script)
+            follow_link = order_id is None and recommendations_reads >= 3 and not followed_link
+            try:
+                surface = self._eval(script.replace("FOLLOW_LINK", json.dumps(follow_link)))
+            except HouseholdError:
+                if not follow_link:
+                    raise
+                # Navigation can destroy the JS context before eval returns.
+                # Spend the single fallback and only observe its destination.
+                followed_link = True
+                self._settle(0.5)
+                continue
             action = surface.get("action")
+            if action == "followed_recommendations":
+                followed_link = True
+                self._settle(0.5)
+                continue
+            recommendations_reads = recommendations_reads + 1 if action == "recommendations" else 0
             if action == "ready":
                 return
             if action == "payment_required":
@@ -2418,7 +2462,14 @@ class OdaBrowser:
             if action in {"new_order", "previous_order", "payment", "recommendations"}:
                 if action not in dispatched:
                     dispatched.add(action)
-                    self._click_action(action.replace("_", "-"))
+                    try:
+                        self._click_action(action.replace("_", "-"))
+                    except HouseholdError:
+                        if action != "recommendations" or order_id is not None:
+                            raise
+                        # A detached navigation link may already have worked.
+                        # Observe the active tab before considering a fallback.
+                        self._settle(0.5)
                 else:
                     self._settle(0.5)
                 continue
@@ -2429,6 +2480,9 @@ class OdaBrowser:
             "destination": "Oda did not finish showing the order destination and its continue control.",
             "recommendations": "Oda did not show the link from recommendations to checkout.",
         }
+        if surface.get("action") in {"recommendations", "followed_recommendations"}:
+            raise HouseholdError("Oda stayed on its recommendations page. Open the visible Fortsett link "
+                                 "in this checkout tab, then request a new checkout review.")
         reason = reasons.get(surface.get("reason"))
         raise HouseholdError(f"Oda checkout navigation timed out. {reason}" if reason else "Oda checkout navigation timed out")
 
