@@ -1562,12 +1562,17 @@ def main():
                         raise RuntimeError('old owner must be disabled/masked before adoption; installer does not transfer scheduler/service authority')
                 elif unit_path(manager, old_name).exists():
                     raise RuntimeError('old launchd plist must be retired before adoption so it cannot restart at login')
+            config_path = Path(args.config or home / 'config.json').expanduser()
+            try:
+                config_path = config_path.resolve(strict=config_path.is_symlink())
+            except FileNotFoundError as exc:
+                raise RuntimeError('household config symlink has no target; restore its config before installation') from exc
             paths = {key: str(Path(getattr(args, key) or default).expanduser().resolve()) for key, default in {
-                'config': home / 'config.json', 'state': home / 'state', 'socket': home / 'run/service.sock',
+                'state': home / 'state', 'socket': home / 'run/service.sock',
                 'browser_home': home / 'browser', 'browser_profile': home / 'browser/profile',
                 'browser_socket_directory': home / 'browser/run', 'tokens': home / 'tokens',
             }.items()}
-            config_path = Path(paths['config'])
+            paths['config'] = str(config_path)
             if config_path.exists():
                 settings = json.loads(config_path.read_text())
                 provider = configured_provider(settings)

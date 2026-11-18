@@ -3545,7 +3545,10 @@ __DELIVERY_BINDING__
                     if attempt == 0 and poll == 0 and self.cdp is None:
                         # A wide headed window can hide MENY's account button.
                         # Restore the working layout before considering a reload.
-                        self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
+                        try:
+                            self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
+                        except HouseholdError:
+                            pass  # The page may still hydrate in its existing layout.
                     if poll < 19:
                         self._sleep(0.5)
             return False

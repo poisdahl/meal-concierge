@@ -2962,7 +2962,7 @@ if(c.existingLabel){
  old.disabled=!!c.disabledOld;
 }
 if(c.duplicateLabel)fresh.labels.push(outer);
-const radios=c.noRadios?[]:[old,fresh];
+const radios=c.noRadios?[]:c.onlyExisting?[old]:[old,fresh];
 if(c.duplicateCandidate){const duplicate={...fresh,id:'duplicate',checked:false};
  const label={...outer,contains:x=>x===duplicate,querySelectorAll:()=>[duplicate]};duplicate.labels=[label];radios.push(duplicate);}
 const payment=node('payment',c.newSelected&&!c.oldPaymentLabel?'Fortsett':'Gå til betaling');payment.disabled=!!c.disabledPayment;
@@ -3000,10 +3000,10 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
             with self.subTest(case=case):
                 self.assertEqual(evaluate(script, case), {"value": {"action": action, "reason": reason}, "marked": []})
 
-        for key in ("doubleSelection", "disabled", "hidden", "hiddenLabel", "wrongLabel",
+        for key in ("doubleSelection", "hidden", "hiddenLabel", "wrongLabel",
                     "unbound", "mixedLabel", "duplicateLabel", "duplicateCandidate"):
             check_idle(script, {key: True}, "blocked", "order_destination")
-        for key in ("noSelection", "noRadios", "noMain"):
+        for key in ("noSelection", "noRadios", "noMain", "onlyExisting", "disabled"):
             check_idle(script, {key: True}, "wait", "destination")
         for key in ("disabledPayment", "noPayment", "oldPaymentLabel"):
             check_idle(script, {"newSelected": True, key: True}, "wait", "destination")
@@ -3025,6 +3025,11 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
         browser._advance_checkout_path()
         browser._click_action.assert_not_called()
 
+        states = iter([{"onlyExisting": True}, {}, {"newSelected": True}, {"url": CHECKOUT_URL}])
+        browser._eval = lambda js: evaluate(js, next(states))["value"]
+        browser._advance_checkout_path()
+        self.assertEqual(browser._click_action.call_args_list, [mock.call("new-order"), mock.call("payment")])
+
         browser._eval = lambda script: scripts.append(script) or {"action": "ready"}
         browser._advance_checkout_path("123")
         existing_script = scripts[-1]
@@ -3035,9 +3040,9 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
             self.assertEqual(result["value"], {"action": action})
             self.assertEqual(result["marked"], [{"id": "old" if action == "previous_order" else "payment",
                                                 "action": action.replace("_", "-")}])
-        for key in ("wrongOrder", "duplicateExistingLabel", "disabledOld", "doubleSelection", "duplicatePayment"):
+        for key in ("wrongOrder", "duplicateExistingLabel", "doubleSelection", "duplicatePayment"):
             check_idle(existing_script, {"existingLabel": True, key: True}, "blocked", "order_destination")
-        for key in ("noSelection", "disabledPayment", "noPayment"):
+        for key in ("noSelection", "disabledOld", "disabledPayment", "noPayment"):
             check_idle(existing_script, {"existingLabel": True, key: True}, "wait", "destination")
 
         for selection_takes_effect in (True, False):
@@ -4660,7 +4665,9 @@ class MenyClientTests(unittest.TestCase):
 
     def test_readiness_evaluation_failure_can_settle_before_a_reload(self):
         client = self.client()
-        client._invoke = mock.Mock(side_effect=[{"url": "https://meny.no/varer"}, {}])
+        client._invoke = mock.Mock(side_effect=[
+            {"url": "https://meny.no/varer"}, HouseholdError("viewport unavailable")
+        ])
         client._site_shell_ready = mock.Mock(side_effect=[HouseholdError("evaluation timed out"), True])
         client._sleep = mock.Mock()
         client._open("https://meny.no/varer")

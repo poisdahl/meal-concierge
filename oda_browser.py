@@ -2315,13 +2315,17 @@ class OdaBrowser:
    const selected=radios.filter(x=>x.checked);
    if(!radios.length||!selected.length)return pending('destination');
    const existing=ORDER!==null;
-   const candidates=radios.filter(x=>enabled(x)&&[...x.labels].filter(label=>{
+   const candidates=radios.filter(x=>[...x.labels].filter(label=>{
      if(!visible(label)||!label.contains(x)||label.querySelectorAll('input[type="radio"]').length!==1)return false;
      const text=norm(label.innerText);
      return existing?/^Legg til i eksisterende bestilling(?:\s|$)/.test(text)&&text.split(/[^A-Za-z0-9_-]+/).filter(token=>token===ORDER).length===1:/^Lag en ny bestilling(?:\s|$)/.test(text);
    }).length===1);
-   if(candidates.length!==1||selected.length!==1||radios.some(x=>!visible(x)))return blocked('order_destination');
+   if(selected.length!==1||candidates.length>1||radios.some(x=>!visible(x)))return blocked('order_destination');
+   // Oda can render the preselected option before adding the other destination.
+   if(!candidates.length&&radios.length===1)return pending('destination');
+   if(!candidates.length)return blocked('order_destination');
    const target=candidates[0];
+   if(!enabled(target))return pending('destination');
    if(!target.checked){target.setAttribute('data-oda-household-action',existing?'previous-order':'new-order');return JSON.stringify({action:existing?'previous_order':'new_order'});}
    const payment=[...main.querySelectorAll('button')].filter(enabled).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===(existing?'Gå til betaling':'Fortsett'));
    if(!payment.length)return pending('destination');
