@@ -7241,15 +7241,13 @@ process.stdout.write(eval(script));
         client._sleep = mock.Mock()
         client._resolve_order_route = mock.Mock()
         label = "Legg til 1 stk Spaghetti 500g Sopps i handlevognen"
-        quantity = 2
-        mark_count = 0
-        clicks = []
 
         def product_control(action, delta, product):
-            nonlocal mark_count
+            nonlocal mark_count, replaced
             self.assertEqual((product, delta), (MENY_PRODUCT, 1))
             if action == "mark":
                 mark_count += 1
+                replaced = mark_count == 1 and stage == "initial"
             return {"ready": True, "authenticated": True, "quantity": quantity, "label": label}
 
         harness = r"""
@@ -7267,17 +7265,26 @@ global.document = {
 process.stdout.write(eval(script));
 """
         def observe(script):
-            # MENY replaces the first marked DOM node as the cart finishes rendering.
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness], text=True, capture_output=True, check=True,
-                input=json.dumps(dict(script=script, path=MENY_PRODUCT, label=label, marked=mark_count > 1)),
+                input=json.dumps(dict(script=script, path=MENY_PRODUCT, label=label, marked=not replaced)),
             )
             return json.loads(result.stdout)
 
         def invoke(*arguments):
-            nonlocal quantity
+            nonlocal quantity, replaced
+            if mark_count == 1 and stage == "scroll" and arguments[0] == "scrollintoview":
+                replaced = True
+                raise HouseholdError("selector no longer resolves")
             if arguments[:2] == ("get", "box"):
+                if mark_count == 1 and stage == "box":
+                    replaced = True
+                    return {}
                 return {"box": {"x": 100, "y": 200, "width": 20, "height": 10}}
+            if mark_count == 1 and stage == "hover" and arguments[:2] == ("mouse", "move"):
+                replaced = True
+            if arguments[:2] == ("mouse", "down"):
+                self.assertFalse(replaced)
             if arguments[:2] == ("mouse", "up"):
                 clicks.append(mark_count)
                 quantity += 1
@@ -7287,9 +7294,13 @@ process.stdout.write(eval(script));
         client._eval = observe
         client._invoke = invoke
         client._read_settled_cart = lambda: {"count": quantity}
-        self.assertEqual(client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]}),
-                         {"count": 4})
-        self.assertEqual(clicks, [2, 3])
+        for stage in ("initial", "scroll", "box", "hover"):
+            with self.subTest(stage=stage):
+                quantity, mark_count, replaced = 2, 0, False
+                clicks = []
+                result = client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
+                self.assertEqual(result, {"count": 4})
+                self.assertEqual(clicks, [2, 3])
 
     def test_cart_batch_preserves_first_click_when_second_is_obscured(self):
         from meny import MenyCartStoppedError
