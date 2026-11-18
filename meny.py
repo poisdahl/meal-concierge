@@ -1406,8 +1406,10 @@ class MenyClient:
                 previous = before.get("quantity")
                 if isinstance(previous, bool) or not isinstance(previous, int) or previous < 0:
                     raise HouseholdError("MENY product quantity is invalid")
+                def same_control() -> bool:
+                    return self._product_control("verify", delta, product) == before
                 try:
-                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch)
+                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch, same_control)
                     return previous
                 except _CartControlReplaced:
                     if attempt == 19:
@@ -1570,7 +1572,7 @@ class MenyClient:
     def _product_control(self, action: str, delta: int, product: str) -> dict[str, Any]:
         return self._eval(r"""
 (() => {
-  document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
+  if (ACTION !== 'verify') document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const headings = [...document.querySelectorAll('main h1')].filter(visible);
@@ -1598,14 +1600,14 @@ class MenyClient:
   ] : [quantity === 1 ? `Fjern ${name} fra handlevognen` : `Fjern 1 stk ${name} fra handlevognen`];
   const candidates = buttons.filter(button => labels.includes(norm(button.getAttribute('aria-label') || button.innerText)));
   if (candidates.length !== 1 || (DELTA < 0 && (quantity < 1 || !/^\d+(?: stk)?$/.test(selected)))) return JSON.stringify({ready:false, page_ready:true, authenticated:authenticated.length === 1, quantity});
-  candidates[0].setAttribute('data-meal-concierge-action', 'cart');
+  if (ACTION === 'mark') candidates[0].setAttribute('data-meal-concierge-action', 'cart');
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
   const label = norm(candidates[0].getAttribute('aria-label') || candidates[0].innerText);
   return JSON.stringify({ready:marked.length === 1 && marked[0] === candidates[0], page_ready:true, authenticated:authenticated.length === 1, quantity, label});
 })()
 """.replace("ACTION", json.dumps(action)).replace("DELTA", str(delta)).replace("PRODUCT", json.dumps(product)))
 
-    def _click_cart_control(self, product: str, label: str, before_dispatch: Any) -> None:
+    def _click_cart_control(self, product: str, label: str, before_dispatch: Any, same_control: Any) -> None:
         if not label:
             raise HouseholdError("MENY cart control identity is unavailable")
         selector = '[data-meal-concierge-action="cart"]'
@@ -1623,7 +1625,8 @@ class MenyClient:
   const bound = samePage && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL;
   if (!__CHECK_HIT__) return JSON.stringify({ready:bound});
   const hit = document.elementFromPoint(__HIT_X__, __HIT_Y__);
-  return JSON.stringify({clear:bound && Boolean(hit) && (hit === target || target.contains(hit))});
+  if (bound && !(hit && (hit === target || target.contains(hit)))) return JSON.stringify({blocked:true});
+  return JSON.stringify({clear:bound});
 })()
 """
         def observe(x: int | None = None, y: int | None = None) -> dict[str, Any]:
@@ -1654,6 +1657,25 @@ class MenyClient:
         clear = observe(x, y)
         if clear == {"replaced": True}:
             raise _CartControlReplaced("MENY cart control changed")
+        # Hover can resize the stepper or expose its caption. Re-read the
+        # same marked button and quantity, then hit-test its new centre before
+        # moving there. Never activate or dismiss an obstructing element.
+        for _ in range(5):
+            if clear != {"blocked": True}:
+                break
+            self._sleep(0.1)
+            box = self._find_box(self._invoke("get", "box", selector))
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                break
+            if not same_control():
+                break
+            new_x = round(box["x"] + box["width"] / 2)
+            new_y = round(box["y"] + box["height"] / 2)
+            clear = observe(new_x, new_y)
+            if clear == {"clear": True} and (new_x, new_y) != (x, y):
+                x, y = new_x, new_y
+                self._invoke("mouse", "move", str(x), str(y))
+                clear = observe(x, y) if same_control() else {"clear": False}
         if clear != {"clear": True}:
             raise HouseholdError("MENY cart control is obscured or changed")
         before_dispatch()

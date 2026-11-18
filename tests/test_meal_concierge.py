@@ -6910,12 +6910,12 @@ process.stdout.write(eval(script));
         client._open = mock.Mock()
         client._assert_authenticated = mock.Mock()
         client._product_control = mock.Mock(return_value={"ready": True, "authenticated": True, "quantity": 0, "label": "Legg Brokkoli i handlevognen"})
-        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch: before_dispatch())
+        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch, _same_control: before_dispatch())
         client._resolve_order_route = mock.Mock()
         client._wait_for_quantity = mock.Mock(return_value=1)
         client._change_one(MENY_PRODUCT, 1)
         self.assertEqual(client._assert_authenticated.call_count, 2)
-        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Legg Brokkoli i handlevognen", mock.ANY)
+        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Legg Brokkoli i handlevognen", mock.ANY, mock.ANY)
 
     def test_cart_change_waits_for_the_product_controls_to_render(self):
         client = self.client()
@@ -6926,14 +6926,14 @@ process.stdout.write(eval(script));
             {"ready": False, "page_ready": False, "authenticated": True},
             {"ready": True, "page_ready": True, "authenticated": True, "quantity": 1, "label": "Fjern Brokkoli fra handlevognen"},
         ])
-        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch: before_dispatch())
+        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch, _same_control: before_dispatch())
         client._resolve_order_route = mock.Mock()
         client._wait_for_quantity = mock.Mock(return_value=0)
 
         client._change_one(MENY_PRODUCT, -1)
 
         client._sleep.assert_called_once_with(0.25)
-        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Fjern Brokkoli fra handlevognen", mock.ANY)
+        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Fjern Brokkoli fra handlevognen", mock.ANY, mock.ANY)
 
     def test_cart_remove_falls_back_to_the_exact_cart_control(self):
         client = self.client()
@@ -7354,7 +7354,7 @@ process.stdout.write(eval(script));
         client._open = mock.Mock()
         client._assert_authenticated = mock.Mock()
         client._product_control = mock.Mock(return_value={"ready": True, "authenticated": True, "quantity": 0, "label": "Legg Brokkoli i handlevognen"})
-        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch: before_dispatch())
+        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch, _same_control: before_dispatch())
         client._wait_for_quantity = mock.Mock(side_effect=HouseholdError("MENY operation deadline reached"))
         with self.assertRaisesRegex(HouseholdError, "uncertain.*do not retry"):
             client._change_one(MENY_PRODUCT, 1)
@@ -7368,7 +7368,7 @@ process.stdout.write(eval(script));
         calls = []
         client._invoke = lambda *arguments, **_kwargs: calls.append(arguments) or ({"box": {"x": 1, "y": 2, "width": 20, "height": 10}} if arguments[:2] == ("get", "box") else {})
         with self.assertRaisesRegex(HouseholdError, "obscured or changed"):
-            client._click_cart_control(MENY_PRODUCT, "Legg Brokkoli i handlevognen", mock.Mock())
+            client._click_cart_control(MENY_PRODUCT, "Legg Brokkoli i handlevognen", mock.Mock(), mock.Mock())
         self.assertNotIn(("mouse", "down"), calls)
         self.assertIn("location.pathname ===", scripts[0])
         self.assertIn("aria-disabled", scripts[0])
@@ -7438,11 +7438,12 @@ global.location = new URL('https://meny.no' + path);
 global.getComputedStyle = () => ({display:'block', visibility:'visible'});
 const button = text => ({getBoundingClientRect:() => ({width:20, height:10}),
   getAttribute:key => key === 'aria-label' ? text : null});
-const account = button('Brukermeny'), stepper = button(label);
+const account = button('Brukermeny'), stepper = button(label), caption = button('Legg til');
+stepper.contains = child => child === caption;
 global.document = {
   querySelectorAll:selector => selector === 'button' ? [account, stepper] :
     selector === '[data-meal-concierge-action="cart"]' && marked ? [stepper] : [],
-  elementFromPoint:() => stepper,
+  elementFromPoint:() => caption,
 };
 process.stdout.write(eval(script));
 """
@@ -7483,6 +7484,62 @@ process.stdout.write(eval(script));
                 result = client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
                 self.assertEqual(result, {"count": 4})
                 self.assertEqual(clicks, [2, 3])
+
+    def test_cart_hover_rereads_the_marked_button_and_quantity_before_one_click(self):
+        for outcome in ("moves", "overlay", "changed_quantity", "changed_after_move", "stationary_changed", "lost_reply"):
+            with self.subTest(outcome=outcome):
+                client = self.client()
+                client._sleep = mock.Mock()
+                client._require_time = mock.Mock()
+                calls = []
+                label = "Legg til 1 stk Brokkoli i handlevognen"
+                before = {"ready": True, "page_ready": True, "authenticated": True, "quantity": 1, "label": label}
+                def product_control(action, delta, product):
+                    self.assertEqual((delta, product), (1, MENY_PRODUCT))
+                    moved_twice = ("mouse", "move", "65", "45") in calls
+                    changed = (outcome == "changed_quantity" or (outcome == "changed_after_move" and moved_twice)
+                               or (outcome == "stationary_changed" and sum(c[:2] == ("get", "box") for c in calls) >= 2))
+                    return {**before, "quantity": 2 if action == "verify" and changed else 1}
+
+                def invoke(*arguments):
+                    calls.append(arguments)
+                    if arguments[:2] == ("get", "box"):
+                        first = len([c for c in calls if c[:2] == ("get", "box")]) == 1
+                        x = 10 if first or outcome == "stationary_changed" else 50
+                        return {"box": {"x": x, "y": 40, "width": 30, "height": 10}}
+                    if outcome == "lost_reply" and arguments[:2] == ("mouse", "up"):
+                        raise HouseholdError("mouse reply lost")
+                    return {}
+
+                first_read = True
+                def observe(script):
+                    nonlocal first_read
+                    if first_read:
+                        first_read = False
+                        return {"ready": True}
+                    if (outcome == "stationary_changed" and "document.elementFromPoint(25, 45)" in script
+                            and sum(c[:2] == ("get", "box") for c in calls) >= 2):
+                        return {"clear": True}
+                    if "document.elementFromPoint(65, 45)" in script and outcome != "overlay":
+                        return {"clear": True}
+                    return {"blocked": True}
+
+                client._product_control = product_control
+                client._invoke = invoke
+                client._eval = observe
+                dispatch = mock.Mock()
+                if outcome == "moves":
+                    self.assertEqual(client._activate_product_control(MENY_PRODUCT, 1, dispatch), 1)
+                else:
+                    with self.assertRaises(HouseholdError):
+                        client._activate_product_control(MENY_PRODUCT, 1, dispatch)
+                dispatched = outcome in {"moves", "lost_reply"}
+                self.assertEqual(dispatch.call_count, int(dispatched))
+                self.assertEqual(calls.count(("mouse", "down")), int(dispatched))
+                self.assertEqual(calls.count(("mouse", "up")), int(dispatched))
+                self.assertEqual(calls.count(("mouse", "move", "65", "45")),
+                                 int(dispatched or outcome == "changed_after_move"))
+                self.assertLessEqual(client._sleep.call_count, 5)
 
     def test_cart_batch_preserves_first_click_when_second_is_obscured(self):
         from meny import MenyCartStoppedError

@@ -829,7 +829,7 @@ class GroceryTopupTests(unittest.TestCase):
         self.assertEqual(caught.exception.applied_operations, [])
         client._click_cart_control.assert_not_called()
         client._product_control.return_value = {"authenticated": True, "ready": True, "quantity": 1, "label": "add"}
-        def dispatched_then_failed(_product, _label, before_dispatch):
+        def dispatched_then_failed(_product, _label, before_dispatch, _same_control):
             before_dispatch()
             raise HouseholdError("transport response lost")
         client._click_cart_control.side_effect = dispatched_then_failed
