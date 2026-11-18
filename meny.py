@@ -2200,9 +2200,11 @@ __DELIVERY_BINDING__
   const identity = location.origin === 'https://meny.no' && location.pathname === '/varer' && !location.search && !location.hash;
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible);
-  const headings = dialogs.length === 1 ? [...dialogs[0].querySelectorAll('h1')].filter(visible) : [];
-  const heading = headings.length === 1 ? norm(headings[0].innerText) : '';
-  return JSON.stringify({ready:heading === 'Når skal vi levere til deg?', pickup:heading === 'Når ønsker du å hente varene?', identity, authenticated:authenticated.length === 1});
+  const delivery = 'Når skal vi levere til deg?', pickup = 'Når ønsker du å hente varene?';
+  const headings = dialogs.flatMap(dialog => [...dialog.querySelectorAll('h1')].filter(visible)
+    .map(h => norm(h.innerText)).filter(text => text === delivery || text === pickup));
+  const heading = headings.length === 1 ? headings[0] : '';
+  return JSON.stringify({ready:heading === delivery, pickup:heading === pickup, identity, authenticated:authenticated.length === 1});
 })()
 """)
             if ready.get("identity") is not True:

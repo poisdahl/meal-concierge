@@ -4956,7 +4956,7 @@ class MenyClientTests(unittest.TestCase):
         client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-open"]')
         self.assertEqual(client._sleep.call_args_list, [mock.call(0.25), mock.call(0.25)])
         self.assertIn("querySelectorAll('dialog,[role=\"dialog\"]')", scripts[-1])
-        self.assertIn("=== 'Når skal vi levere til deg?'", scripts[-1])
+        self.assertIn("'Når skal vi levere til deg?'", scripts[-1])
         self.assertIn("location.pathname === '/varer'", scripts[-1])
         self.assertIn("Brukermeny", scripts[-1])
         self.assertIn("dialogs.length !== 0", scripts[1])
@@ -4973,19 +4973,19 @@ global.location = new URL('https://meny.no/varer');
 global.getComputedStyle = () => ({display:'block', visibility:'visible'});
 const node = innerText => ({innerText, getAttribute:() => null,
   getBoundingClientRect:() => ({width:40, height:20})});
-const dialog = node('');
-dialog.querySelectorAll = selector => selector === 'h1' ? [node('Når ønsker du å hente varene?')] : [];
+const dialog = headings => ({...node(''), querySelectorAll:selector => selector === 'h1' ? headings.map(node) : []});
 global.document = {querySelectorAll(selector) {
   if (selector === 'button') return [node('Brukermeny')];
-  if (selector === 'dialog,[role="dialog"]') return [dialog];
+  if (selector === 'dialog,[role="dialog"]') return [dialog(['Hjelp']), dialog([...JSON.parse(process.argv[1]), 'Informasjon'])];
   return [];
 }};
 process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
 """
+        headings = ['Når ønsker du å hente varene?']
         def observe(script):
             if 'data-meal-concierge-action' in script:
                 return {"ready": True, "identity": True, "authenticated": True}
-            result = subprocess.run([shutil.which("node"), "-e", harness], input=script,
+            result = subprocess.run([shutil.which("node"), "-e", harness, json.dumps(headings)], input=script,
                                     text=True, capture_output=True, check=True)
             return json.loads(result.stdout)
 
@@ -4994,6 +4994,12 @@ process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
             client._delivery_slots()
         client._sleep.assert_not_called()
         client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-open"]')
+        headings = ['Når skal vi levere til deg?']
+        client._open_delivery_picker()
+        client._sleep.assert_not_called()
+        headings.append('Når ønsker du å hente varene?')
+        with self.assertRaisesRegex(HouseholdError, 'did not finish rendering'):
+            client._open_delivery_picker()
 
     def test_delivery_picker_tolerates_a_slow_native_dialog(self):
         client = self.client()
