@@ -1984,6 +1984,24 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "page changed"):
             browser._review_checkout(cart)
 
+        # Oda showed an old payment label immediately after navigation. It
+        # settled on the reviewed cart amount while the same page stayed open.
+        browser._navigate_to_checkout = mock.Mock()
+        browser._settle = mock.Mock()
+        reads = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"},
+                      {"expanded": True}, {**extracted, "total_matches": False},
+                      deepcopy(extracted), deepcopy(extracted_amounts)])
+        browser._eval = lambda _script: next(reads)
+        self.assertTrue(browser._review_checkout(cart)["total_matches"])
+        browser._navigate_to_checkout.assert_called_once_with()
+
+        reads = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"},
+                      {"expanded": True}, {**extracted, "total_matches": False},
+                      {**extracted, "address_matches": False}])
+        browser._eval = lambda _script: next(reads)
+        with self.assertRaisesRegex(HouseholdError, "address does not match"):
+            browser._review_checkout(cart)
+
         for changes, message in [
             ({"authenticated": False}, "browser login could not be verified"),
             ({"address_matches": False}, "address does not match"),
@@ -1992,8 +2010,9 @@ process.stdout.write(eval(script));
             ({"total_matches": False}, "does not match the reviewed cart"),
         ]:
             with self.subTest(changes=changes):
-                responses = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"}, {"expanded": True},
-                                  {**deepcopy(extracted), **changes}])
+                snapshots = 5 if changes == {"total_matches": False} else 1
+                responses = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"},
+                                  {"expanded": True}, *[{**extracted, **changes}] * snapshots])
                 browser._eval = lambda _script: next(responses)
                 with self.assertRaisesRegex(HouseholdError, message):
                     browser._review_checkout(cart)
@@ -2041,6 +2060,7 @@ process.stdout.write(eval(script));
             browser._expand_checkout_items = mock.Mock(return_value="items")
             browser._expand_checkout_amount_summary = mock.Mock()
             browser._read_checkout_amounts = mock.Mock(return_value={})
+            browser._settle = mock.Mock()
             browser._eval = mock.Mock(return_value=deepcopy(surface))
             return browser._review_checkout({})
 
