@@ -856,11 +856,18 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "needs_user_action" if self.integration.get("status") == "awaiting_login" else
             "unknown"
         )
+        oauth_connection = (
+            f"Use the household's private {self.provider.title()} sign-in. For a standalone installation, "
+            "run ./install.sh store-login in the owner's terminal with the original --home. For a host-managed "
+            "service, use its private login flow or have its runtime owner launch the active provider_oauth.py "
+            "with the configured token directory. Sign in to the same intended account as the checkout "
+            "browser and confirm the original delivery address before resuming an interrupted cart or order. Then ask me to check again."
+        )
         guidance = {
             "oda": {
                 "store_url": "https://oda.com/no/",
                 "account": "Use your own Oda account with complete contact and delivery details in a supported delivery area.",
-                "connection": "On the installation host, run ./install.sh store-login from the project directory, using the same --home as this installation. Sign in privately to Oda, then ask me to check the connection again. Use the same account and address in the dedicated checkout browser.",
+                "connection": oauth_connection,
                 "payment": "Choose saved_card or vipps in setup checkout_payment. During new-order preparation Oda automatically selects the configured method. Vipps requires the intended phone number in local private configuration. Saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
             },
             "meny": {
@@ -872,7 +879,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "mathem": {
                 "store_url": "https://www.mathem.se/",
                 "account": "Use your own Mathem account with complete contact and delivery details in a supported delivery area.",
-                "connection": "On the installation host, run ./install.sh store-login from the project directory, using the same --home as this installation. Sign in privately to Mathem, then ask me to check the connection again. Use the same account and address in the dedicated checkout browser.",
+                "connection": oauth_connection,
                 "payment": "Saved-card checkout requires one selected, usable saved card in the dedicated Mathem browser. Complete card entry and any bank approval on Mathem's website; complete other payment methods manually there.",
             },
         }[self.provider]
