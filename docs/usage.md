@@ -272,8 +272,16 @@ from pausing grocery planning or ordering. Confirm which activity you want to st
 separately. Neither requires starting a new household.
 
 If tools disappear, open a new conversation and ask the agent to inspect its
-connection to the existing service. If a store session expires, complete login
-again in the intended account. Preserve your installation and data while
+connection to the existing service. To check Oda or Mathem after a sign-in
+problem, ask your agent to check the store connection now. If sign-in is
+required, you or an agent you authorize in your local installation session can
+open a terminal as the household's runtime user and run `./install.sh store-login` from the project directory. Supply the
+same `--home` you used at installation if you chose a custom location. Sign in
+to the intended account in the browser, then ask your agent to check again.
+Headless installations can use the [private sign-in procedure](runtime-reference.md#provider-oauth).
+Keep credentials, callback codes and authorization links in the private login
+session. If a cart write or order was already in progress, the agent can read
+the original cart or order after reconnection. Preserve your installation and data while
 troubleshooting; do not reset them to resolve a missing tool or an uncertain order.
 
 ## Who chooses the food
