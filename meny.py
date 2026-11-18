@@ -2698,7 +2698,13 @@ __DELIVERY_BINDING__
   const delivery = valueAfter('Varene leveres') || (deliveredDates.length === 1 ? deliveredDates[0] : null);
   const code = valueAfter('Bestillingskode (for henting/levering)') || heading[0]?.replace(/^Bestilling\s+/, '') || null;
   const text = norm(root.innerText);
-  const status = /bestillingen er kansellert|kansellert bestilling/i.test(text) ? 'cancelled' : deliveredDates.length === 1 ? 'delivered' : /bestillingen kan oppdateres/i.test(text) ? 'confirmed' : 'unknown';
+  const cancelButtons = [...root.querySelectorAll('button')].filter(visible).filter(x =>
+    !x.disabled && x.getAttribute('aria-disabled') !== 'true' && norm(x.innerText) === 'Kanseller bestilling');
+  const currentOrder = location.origin === 'https://meny.no' && actual === expected &&
+    [`/trumf-profil/nettbutikk/bestilling/${expected}`, `/profil/nettbutikk/bestilling/${expected}`].includes(location.pathname);
+  const hasDialog = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"]')].some(visible);
+  const canCancel = currentOrder && cancelButtons.length === 1 && !hasDialog;
+  const status = /bestillingen er kansellert|kansellert bestilling/i.test(text) ? 'cancelled' : deliveredDates.length === 1 ? 'delivered' : /bestillingen kan oppdateres/i.test(text) || canCancel ? 'confirmed' : 'unknown';
   const itemButtons = [...root.querySelectorAll('button')].filter(visible).map(x => norm(x.innerText)).map(x => x.match(/^Bestilte varer \((\d+)\)$/)).filter(Boolean);
   const itemCount = itemButtons.length === 1 ? Number(itemButtons[0][1]) : null;
   const tables = [...root.querySelectorAll('table')].filter(visible).filter(table => {
@@ -2721,8 +2727,7 @@ __DELIVERY_BINDING__
   const buttons = [...root.querySelectorAll('button')].filter(visible).filter(x => /^Bestilte varer \(\d+\)$/.test(norm(x.innerText)));
   const expand = !rowsReady && buttons.length === 1 && buttons[0].getAttribute('aria-expanded') !== 'true';
   if (expand) buttons[0].setAttribute('data-meal-concierge-action', 'order-items');
-  const orderPaths = [`/trumf-profil/nettbutikk/bestilling/${expected}`, `/profil/nettbutikk/bestilling/${expected}`];
-  const baseReady = actual === expected && orderPaths.includes(location.pathname) && heading.length === 1 && Number.isFinite(total) && Boolean(delivery) && Number.isInteger(itemCount) && itemCount > 0;
+  const baseReady = currentOrder && heading.length === 1 && Number.isFinite(total) && Boolean(delivery) && Number.isInteger(itemCount) && itemCount > 0;
   return JSON.stringify({ready:baseReady && rowsReady, expand:baseReady && expand, authenticated:true, order_number:actual, code, status, total, order_total:orderTotal, delivery, item_count:itemCount, products});
 })()
 """.replace("EXPECTED", json.dumps(order_id))

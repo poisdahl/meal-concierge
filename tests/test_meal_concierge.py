@@ -5456,20 +5456,29 @@ process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
             client._get_order("99990001")
         script = client._eval.call_args.args[0]
         harness = r"""
-const {script, lines}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const {script, lines, controls=[], pathId="99990001", dialog=false}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:1,height:1})});
-const main={...node(lines.join('\n')),querySelectorAll:s=>s==='h1'?[node('Bestilling A01')]:[]};
+const buttons=controls.map(disabled=>({...node('Kanseller bestilling'),disabled}));
+const main={...node(lines.join('\n')),querySelectorAll:s=>s==='h1'?[node('Bestilling A01')]:s==='button'?buttons:[]};
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
-global.location={origin:'https://meny.no',pathname:'/trumf-profil/nettbutikk/bestilling/99990001'};
-global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[main]:[]};
+global.location={origin:'https://meny.no',pathname:'/trumf-profil/nettbutikk/bestilling/'+pathId};
+global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[main]:s.includes('dialog')&&dialog?[node('modal')]:[]};
 process.stdout.write(eval(script));
 """
         progress = ["Ordrenummer", "99990001", "Bekreftet", "Pakket", "På vei", "Levert"]
-        for extra, expected in (([], "unknown"), (["Bestillingen er kansellert"], "cancelled"),
-                                (["Bestillingen kan oppdateres"], "confirmed")):
-            with self.subTest(extra=extra):
+        for extra, controls, expected in (
+            ([], {}, "unknown"), (["Bestillingen er kansellert"], {}, "cancelled"),
+            (["Bestillingen kan oppdateres"], {}, "confirmed"),
+            ([], {"controls": [False]}, "confirmed"),
+            ([], {"controls": [False, False]}, "unknown"),
+            ([], {"controls": [True]}, "unknown"),
+            ([], {"controls": [False], "pathId": "99990002"}, "unknown"),
+            ([], {"controls": [False], "dialog": True}, "unknown"),
+            (["Bestillingen er kansellert"], {"controls": [False]}, "cancelled"),
+        ):
+            with self.subTest(extra=extra, controls=controls):
                 result = subprocess.run([shutil.which("node"), "-e", harness],
-                                        input=json.dumps({"script": script, "lines": progress + extra}),
+                                        input=json.dumps({"script": script, "lines": progress + extra, **controls}),
                                         text=True, capture_output=True, check=True)
                 self.assertEqual(json.loads(result.stdout)["status"], expected)
 
