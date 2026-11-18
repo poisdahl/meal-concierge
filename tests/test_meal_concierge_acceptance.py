@@ -596,6 +596,29 @@ class GroceryTopupTests(unittest.TestCase):
         self.assertEqual(store.read()["cart_change_receipts"][args["operation_id"]]["original_operation"], journal)
         self.assertFalse(store.read().get("pending_cart_change"))
 
+    def test_accept_physical_cart_after_original_menu_is_cleared(self):
+        store, provider, _, app, product = self.household()
+        original = provider.call
+        def lose(tool, args, **kwargs):
+            if tool == "manipulate_cart":
+                raise HouseholdError("lost cart reply")
+            return original(tool, args, **kwargs)
+        with mock.patch.object(provider, "call", side_effect=lose):
+            result = flow_fixture.CartPlanTests.sync(app, product, 2)
+        self.assertTrue(result["cart_write_pending"])
+        journal = store.read()["pending_cart_change"]
+        app.handle({"operation": "menu", "action": "clear", "menu_ref": journal["managed_menu"]})
+        shown = app.handle({"operation": "cart", "action": "get", "response_view": "agent"})
+        with mock.patch.object(provider, "call", wraps=provider.call) as reads:
+            accepted = app.handle({"operation": "cart", "action": "accept_current",
+                                   "cart_digest": shown["cart_digest"], "operation_id": shown["operation_id"]})
+            self.assertEqual([call.args[0] for call in reads.call_args_list], ["get_cart"])
+        self.assertEqual(accepted["status"], "owner_accepted_cart")
+        state = store.read()
+        self.assertIsNone(state.get("menu"))
+        self.assertIsNone(state.get("pending_cart_change"))
+        self.assertEqual(state["cart_change_receipts"][shown["operation_id"]]["original_operation"], journal)
+
     def test_matching_legacy_cart_with_unsubmitted_cancellation_recovers(self):
         store, provider, _, app, product = self.household()
         quantities = self.quantities(app, provider)

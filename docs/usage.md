@@ -300,6 +300,8 @@ A cart observation cannot confirm payment or an existing order change.
 
 An explicit request to empty the cart uses its freshly observed digest. The menu
 is retained, earlier product completion is invalidated, and an uncertain removal
-is reconciled before another write. An empty cart is not a cancelled order.
+is reconciled before another write. For an uncertain ordinary Oda or Mathem clear, you can also choose to keep
+the currently shown cart. The earlier removal may still arrive, so checkout
+reads the cart again. An empty cart is not a cancelled order.
 
 Ask “Which recipe sources are on?” to see saved recipes, collections, the selected retailer and recipe websites with their current priority. “Prefer my family collection and use store recipes occasionally” changes selection priority while both sources stay enabled. The planner rotates through active recipes as planning dates and saved history change, and keeps dietary and availability checks in force.

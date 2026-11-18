@@ -5176,16 +5176,17 @@ class PlanningOperations:
         if (not pending or not self._can_reread_ordinary_cart() or pending.get("provider") != self.provider
                 or not isinstance(pending.get("before"), dict) or not isinstance(pending.get("expected"), dict)
                 or not pending.get("operations") or "order_change" not in pending
-                or pending.get("native_cart_binding") or pending.get("native_managed") or pending.get("clear_requested")
+                or pending.get("native_cart_binding") or pending.get("native_managed")
                 or state.get("order_change") or pending.get("order_change") or state.get("pending_checkout")
                 or (cancellation and cancellation.get("status") != "awaiting_confirmation")
                 or state.get("pending_cart_change") != pending):
             return False
-        return not pending.get("managed_menu") or self._cart_menu_ref(state.get("menu")) == pending["managed_menu"]
+        return True
 
     def _matches_uncertain_cart_target(self, state, pending, live):
         return (self._ordinary_cart_observation_allowed(state, pending) and not pending.get("dispatch_finished")
-                and pending["expected"] == live)
+                and not pending.get("clear_requested") and pending["expected"] == live
+                and (not pending.get("managed_menu") or self._cart_menu_ref(state.get("menu")) == pending["managed_menu"]))
 
     def _archive_observed_cart_target(self, state, pending, live, *, owner_accepted=False):
         if not self._ordinary_cart_observation_allowed(state, pending) or (
@@ -5218,7 +5219,10 @@ class PlanningOperations:
         with self.store.locked() as state:
             self._archive_observed_cart_target(state, pending, live, owner_accepted=True)
             plan = state.get("cart_plan")
+            if pending.get("clear_requested"):
+                state.pop("product_plan_completion", None)
             if (isinstance(plan, dict) and plan.get("provider") == self.provider
+                    and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
                     and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu"))):
                 self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
                 self._set_cart_needs_input(plan, live, names)
@@ -6180,7 +6184,8 @@ class PlanningOperations:
                     observed_digest = {}
                 else:
                     pending_view["accept_current_available"] = True
-                    pending_view["next"] = "If the household accepts these quantities, use accept_current with this operation_id and cart_digest to continue without another write."
+                    pending_view["next"] = ("If the household accepts these quantities, use accept_current with this operation_id and cart_digest to continue without another write."
+                                            + (" Explain that the previous removal may still arrive." if pending.get("clear_requested") else ""))
             return {**cart, **observed_digest, **pending_view, **({"meal_concierge_cart_plan": self._cart_plan_view(plan, cart_contents(cart))} if isinstance(plan, Mapping) else {})}
         if action not in {"change", "apply", "set", "update", "clear", "ensure", "reconcile_change", "accept_current"}:
             raise HouseholdError("unknown cart action")
