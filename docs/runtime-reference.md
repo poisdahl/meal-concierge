@@ -268,7 +268,15 @@ of selecting external mode.
 
 ## Provider OAuth
 
-Run the helper with the installation's `current/venv/bin/python` and
+From the project directory on the installation host, run
+`./install.sh store-login` as the runtime owner. Select a custom installation
+using its existing `--home`. This uses the configured retailer, selected
+release and existing token directory. Add `--no-browser` for the private
+headless procedure below. After completing login, ask the agent to check the
+store connection. The status tool accepts `check_store_connection=true` to
+refresh Oda or Mathem connection status even when its previous check succeeded.
+
+You can also run the helper with the installation's `current/venv/bin/python` and
 `current/provider_oauth.py`. Use the exact token path from `runtime.json`; the
 following example uses explicit installation paths:
 

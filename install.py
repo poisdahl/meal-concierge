@@ -1251,13 +1251,14 @@ def connect_store(meta, args, home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['doctor', 'rollback', 'retention-preview', 'retention-apply', 'history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-program', 'resolve-recipe-conflict', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'connect-store', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['doctor', 'rollback', 'retention-preview', 'retention-apply', 'history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-program', 'resolve-recipe-conflict', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'connect-store', 'store-login', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
     parser.add_argument('--uv', help='explicit uv executable when it is not on the host PATH')
     parser.add_argument('--name', default='meal-concierge' if platform.system() == 'Linux' else 'com.meal-concierge')
     parser.add_argument('--provider', choices=['none', 'oda', 'meny', 'mathem'])
+    parser.add_argument('--no-browser', action='store_true', help='store-login: use the local private OAuth handoff for a headless host')
     parser.add_argument('--household')
     parser.add_argument('--adopt', action='store_true')
     parser.add_argument('--legacy-unit', help='exact already stopped native service owner for adoption')
@@ -1315,6 +1316,28 @@ def main():
         raise RuntimeError('--allow-recipe-removals requires --expected-sha256 for the exact pack')
     if any(getattr(args, 'browser_' + key) is not None for key in ('mode', 'display', 'xauthority')) and args.action not in {'install', 'update', 'connect-store', 'check-browser'}:
         raise RuntimeError('browser launch settings apply only to install, update, connect-store or check-browser')
+    if args.no_browser and args.action != 'store-login':
+        raise RuntimeError('--no-browser applies only to store-login')
+    if args.action == 'store-login':
+        if args.provider or args.tokens or args.code_root or args.config:
+            raise RuntimeError('store-login uses the existing installation provider and token location; select it with --home')
+        meta = completed_manifest(home)
+        code_root = Path(meta['code_root'])
+        with file_lock(code_root / '.installer.lock'):
+            if completed_manifest(home) != meta or bounded_json(code_root / 'owner.json').get('home') != str(home):
+                raise RuntimeError('store-login installation changed')
+            release = Path(meta['release'])
+            if (code_root / 'current').resolve(strict=True) != release.resolve(strict=True):
+                raise RuntimeError('complete the interrupted program switch before store-login')
+            provider = configured_provider(json.loads(Path(meta['paths']['config']).read_text()))
+            if provider == 'meny':
+                raise RuntimeError('Sign in to MENY in the existing dedicated browser profile.')
+            if provider == 'none':
+                raise RuntimeError('Connect a store before signing in.')
+            run(release / 'venv/bin/python', '-I', '-B', release / 'provider_oauth.py',
+                '--provider', provider, '--tokens', meta['paths']['tokens'],
+                *(['--no-browser'] if args.no_browser else []))
+        return
     if args.action == 'discover':
         print(json.dumps(discover(home), indent=2)); return
     if args.action == 'doctor':

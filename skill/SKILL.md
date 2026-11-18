@@ -9,6 +9,14 @@ Use this household's currently discovered Meal Concierge MCP tools. The service
 owns the configured household, recipe bank and any connected store/account/payment
 path. With `provider=none`, recipes, menus and ordinary shopping lists work
 without login. Do not require store, delivery or payment setup for these tasks.
+For an Oda or Mathem sign-in problem, call status with
+`check_store_connection=true`. If sign-in is required, explain the private
+owner login from `store_readiness.connection_check.next_action`. Only a host
+with an explicitly authorized terminal in the installation owner's session can
+launch that helper for the user. The owner completes the browser sign-in
+privately. When they return, check the connection and read the original cart or
+order before continuing any interrupted shopping.
+
 A name in conversation never selects another account. Start with saved preferences
 and, when resuming, `status.workflow.next_action`. That indicates unfinished work,
 not a new purchase mandate. Answer simple reads without starting a larger flow.

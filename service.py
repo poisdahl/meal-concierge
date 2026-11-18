@@ -667,7 +667,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     "admission_deadline_clock": time.monotonic()}
         if operation == "status":
             state = self.store.read()
-            if self.provider in {"oda", "mathem"} and self.integration.get("status") != "ready":
+            recheck = request.get("check_store_connection", False)
+            if type(recheck) is not bool:
+                raise HouseholdError("check_store_connection must be true or false")
+            if self.provider in {"oda", "mathem"} and (recheck or self.integration.get("status") != "ready"):
                 # OAuth can complete after service startup. Retry only the
                 # native connection probe; health stays a local liveness read.
                 self._refresh_integration()
@@ -862,7 +865,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "oda": {
                 "store_url": "https://oda.com/no/",
                 "account": "Use your own Oda account with complete contact and delivery details in a supported delivery area.",
-                "connection": "Complete standalone Oda OAuth and log the dedicated browser into the same intended Oda account and address.",
+                "connection": "On the installation host, run ./install.sh store-login from the project directory, using the same --home as this installation. Sign in privately to Oda, then ask me to check the connection again. Use the same account and address in the dedicated checkout browser.",
                 "payment": "Choose saved_card or vipps in setup checkout_payment. During new-order preparation Oda automatically selects the configured method. Vipps requires the intended phone number in local private configuration. Saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
             },
             "meny": {
@@ -874,7 +877,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "mathem": {
                 "store_url": "https://www.mathem.se/",
                 "account": "Use your own Mathem account with complete contact and delivery details in a supported delivery area.",
-                "connection": "Complete separate Mathem OAuth. Log the dedicated checkout browser into that same intended account and selected delivery address.",
+                "connection": "On the installation host, run ./install.sh store-login from the project directory, using the same --home as this installation. Sign in privately to Mathem, then ask me to check the connection again. Use the same account and address in the dedicated checkout browser.",
                 "payment": "Saved-card checkout requires one selected, usable saved card in the dedicated Mathem browser. Complete card entry and any bank approval on Mathem's website; complete other payment methods manually there.",
             },
         }[self.provider]

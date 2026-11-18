@@ -1237,6 +1237,14 @@ class ProviderLoginStatusTests(unittest.TestCase):
                 self.assertEqual(app.handle({'operation': 'health'})['integration']['status'], 'ready')
                 app.handle({'operation': 'status'})
                 self.assertEqual(calls, ['probe', 'probe', 'probe'])
+                result['error'] = provider.title() + ' login is required'
+                check = {'operation': 'status', 'response_view': 'agent', 'check_store_connection': True}
+                connection = app.handle(check)['store_readiness']['connection_check']
+                self.assertEqual(connection['status'], 'needs_user_action')
+                self.assertIn('store-login', connection['next_action'])
+                result.clear()
+                self.assertEqual(app.handle(check)['store_readiness']['connection_check']['status'], 'verified')
+                self.assertEqual(len(calls), 5)
                 self.assertEqual(shop.calls, [])
                 self.assertEqual(store.read(), before)
 
