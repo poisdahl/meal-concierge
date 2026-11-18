@@ -11,11 +11,12 @@ path. With `provider=none`, recipes, menus and ordinary shopping lists work
 without login. Do not require store, delivery or payment setup for these tasks.
 For an Oda or Mathem sign-in problem, call status with
 `check_store_connection=true`. If sign-in is required, explain the private
-owner login from `store_readiness.connection_check.next_action`. Only a host
-with an explicitly authorized terminal in the installation owner's session can
-launch that helper for the user. The owner completes the browser sign-in
-privately. When they return, check the connection and read the original cart or
-order before continuing any interrupted shopping.
+owner login from `store_readiness.connection_check.next_action`. Use the site's private login flow for host-managed installations. The runtime
+owner launches the helper in a private terminal and the account owner completes
+sign-in in their browser. Keep authorization files, callbacks and interactive
+terminal output out of the conversation. When they return, check the connection, confirm the original retailer account
+and delivery address, and read the original cart or order before continuing
+interrupted shopping.
 
 A name in conversation never selects another account. Start with saved preferences
 and, when resuming, `status.workflow.next_action`. That indicates unfinished work,

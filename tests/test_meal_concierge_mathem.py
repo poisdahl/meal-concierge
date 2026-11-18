@@ -1242,6 +1242,8 @@ class ProviderLoginStatusTests(unittest.TestCase):
                 connection = app.handle(check)['store_readiness']['connection_check']
                 self.assertEqual(connection['status'], 'needs_user_action')
                 self.assertIn('store-login', connection['next_action'])
+                self.assertIn('host-managed', connection['next_action'])
+                self.assertIn('configured token directory', connection['next_action'])
                 result.clear()
                 self.assertEqual(app.handle(check)['store_readiness']['connection_check']['status'], 'verified')
                 self.assertEqual(len(calls), 5)
