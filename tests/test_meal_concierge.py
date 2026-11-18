@@ -7405,7 +7405,7 @@ process.stdout.write(eval(script));
                 self.assertEqual(clicks, [2, 3])
 
     def test_cart_hover_rereads_the_marked_button_and_quantity_before_one_click(self):
-        for outcome in ("moves", "overlay", "changed_quantity", "changed_after_move", "lost_reply"):
+        for outcome in ("moves", "overlay", "changed_quantity", "changed_after_move", "stationary_changed", "lost_reply"):
             with self.subTest(outcome=outcome):
                 client = self.client()
                 client._sleep = mock.Mock()
@@ -7416,14 +7416,16 @@ process.stdout.write(eval(script));
                 def product_control(action, delta, product):
                     self.assertEqual((delta, product), (1, MENY_PRODUCT))
                     moved_twice = ("mouse", "move", "65", "45") in calls
-                    changed = outcome == "changed_quantity" or (outcome == "changed_after_move" and moved_twice)
+                    changed = (outcome == "changed_quantity" or (outcome == "changed_after_move" and moved_twice)
+                               or (outcome == "stationary_changed" and sum(c[:2] == ("get", "box") for c in calls) >= 2))
                     return {**before, "quantity": 2 if action == "verify" and changed else 1}
 
                 def invoke(*arguments):
                     calls.append(arguments)
                     if arguments[:2] == ("get", "box"):
                         first = len([c for c in calls if c[:2] == ("get", "box")]) == 1
-                        return {"box": {"x": 10 if first else 50, "y": 40, "width": 30, "height": 10}}
+                        x = 10 if first or outcome == "stationary_changed" else 50
+                        return {"box": {"x": x, "y": 40, "width": 30, "height": 10}}
                     if outcome == "lost_reply" and arguments[:2] == ("mouse", "up"):
                         raise HouseholdError("mouse reply lost")
                     return {}
@@ -7434,6 +7436,9 @@ process.stdout.write(eval(script));
                     if first_read:
                         first_read = False
                         return {"ready": True}
+                    if (outcome == "stationary_changed" and "document.elementFromPoint(25, 45)" in script
+                            and sum(c[:2] == ("get", "box") for c in calls) >= 2):
+                        return {"clear": True}
                     if "document.elementFromPoint(65, 45)" in script and outcome != "overlay":
                         return {"clear": True}
                     return {"blocked": True}

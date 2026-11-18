@@ -1664,10 +1664,10 @@ class MenyClient:
             if clear != {"blocked": True}:
                 break
             self._sleep(0.1)
-            if not same_control():
-                break
             box = self._find_box(self._invoke("get", "box", selector))
             if not box or box["width"] <= 0 or box["height"] <= 0:
+                break
+            if not same_control():
                 break
             new_x = round(box["x"] + box["width"] / 2)
             new_y = round(box["y"] + box["height"] / 2)
