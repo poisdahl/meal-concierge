@@ -8079,6 +8079,17 @@ process.stdout.write(eval(script));
         client._reset_checkout_review.assert_called_once_with()
         client._click_checkout_submit.assert_called_once()
 
+    def test_meny_prepare_recovers_from_transient_disabled_checkout(self):
+        client = self.client()
+        review = self.checkout_review()
+        client._review_checkout = mock.Mock(side_effect=[_CheckoutNotReadyError("disabled"), review])
+        client._reset_checkout_review = mock.Mock()
+        client._locked_operation = mock.MagicMock()
+        cart = {"items": [], "delivery": review["summary"]["delivery"]}
+        self.assertEqual(client.review_checkout(cart), review)
+        client._reset_checkout_review.assert_called_once_with()
+        self.assertEqual(client._review_checkout.call_args_list, [mock.call(cart, order_change=None)] * 2)
+
     def test_checkout_retry_reloads_the_exact_authenticated_wizard(self):
         client = self.client()
         client._eval = mock.Mock(return_value={"ready": True})

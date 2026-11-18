@@ -3040,6 +3040,15 @@ __DELIVERY_BINDING__
 
     def review_checkout(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None = None, deadline: float | None = None, allow_recovery: bool = False) -> dict[str, Any]:
         with self._locked_operation(MENY_ORDER_TIMEOUT, deadline, allow_recovery=allow_recovery):
+            return self._review_checkout_with_retry(cart, order_change=order_change)
+
+    def _review_checkout_with_retry(self, cart: Mapping[str, Any], *, order_change: Mapping[str, Any] | None) -> dict[str, Any]:
+        try:
+            return self._review_checkout(cart, order_change=order_change)
+        except _CheckoutNotReadyError:
+            # MENY can leave Next disabled while the wizard refreshes. Both
+            # reads finish before payment, and explicit cart errors propagate.
+            self._reset_checkout_review()
             return self._review_checkout(cart, order_change=order_change)
 
     def _reset_checkout_review(self) -> None:
@@ -3342,15 +3351,7 @@ __DELIVERY_BINDING__
                 guard = review.get("delivery_guard")
                 self._require_selected_delivery(review_delivery, guard, selected_slot=selected_slot)
                 final_cart["delivery"] = dict(review_delivery)
-                try:
-                    fresh = self._review_checkout(final_cart, order_change=order_change)
-                except _CheckoutNotReadyError:
-                    # The live site once exposed a transient disabled checkout
-                    # immediately after a successful prepare. Reset the
-                    # same-URL wizard before one full retry; neither attempt
-                    # reaches payment.
-                    self._reset_checkout_review()
-                    fresh = self._review_checkout(final_cart, order_change=order_change)
+                fresh = self._review_checkout_with_retry(final_cart, order_change=order_change)
                 if not meny_checkout_reviews_match(review, fresh):
                     raise HouseholdError("MENY checkout changed after review")
                 ready = self._eval(r"""
