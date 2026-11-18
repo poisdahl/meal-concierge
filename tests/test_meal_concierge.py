@@ -373,7 +373,7 @@ class FakeMeny(FakeOda):
             "target_order_code": (order_change or {}).get("code"),
         }
 
-    def submit_checkout(self, cart, review, before_click=None, *, order_change=None, deadline=None):
+    def submit_checkout(self, cart, review, before_click=None, *, order_change=None, selected_slot=None, deadline=None):
         if before_click:
             before_click()
             before_click()
@@ -383,8 +383,8 @@ class FakeMeny(FakeOda):
     def checkout_confirmation_order_id(self, *, deadline=None):
         return self.confirmation_order_id
 
-    def checkout_payment_awaiting_user(self, *, deadline=None):
-        return self.payment_waiting
+    def checkout_payment_handoff(self, total_ore, *, deadline=None):
+        return "sent" if self.payment_waiting else None
 
     def checkout_payment_not_dispatched(self, review, *, deadline=None):
         return self.payment_not_dispatched
@@ -3573,7 +3573,7 @@ phoneOnly.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],inpu
 buttonOnly.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?buttons:[];
 const paymentText=c.amountless?'':` ${c.amount||'256.50'}`;
 const currency=c.currency===false?'':'NOK';
-const baseText=c.sent?`${c.merchant===false?'Other':'Oda'} ${currency}${paymentText} We've sent a payment request to your phone Open Vipps`:
+const baseText=c.sent?`${c.merchant===false?'Other':'Oda'} ${currency}${paymentText} We've sent a payment request to +47 9000 0000 Open Vipps`:
  c.expired?'Oh no, your payment timed out Go back and try again. Go back':`Continue to pay with Vipps ${c.merchant===false?'Other':'Oda'} ${currency}${paymentText}`;
 const text=baseText+(c.extraText?` ${c.extraText}`:'');
 global.location=new URL(c.url||'https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque');
@@ -4956,10 +4956,50 @@ class MenyClientTests(unittest.TestCase):
         client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-open"]')
         self.assertEqual(client._sleep.call_args_list, [mock.call(0.25), mock.call(0.25)])
         self.assertIn("querySelectorAll('dialog,[role=\"dialog\"]')", scripts[-1])
-        self.assertIn("=== 'Når skal vi levere til deg?'", scripts[-1])
+        self.assertIn("'Når skal vi levere til deg?'", scripts[-1])
         self.assertIn("location.pathname === '/varer'", scripts[-1])
         self.assertIn("Brukermeny", scripts[-1])
         self.assertIn("dialogs.length !== 0", scripts[1])
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the signed-in MENY pickup picker")
+    def test_delivery_picker_identifies_pickup_without_reserving_or_changing_delivery_method(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._prepare_search = mock.Mock()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock()
+        harness = r"""
+global.location = new URL('https://meny.no/varer');
+global.getComputedStyle = () => ({display:'block', visibility:'visible'});
+const node = innerText => ({innerText, getAttribute:() => null,
+  getBoundingClientRect:() => ({width:40, height:20})});
+const dialog = headings => ({...node(''), querySelectorAll:selector => selector === 'h1' ? headings.map(node) : []});
+global.document = {querySelectorAll(selector) {
+  if (selector === 'button') return [node('Brukermeny')];
+  if (selector === 'dialog,[role="dialog"]') return [dialog(['Hjelp']), dialog([...JSON.parse(process.argv[1]), 'Informasjon'])];
+  return [];
+}};
+process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
+"""
+        headings = ['Når ønsker du å hente varene?']
+        def observe(script):
+            if 'data-meal-concierge-action' in script:
+                return {"ready": True, "identity": True, "authenticated": True}
+            result = subprocess.run([shutil.which("node"), "-e", harness, json.dumps(headings)], input=script,
+                                    text=True, capture_output=True, check=True)
+            return json.loads(result.stdout)
+
+        client._eval = observe
+        with self.assertRaisesRegex(HouseholdError, "pickup .*Levert på døren.*list delivery slots"):
+            client._delivery_slots()
+        client._sleep.assert_not_called()
+        client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-open"]')
+        headings = ['Når skal vi levere til deg?']
+        client._open_delivery_picker()
+        client._sleep.assert_not_called()
+        headings.append('Når ønsker du å hente varene?')
+        with self.assertRaisesRegex(HouseholdError, 'did not finish rendering'):
+            client._open_delivery_picker()
 
     def test_delivery_picker_tolerates_a_slow_native_dialog(self):
         client = self.client()
@@ -5029,6 +5069,48 @@ class MenyClientTests(unittest.TestCase):
         client._sleep.assert_called_once_with(0.25)
         client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-dismiss"]')
         client._wait_delivery_picker_closed.assert_called_once_with()
+
+    def test_delivery_checkout_rereads_an_inconclusive_selection_without_reserving(self):
+        client = self.client()
+        client._select_delivery_slot = mock.Mock()
+        label = "fra 49 kr fra 49 kroner, 23. november klokka 16:00 til 20:00"
+        slot = {"slot_id": label, "display": label, "date": "2026-11-23",
+                "start": "16:00", "end": "20:00", "selected": True}
+        another_label = label.replace("23. november", "24. november")
+        another = {**slot, "date": "2026-11-24", "display": another_label, "slot_id": another_label}
+        for initial in ([{**slot, "selected": False}], [slot, another]):
+            with self.subTest(initial_count=len(initial)):
+                client._read_delivery_picker = mock.Mock(side_effect=[initial, [slot]])
+                result = client._delivery_slots("2026-11-23", require_selected=True)
+                self.assertEqual(result["slots"], [normalize_meny_delivery_slot(slot)])
+                self.assertEqual(client._read_delivery_picker.call_count, 2)
+
+                # Check ambiguity across the full picker before filtering by date.
+                client._read_delivery_picker = mock.Mock(return_value=initial)
+                with self.assertRaisesRegex(HouseholdError, "selected delivery windows after rereading"):
+                    client._delivery_slots("2026-11-23", require_selected=True)
+                self.assertEqual(client._read_delivery_picker.call_count, 2)
+        client._read_delivery_picker = mock.Mock(return_value=[another])
+        with self.assertRaisesRegex(HouseholdError, "different delivery date selected"):
+            client._delivery_slots("2026-11-23", require_selected=True)
+        client._read_delivery_picker.assert_called_once_with()
+        client._select_delivery_slot.assert_not_called()
+
+    def test_submit_uses_the_final_provider_slot_and_verifies_its_window_and_price(self):
+        client = self.client()
+        client._read_delivery_picker = mock.Mock(side_effect=AssertionError("redundant picker read"))
+        label = "fra 49 kr fra 49 kroner, 23. november klokka 16:00 til 20:00"
+        slot = normalize_meny_delivery_slot({"slot_id": label, "display": label, "date": "2026-11-23",
+                                            "start": "16:00", "end": "20:00", "selected": True})
+        guard = {"selected": slot}
+        required = {"display": "mandag 23. november kl. 16:00-20:00"}
+        client._require_selected_delivery(required, guard, selected_slot=slot)
+        with self.assertRaisesRegex(HouseholdError, "price changed"):
+            client._require_selected_delivery(required, guard, selected_slot={**slot, "price_ore": 5000})
+        with self.assertRaisesRegex(HouseholdError, "delivery changed"):
+            client._require_selected_delivery({"display": "mandag 23. november kl. 15:00-20:00"}, guard,
+                                              selected_slot=slot)
+        client._read_delivery_picker.assert_not_called()
 
     def test_meny_price_label_drift_changes_display_without_changing_identity(self):
         client = self.client()
@@ -5361,6 +5443,45 @@ class MenyClientTests(unittest.TestCase):
         self.assertIn("/trumf-profil/nettbutikk/bestilling/", scripts[-1])
         self.assertIn("/profil/nettbutikk/bestilling/", scripts[-1])
 
+    @unittest.skipUnless(shutil.which("node"), "Node executes the merchant order-detail snapshot")
+    def test_order_progress_illustration_alone_does_not_confirm_order(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock(return_value={"requests": [{"requestId": "detail",
+            "method": "GET", "status": 200,
+            "url": "https://platform-rest-prod.ngdata.no/api/order/store/user/99990001"}]})
+        client._eval = mock.Mock(return_value={"ready": False, "authenticated": True})
+        with self.assertRaisesRegex(HouseholdError, "details changed"):
+            client._get_order("99990001")
+        script = client._eval.call_args.args[0]
+        harness = r"""
+const {script, lines, controls=[], pathId="99990001", dialog=false}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:1,height:1})});
+const buttons=controls.map(disabled=>({...node('Kanseller bestilling'),disabled}));
+const main={...node(lines.join('\n')),querySelectorAll:s=>s==='h1'?[node('Bestilling A01')]:s==='button'?buttons:[]};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.location={origin:'https://meny.no',pathname:'/trumf-profil/nettbutikk/bestilling/'+pathId};
+global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[main]:s.includes('dialog')&&dialog?[node('modal')]:[]};
+process.stdout.write(eval(script));
+"""
+        progress = ["Ordrenummer", "99990001", "Bekreftet", "Pakket", "På vei", "Levert"]
+        for extra, controls, expected in (
+            ([], {}, "unknown"), (["Bestillingen er kansellert"], {}, "cancelled"),
+            (["Bestillingen kan oppdateres"], {}, "confirmed"),
+            ([], {"controls": [False]}, "confirmed"),
+            ([], {"controls": [False, False]}, "unknown"),
+            ([], {"controls": [True]}, "unknown"),
+            ([], {"controls": [False], "pathId": "99990002"}, "unknown"),
+            ([], {"controls": [False], "dialog": True}, "unknown"),
+            (["Bestillingen er kansellert"], {"controls": [False]}, "cancelled"),
+        ):
+            with self.subTest(extra=extra, controls=controls):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "lines": progress + extra, **controls}),
+                                        text=True, capture_output=True, check=True)
+                self.assertEqual(json.loads(result.stdout)["status"], expected)
+
     def test_order_details_wait_for_a_late_response_or_reload_cache_and_use_deleted_status(self):
         for empty_reads, reloaded in ((5, False), (40, True)):
             with self.subTest(empty_reads=empty_reads, reloaded=reloaded):
@@ -5457,6 +5578,26 @@ class MenyClientTests(unittest.TestCase):
                 self.assertTrue(all(value == "latest" for value in body_reads[1:]))
                 self.assertLessEqual(len(body_reads), 8)
                 self.assertFalse(any(call.args[0] == "reload" for call in client._invoke.call_args_list))
+
+    def test_deleted_order_discovery_uses_bound_creation_time(self):
+        from meny import meny_order_provider_details
+        order_id = "99990001"
+        at = "2026-11-19T09:00:13.123+01:00"
+        exact = {"ngOrderId": order_id, "mwOrderId": "unrelated", "status": 99,
+                 "statusDescription": "DELETED", "orderCreated": at,
+                 "orderUpdated": "2026-11-19T11:25:15.278+01:00"}
+        def read(payload):
+            return meny_order_provider_details({"responseBody": json.dumps(payload)}, order_id)
+        self.assertEqual(read(exact), {"status": "cancelled", "merchant_deleted": True,
+                                       "merchant_created_at": at})
+        self.assertEqual(read({**exact, "statusDescription": "OPEN", "status": 1}), {"merchant_created_at": at})
+        for change in ({"status": 98}, {"status": "99"}, {"orderCreated": None},
+                       {"statusDescription": "OPEN"}, {"statusDescription": "CANCELLED"}):
+            with self.subTest(change=change):
+                self.assertNotIn("merchant_deleted", read({**exact, **change}))
+        with self.assertRaisesRegex(HouseholdError, "different order"):
+            read({**exact, "ngOrderId": "99990002"})
+        self.assertNotIn("merchant_deleted", read({k: v for k, v in exact.items() if k != "ngOrderId"}))
 
     def test_order_details_read_bound_full_total_separately_from_payment_reservation(self):
         for identity, amount, dom_total, error in (
@@ -6446,6 +6587,43 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "contradictory"):
             client._search("brokkoli", 5, "products")
 
+    def test_product_search_skips_only_rows_with_unverified_price_details(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._invoke = mock.Mock()
+        client._sleep = mock.Mock()
+        rows = [
+            {"product_id": f"/varer/fixture/pasta-{code}", "name": "Pasta",
+             "package": "500 g", "price": "20,00 kr", "available": True}
+            for code in range(1001, 1004)
+        ]
+        search = {"ready": True, "identity": True, "authenticated": True, "root_count": 1,
+                  "state_root_count": 1, "query_count": 1, "heading_count": 1, "products": rows}
+        pending = {"ready": False, "identity": True, "authenticated": True}
+        ready = {"ready": True, "identity": True, "authenticated": True,
+                 "original_labels": [], "current_labels": ["20,00 kroner."], "recycle": []}
+        contradictory = {**ready, "current_labels": ["21,00 kroner."]}
+        client._eval = mock.Mock(side_effect=[search, *([pending] * 40), contradictory, ready])
+        result = client._search("pasta", 3, "products")
+        self.assertEqual([p["product_ref"] for p in result["products"]], [rows[2]["product_id"]])
+        self.assertEqual(result["products"][0]["purchase_options"][0]["total_payable_ore"], 2000)
+        self.assertEqual(result["scope"]["requested_size"], 3)
+        self.assertEqual(result["scope"]["returned"], 1)
+        self.assertEqual(result["excluded_candidate_count"], 2)
+        self.assertEqual(result["excluded_candidate_reason"], "price_evidence_unavailable")
+
+        # A price failure affecting every observed row cannot become an empty catalog.
+        client._eval = mock.Mock(side_effect=[{**search, "products": rows[:1]}, *([pending] * 40)])
+        with self.assertRaisesRegex(HouseholdError, "price details did not finish rendering"):
+            client._search("pasta", 3, "products")
+        # Losing the session or transport after a successful price still fails the query.
+        for error in (HouseholdError("MENY login is required"), _BrowserTransportError("read failed")):
+            with self.subTest(error=type(error)):
+                client._eval = mock.Mock(side_effect=[search, ready, error])
+                with self.assertRaises(type(error)) as raised:
+                    client._search("pasta", 3, "products")
+                self.assertIs(raised.exception, error)
+
     def test_product_price_details_binds_one_public_detail_price_and_pant_state(self):
         client = self.client()
         client._open = mock.Mock()
@@ -6628,6 +6806,7 @@ process.stdout.write(eval(script));
             (1, "", "500g Sopps", [other_size], None),
             (1, "", "500g Sopps", [full, full], None),
             (1, "1 stk", "500g Sopps", [increase], increase),
+            (1, "2 stk", "500g Sopps", [increase], increase),
             (1, "", "", ["Legg til Spaghetti i handlevognen"], "Legg til Spaghetti i handlevognen"),
             (1, "", "500g Sopps", ["Legg Spaghetti i handlevognen"], "Legg Spaghetti i handlevognen"),
             (-1, "1 stk", "500g Sopps", [remove], remove),
@@ -6929,7 +7108,7 @@ process.stdout.write(eval(script));
         review = client._review_checkout(cart)
 
         self.assertEqual(review["summary"]["delivery"]["display"], "torsdag 3. september Kl. 07:00-08:00")
-        client._delivery_slots.assert_called_once_with()
+        client._delivery_slots.assert_called_once_with(require_selected=True)
         self.assertEqual(client._select_delivery_slot.call_args_list, [
             mock.call("meny:2026-09-03T07:00/08:00"),
             mock.call("meny:2026-09-03T07:00/08:00"),
@@ -6990,7 +7169,7 @@ process.stdout.write(eval(script));
         review = client._review_checkout(cart, order_change=change)
 
         self.assertEqual(review["summary"]["delivery"]["display"], "torsdag 3. september Kl. 07:00-08:00")
-        client._delivery_slots.assert_called_once_with()
+        client._delivery_slots.assert_called_once_with(require_selected=True)
         client._select_delivery_slot.assert_not_called()
         self.assertEqual(review["target_order_id"], "123")
         self.assertIn("Send oppdatering", client._eval.call_args.args[0])
@@ -7154,6 +7333,75 @@ process.stdout.write(eval(script));
                     self.assertNotIsInstance(caught.exception, MenyCartStoppedError)
                     self.assertIn("uncertain", str(caught.exception))
                     self.assertIn(("mouse", "down"), calls)
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the MENY cart pre-dispatch checks")
+    def test_repeated_increment_from_two_rebinds_a_replaced_stepper_before_dispatch(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._sleep = mock.Mock()
+        client._resolve_order_route = mock.Mock()
+        label = "Legg til 1 stk Spaghetti 500g Sopps i handlevognen"
+
+        def product_control(action, delta, product):
+            nonlocal mark_count, replaced
+            self.assertEqual((product, delta), (MENY_PRODUCT, 1))
+            if action == "mark":
+                mark_count += 1
+                replaced = mark_count == 1 and stage == "initial"
+            return {"ready": True, "authenticated": True, "quantity": quantity, "label": label}
+
+        harness = r"""
+const {script, path, label, marked} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+global.location = new URL('https://meny.no' + path);
+global.getComputedStyle = () => ({display:'block', visibility:'visible'});
+const button = text => ({getBoundingClientRect:() => ({width:20, height:10}),
+  getAttribute:key => key === 'aria-label' ? text : null});
+const account = button('Brukermeny'), stepper = button(label);
+global.document = {
+  querySelectorAll:selector => selector === 'button' ? [account, stepper] :
+    selector === '[data-meal-concierge-action="cart"]' && marked ? [stepper] : [],
+  elementFromPoint:() => stepper,
+};
+process.stdout.write(eval(script));
+"""
+        def observe(script):
+            result = subprocess.run(
+                [shutil.which("node"), "-e", harness], text=True, capture_output=True, check=True,
+                input=json.dumps(dict(script=script, path=MENY_PRODUCT, label=label, marked=not replaced)),
+            )
+            return json.loads(result.stdout)
+
+        def invoke(*arguments):
+            nonlocal quantity, replaced
+            if mark_count == 1 and stage == "scroll" and arguments[0] == "scrollintoview":
+                replaced = True
+                raise HouseholdError("selector no longer resolves")
+            if arguments[:2] == ("get", "box"):
+                if mark_count == 1 and stage == "box":
+                    replaced = True
+                    return {}
+                return {"box": {"x": 100, "y": 200, "width": 20, "height": 10}}
+            if mark_count == 1 and stage == "hover" and arguments[:2] == ("mouse", "move"):
+                replaced = True
+            if arguments[:2] == ("mouse", "down"):
+                self.assertFalse(replaced)
+            if arguments[:2] == ("mouse", "up"):
+                clicks.append(mark_count)
+                quantity += 1
+            return {}
+
+        client._product_control = product_control
+        client._eval = observe
+        client._invoke = invoke
+        client._read_settled_cart = lambda: {"count": quantity}
+        for stage in ("initial", "scroll", "box", "hover"):
+            with self.subTest(stage=stage):
+                quantity, mark_count, replaced = 2, 0, False
+                clicks = []
+                result = client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
+                self.assertEqual(result, {"count": 4})
+                self.assertEqual(clicks, [2, 3])
 
     def test_cart_batch_preserves_first_click_when_second_is_obscured(self):
         from meny import MenyCartStoppedError
@@ -7501,14 +7749,14 @@ process.stdout.write(eval(script));
             {"requests": [{"method": "POST", "status": 201, "url": "https://platform-rest-prod.ngdata.no/api/order/payment"}]},
         ])
 
-        client._wait_for_vipps_dispatch()
+        client._wait_for_vipps_dispatch(total_ore=47190)
 
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("network", "requests"),
             mock.call("network", "requests"),
         ])
         client._sleep.assert_called_once_with(0.25)
-        client._complete_vipps_request.assert_called_once_with()
+        client._complete_vipps_request.assert_called_once_with(47190)
 
     def test_meny_update_waits_for_delayed_same_order_receipt_without_vipps(self):
         client = self.client()
@@ -7525,7 +7773,7 @@ process.stdout.write(eval(script));
         # The caller already holds the non-reentrant browser lock.
         client.lock.acquire()
         try:
-            self.assertFalse(client._wait_for_vipps_dispatch(target_order_id="123"))
+            self.assertFalse(client._wait_for_vipps_dispatch(total_ore=47190, target_order_id="123"))
         finally:
             client.lock.release()
         client._complete_vipps_request.assert_not_called()
@@ -7543,8 +7791,8 @@ process.stdout.write(eval(script));
             {"authenticated": True, "blank": False, "vipps_gateway": False, "order_id": None},
             {"authenticated": False, "blank": False, "vipps_gateway": True, "order_id": None},
         ])
-        self.assertTrue(client._wait_for_vipps_dispatch(target_order_id="123"))
-        client._complete_vipps_request.assert_called_once_with()
+        self.assertTrue(client._wait_for_vipps_dispatch(total_ore=47190, target_order_id="123"))
+        client._complete_vipps_request.assert_called_once_with(47190)
         client._sleep.assert_called_once_with(0.25)
 
     def test_meny_update_post_without_matching_receipt_or_gateway_is_uncertain(self):
@@ -7562,7 +7810,7 @@ process.stdout.write(eval(script));
                     "vipps_gateway": False, "order_id": observed,
                 })
                 with self.assertRaises(HouseholdError) as caught:
-                    client._wait_for_vipps_dispatch(target_order_id="123")
+                    client._wait_for_vipps_dispatch(total_ore=47190, target_order_id="123")
                 self.assertNotIsInstance(caught.exception, CheckoutPreconditionError)
                 client._complete_vipps_request.assert_not_called()
                 self.assertTrue(all(call.args == ("network", "requests") for call in client._invoke.call_args_list))
@@ -7573,7 +7821,7 @@ process.stdout.write(eval(script));
         client._invoke = mock.Mock(return_value={"requests": []})
 
         with self.assertRaisesRegex(HouseholdError, "uncertain.*do not retry"):
-            client._wait_for_vipps_dispatch()
+            client._wait_for_vipps_dispatch(total_ore=47190)
 
         self.assertEqual(client._invoke.call_count, 40)
         self.assertEqual(client._sleep.call_count, 39)
@@ -7585,7 +7833,7 @@ process.stdout.write(eval(script));
         exact_checkout = mock.Mock(return_value=True)
 
         with self.assertRaisesRegex(CheckoutPreconditionError, "did not dispatch.*fresh prepare"):
-            client._wait_for_vipps_dispatch(exact_checkout)
+            client._wait_for_vipps_dispatch(exact_checkout, total_ore=47190)
 
         self.assertEqual(client._invoke.call_count, 41)
         self.assertEqual(exact_checkout.call_count, 2)
@@ -7598,7 +7846,7 @@ process.stdout.write(eval(script));
         known_failure = mock.Mock(return_value={"reservation_expired": True})
 
         with self.assertRaisesRegex(CheckoutPreconditionError, "reservation expired.*same delivery time"):
-            client._wait_for_vipps_dispatch(exact_checkout, known_failure)
+            client._wait_for_vipps_dispatch(exact_checkout, known_failure, total_ore=47190)
 
         self.assertEqual(client._invoke.call_count, 40)
         known_failure.assert_called_once_with()
@@ -7622,11 +7870,13 @@ process.stdout.write(eval(script));
         client = self.client()
         client._sleep = mock.Mock()
         client._eval = mock.Mock(side_effect=[
-            {"identity": True, "ready": True, "sent": False},
+            {"state": "gateway", "session": "fixture"},
+            {"state": "phone", "session": "fixture"},
+            {"state": "phone", "session": "fixture"},
             {"ready": True},
             {"ready": True},
             {"ready": True},
-            {"sent": True},
+            {"state": "sent"},
         ])
 
         def invoke(*arguments):
@@ -7636,10 +7886,9 @@ process.stdout.write(eval(script));
 
         client._invoke = mock.Mock(side_effect=invoke)
 
-        client._complete_vipps_request()
+        client._complete_vipps_request(47190)
 
         self.assertEqual(client._invoke.call_args_list, [
-            mock.call("fill", 'input[name="phone-number"]', "90000000"),
             mock.call("scrollintoview", '[data-meal-concierge-action="vipps-next"]'),
             mock.call("get", "box", '[data-meal-concierge-action="vipps-next"]'),
             mock.call("mouse", "move", "25", "40"),
@@ -7647,6 +7896,89 @@ process.stdout.write(eval(script));
             mock.call("mouse", "up"),
         ])
         self.assertTrue(all("Remember my number" not in str(call) for call in client._invoke.call_args_list))
+
+    def test_slow_vipps_render_can_recover_an_already_sent_request_without_a_click(self):
+        client = self.client()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock()
+        client._eval = mock.Mock(side_effect=[
+            *([{"state": "gateway", "session": "fixture"}] * 60),
+            {"state": "sent", "session": "fixture"},
+        ])
+        client._complete_vipps_request(47190)
+        self.assertEqual(client._sleep.call_count, 60)
+        client._invoke.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the hosted Vipps form fixture")
+    def test_hosted_vipps_phone_form_verifies_the_merchant_amount_and_same_session(self):
+        client = self.client()
+        script = r"""
+const assert=require('node:assert/strict');
+global.crypto=require('node:crypto').webcrypto;
+global.location=new URL('https://api.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=fixture');
+const remember={checked:false};
+const verifiedText='Continue to pay with Vipps\nMENY Levert hjem Oslo\nMENY MLH AS\n471.90 NOK';
+const attrs={};
+const button={innerText:'Next',disabled:true,getAttribute:()=>null,contains:()=>false,
+ setAttribute:(k,v)=>attrs[k]=v,removeAttribute:k=>delete attrs[k]};
+global.HTMLInputElement=class {
+ get value(){return this._value||''} set value(v){this._value=v}
+ dispatchEvent(){button.disabled=this.value.length!==8}
+};
+const phone=new HTMLInputElement();
+for (const node of [button,phone]) node.getBoundingClientRect=()=>({width:30,height:20});
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.document={body:{innerText:verifiedText},elementFromPoint:()=>button,querySelectorAll:s=>
+ s==='button'?[button]:s==='input[type="tel"][name="phone-number"]'?[phone]:s==='input[type="checkbox"]'?[remember]:[]};
+const execute=async s=>JSON.parse(await eval(s));
+(async()=>{
+ const original=await execute(c.observe);
+ assert.equal(original.state,'phone');
+ const bound=s=>s.replaceAll('"fixture_digest"',JSON.stringify(original.session));
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ await execute(bound(c.fill));
+ assert.equal(phone.value,'90000000');
+ assert.equal((await execute(bound(c.gate))).ready,true);
+ remember.checked=true;
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ assert.equal((await execute(bound(c.hit))).ready,false);
+ assert.equal(remember.checked,true);
+ assert.equal(phone.value,'90000000');
+ remember.checked=false;
+ document.elementFromPoint=()=>phone;
+ assert.equal((await execute(bound(c.hit))).ready,false);
+ document.body.innerText=verifiedText.replace('471.90','471.91');
+ assert.equal((await execute(c.observe)).state,'mismatch');
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ document.body.innerText=verifiedText.replaceAll('MENY','Other');
+ assert.equal((await execute(c.observe)).state,'mismatch');
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ document.body.innerText=verifiedText;
+ phone.value='81111111';
+ await execute(bound(c.fill));
+ assert.equal(phone.value,'81111111');
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ location.search='?token=different';
+ assert.equal((await execute(bound(c.observe_bound))).state,'absent');
+ document.body.innerText=verifiedText+"\nWe've sent a payment request to +47 9000 0000\nOpen Vipps";
+ assert.equal((await execute(c.observe)).state,'sent');
+ document.body.innerText=document.body.innerText.replace('9000 0000','8000 0001');
+ assert.equal((await execute(c.observe)).state,'mismatch');
+ document.body.innerText='Loading…';
+ assert.equal((await execute(c.observe)).state,'gateway');
+ document.body.innerText='This payment request has expired';
+ assert.equal((await execute(c.observe)).state,'absent');
+ location.hostname='merchant.example';
+ assert.equal((await execute(c.observe)).state,'absent');
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        cases = {"observe": client._vipps_gateway("observe", 47190),
+                 "observe_bound": client._vipps_gateway("observe", 47190, "fixture_digest"),
+                 "gate": client._vipps_gateway("gate", 47190, "fixture_digest"),
+                 "hit": client._vipps_gateway("gate", 47190, "fixture_digest", (10, 10)),
+                 "fill": client._vipps_gateway("fill", 47190, "fixture_digest")}
+        subprocess.run(["node", "-e", "const c=" + json.dumps(cases) + ";\n" + script],
+                       text=True, capture_output=True, check=True)
 
     def test_vipps_submit_requires_the_private_phone_before_the_meny_click(self):
         client = self.client()
@@ -7745,6 +8077,33 @@ process.stdout.write(eval(script));
             client.checkout_confirmation_order_id()
         self.assertEqual(client._invoke.call_args_list, [mock.call("reload")])
 
+    def test_checkout_hidden_account_recovers_exact_page_without_navigation(self):
+        detail = "https://meny.no/trumf-profil/nettbutikk/bestilling/7631908"
+        receipt = "https://meny.no/kassen/bekreftelse"
+        for url, key in ((detail, "detail_order_id"), (receipt, "order_id")):
+            with self.subTest(url=url):
+                client = self.client()
+                hidden = {"exact_url": url, "hidden_account": True, "authenticated": False}
+                rendered = {"exact_url": url, "authenticated": True}
+                client._eval = mock.Mock(side_effect=[hidden, hidden, rendered, {**rendered, key: "7631908"}])
+                client._invoke = mock.Mock()
+                client._sleep = mock.Mock()
+                self.assertEqual(client._checkout_confirmation_snapshot()[key], "7631908")
+                client._invoke.assert_called_once_with("set", "viewport", "1280", "900")
+                self.assertEqual(client._sleep.call_count, 2)
+
+        for after, error in (({"exact_url": receipt}, "page changed"),
+                             ({"exact_url": detail, "authenticated": False}, "login is required"),
+                             ({"exact_url": detail, "authenticated": True}, "identity did not finish")):
+            with self.subTest(after=after):
+                client = self.client()
+                client._eval = mock.Mock(side_effect=[{"exact_url": detail, "hidden_account": True}] + [after] * 8)
+                client._invoke = mock.Mock()
+                client._sleep = mock.Mock()
+                with self.assertRaisesRegex(HouseholdError, error):
+                    client._checkout_confirmation_snapshot()
+                client._invoke.assert_called_once_with("set", "viewport", "1280", "900")
+
     @unittest.skipUnless(shutil.which("node"), "Node executes the receipt URL boundary")
     def test_checkout_receipt_snapshot_requires_one_exact_receipt_identity(self):
         client = self.client()
@@ -7752,11 +8111,11 @@ process.stdout.write(eval(script));
         client._checkout_confirmation_snapshot()
         script = client._eval.call_args.args[0]
         harness = r"""
-const {script,url}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
-const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:1,height:1})});
+const {script,url,receiptText='Bestillingen er oppdatert',hidden=false}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:hidden&&text==='Brukermeny'?0:1,height:1})});
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.location={href:url};
-global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[node('Bestillingen er oppdatert')]:[]};
+global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[node(receiptText)]:[]};
 process.stdout.write(eval(script));
 """
         valid = "https://meny.no/kassen/bekreftelse?orderid=7631908"
@@ -7772,19 +8131,60 @@ process.stdout.write(eval(script));
                 self.assertEqual(snapshot["receipt_url"], valid if url == valid else None)
                 self.assertEqual(snapshot["order_id"], "7631908" if url == valid else None)
 
+        receipt = "https://meny.no/kassen/bekreftelse"
+        for url, receipt_text, expected in (
+            (receipt, "TAKK FOR BESTILLINGEN!\nOrdrenummer\n7631908", "7631908"),
+            (receipt, "Takk for bestillingen!\nOrdrenummer: 7631908", "7631908"),
+            (receipt, "Takk for bestillingen!\n7631908", None),
+            (receipt, "Ordrenummer\n7631908", None),
+            (receipt, "Ordrebekreftelse\nOrdrenummer\n7631908\nOrdrenummer\n7631909", None),
+            (valid, "Ordrebekreftelse\nOrdrenummer\n7631909", None),
+            (valid, "Ordrebekreftelse\nOrdrenummer\nugyldig", None),
+            (receipt.replace("meny.no", "example.org"), "Ordrebekreftelse\nOrdrenummer\n7631908", None),
+        ):
+            with self.subTest(url=url, receipt_text=receipt_text):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "url": url, "receiptText": receipt_text}),
+                                        text=True, capture_output=True, check=True)
+                self.assertEqual(json.loads(result.stdout)["order_id"], expected)
+        detail = "https://meny.no/trumf-profil/nettbutikk/bestilling/7631908"
+        for url, label, expected in (
+            (detail, "Ordrenummer\n7631908", "7631908"),
+            (detail, "Ordrenummer\n7631909", None),
+            (detail, "7631908", None),
+            (detail.replace("meny.no", "example.org"), "Ordrenummer\n7631908", None),
+            (detail + "?orderid=7631908", "Ordrenummer\n7631908", None),
+        ):
+            with self.subTest(detail_url=url, label=label):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "url": url, "receiptText": label}),
+                                        text=True, capture_output=True, check=True)
+                snapshot = json.loads(result.stdout)
+                self.assertIsNone(snapshot["order_id"])
+                self.assertEqual(snapshot["detail_order_id"], expected)
+
+        for url, eligible in ((detail, True), (receipt, True), (valid, True),
+                              (valid + "&other=1", False), (detail.replace("meny.no", "example.org"), False),
+                              ("https://api.vipps.no/dwo-api-application/v1/deeplink/vippsgateway", False),
+                              ("https://meny.no/kassen", False)):
+            with self.subTest(hidden_header_url=url):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "url": url, "hidden": True}),
+                                        text=True, capture_output=True, check=True)
+                snapshot = json.loads(result.stdout)
+                self.assertEqual(snapshot["hidden_account"], eligible)
+                self.assertFalse(snapshot["authenticated"])
+                self.assertIsNone(snapshot["detail_order_id"])
+
     def test_checkout_reconcile_keeps_the_vipps_waiting_page_alive(self):
         client = self.client()
         client._locked_operation = mock.MagicMock()
         client._sleep = mock.Mock()
-        client._eval = mock.Mock(side_effect=[
-            {"waiting": True},
-            {"waiting": True},
-            {"waiting": False},
-        ])
-
-        self.assertFalse(client.checkout_payment_awaiting_user())
-        self.assertEqual(client._sleep.call_count, 2)
-        self.assertIn("We've sent a payment request to", client._eval.call_args.args[0])
+        client._eval = mock.Mock(side_effect=[{"state": "sent"}, {"state": "absent"}])
+        self.assertEqual(client.checkout_payment_handoff(47190), "sent")
+        self.assertIsNone(client.checkout_payment_handoff(47190))
+        client._sleep.assert_not_called()
+        self.assertIn("sent a payment request", client._eval.call_args.args[0])
 
     def test_checkout_submit_does_not_open_dispatch_fence_when_post_hover_gate_fails(self):
         client = self.client()
@@ -7846,7 +8246,7 @@ process.stdout.write(eval(script));
             review["summary"]["delivery"],
         )
         self.assertIsNotNone(cart["delivery"])
-        client._require_selected_delivery.assert_called_once_with(review["summary"]["delivery"])
+        client._require_selected_delivery.assert_called_once_with(review["summary"]["delivery"], None, selected_slot=None)
         client._click_checkout_submit.assert_called_once()
         self.assertEqual(client._click_checkout_submit.call_args.args[0], review)
         self.assertTrue(callable(client._click_checkout_submit.call_args.args[1]))
@@ -7875,7 +8275,7 @@ process.stdout.write(eval(script));
         client = self.client()
         review = self.checkout_review()
         client._require_selected_delivery = mock.Mock()
-        client._review_checkout = mock.Mock(side_effect=[
+        client._review_checkout_wizard = mock.Mock(side_effect=[
             _CheckoutNotReadyError("MENY checkout cannot continue"),
             review,
         ])
@@ -7883,12 +8283,39 @@ process.stdout.write(eval(script));
         client._eval = mock.Mock(return_value={"ready": True})
         client._click_checkout_submit = mock.Mock(return_value=True)
 
-        result = client.submit_checkout({"items": [], "delivery": review["summary"]["delivery"]}, review)
+        result = client.submit_checkout(review["summary"], review)
 
         self.assertTrue(result["awaiting_user_payment"])
-        self.assertEqual(client._review_checkout.call_count, 2)
+        self.assertEqual(client._review_checkout_wizard.call_count, 2)
         client._reset_checkout_review.assert_called_once_with()
         client._click_checkout_submit.assert_called_once()
+
+    def test_meny_prepare_retries_disabled_step_without_reserving_delivery_again(self):
+        client = self.client()
+        review = self.checkout_review()
+        client._review_checkout_wizard = mock.Mock(side_effect=[_CheckoutNotReadyError("disabled"), review])
+        client._reset_checkout_review = mock.Mock()
+        client._locked_operation = mock.MagicMock()
+        slot = normalize_meny_delivery_slot({
+            "slot_id": "3. september klokka 07:00 til 08:00",
+            "date": "2026-09-03",
+            "start": "07:00",
+            "end": "08:00",
+            "display": "3. september klokka 07:00 til 08:00",
+            "selected": True,
+        })
+        client._delivery_slots = mock.Mock(return_value={"slots": [slot]})
+        client._select_delivery_slot = mock.Mock()
+        cart = {**review["summary"], "delivery": None}
+
+        self.assertEqual(client.review_checkout(cart), review)
+        client._reset_checkout_review.assert_called_once_with()
+        expected = client._review_checkout_wizard.call_args.args[0]
+        self.assertEqual(expected["delivery"]["slot_ref"], slot["slot_ref"])
+        self.assertEqual(client._review_checkout_wizard.call_args_list, [mock.call(expected, order_change=None)] * 2)
+        client._delivery_slots.assert_called_once_with(require_selected=True)
+        client._select_delivery_slot.assert_called_once_with(slot["slot_ref"])
+        self.assertIsNone(cart["delivery"])
 
     def test_checkout_retry_reloads_the_exact_authenticated_wizard(self):
         client = self.client()
@@ -8901,7 +9328,7 @@ class FlowTests(unittest.TestCase):
             self.assertTrue(reconciled["confirmed"])
             self.assertIsNone(store.read()["pending_checkout"])
             reconcile_calls = provider.call.call_args_list[reconcile_start:]
-            self.assertEqual(len(reconcile_calls), 3)
+            self.assertEqual([call.args[0] for call in reconcile_calls], ["get_order", "order_tracking"])
             self.assertTrue(all(call.kwargs.get("deadline") == 620.0 for call in reconcile_calls))
             self.assertEqual(provider.checkout_confirmation_order_id.call_args.kwargs["deadline"], 620.0)
             with self.assertRaisesRegex(HouseholdError, "cart_ready"):
@@ -8931,7 +9358,7 @@ class FlowTests(unittest.TestCase):
             original_call = provider.call
 
             def read_failure(tool, arguments, **kwargs):
-                # The order-list read already leaves the receipt page.
+                # The exact order read leaves the receipt page.
                 provider.confirmation_order_id = None
                 if tool == "get_order":
                     raise HouseholdError("MENY browser order response changed")
@@ -8956,6 +9383,174 @@ class FlowTests(unittest.TestCase):
             self.assertIsNotNone(store.read()["pending_checkout"])
             order["grossAmount"] = 40.0
             self.assertTrue(app.handle(request)["confirmed"])
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertEqual(provider.checkout_clicks, 1)
+
+    def test_meny_reconcile_cancelled_receipt_after_it_disappears_from_order_list(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            request = {"operation": "checkout", "action": "reconcile",
+                       "confirmation_id": prepared["confirmation_id"]}
+            app.handle({**request, "action": "confirm"})
+            order_id = "99990002"
+            provider.confirmation_order_id = order_id
+            order = {"orderNumber": order_id, "status": "cancelled", "grossAmount": 41.0,
+                     "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                     "productQuantityCount": 1,
+                     "products": [{"identity": "Brokkoli 400g", "quantity": 1}]}
+            provider.orders.append(order)
+            original_call = provider.call
+            def exact_read(tool, arguments, **kwargs):
+                self.assertIn(tool, {"get_order", "order_tracking"})
+                self.assertEqual(arguments, {"order_number": order_id})
+                return original_call(tool, arguments, **kwargs)
+            provider.call = exact_read
+            provider.tracking = "cancelled"
+            self.assertFalse(app.handle(request)["confirmed"])
+            self.assertIsNotNone(store.read()["pending_checkout"])
+            order["grossAmount"] = 40.0
+            provider.tracking = "confirmed"
+            self.assertFalse(app.handle(request)["confirmed"])
+            self.assertIsNotNone(store.read()["pending_checkout"])
+            provider.tracking = "cancelled"
+            result = app.handle(request)
+            self.assertTrue(result["cancelled"])
+            self.assertFalse(result["confirmed"])
+            self.assertFalse(result["retry_allowed"])
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertFalse(store.read().get("email_jobs"))
+            self.assertTrue(app.handle(request)["cancelled"])
+            self.assertEqual(provider.checkout_clicks, 1)
+
+    def test_meny_receipt_with_contradictory_creation_time_releases_only_its_order_id(self):
+        config = {**CONFIG, "provider": "meny"}
+        store = StateStore(Path(self.temp.name) / "meny", config)
+        provider = FakeMeny()
+        app = Application(store, provider, self.browser)
+        prepared = app.handle({"operation": "checkout", "action": "prepare"})
+        request = {"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]}
+        app.handle({**request, "action": "confirm"})
+        original = store.read()["pending_checkout"]
+        started = datetime.fromisoformat(original["dispatch_started_at"])
+        order = {"grossAmount": 40.0, "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                 "productQuantityCount": 1, "products": [{"identity": "Brokkoli 400g", "quantity": 1}]}
+        for index, status in enumerate(("confirmed", "cancelled")):
+            with self.subTest(status=status):
+                stale_id = str(99990002 + index)
+                provider.confirmation_order_id = stale_id
+                provider.tracking = status
+                provider.orders.append({**order, "orderNumber": stale_id, "status": status,
+                    "merchant_created_at": (started - timedelta(days=7)).isoformat()})
+                response = app.handle(request)
+                self.assertFalse(response["confirmed"])
+                self.assertFalse(response["retry_allowed"])
+                self.assertEqual(store.read()["pending_checkout"], original)
+                self.assertFalse(store.read()["email_jobs"])
+
+        correct_id = "99990004"
+        provider.confirmation_order_id = correct_id
+        provider.tracking = "cancelled"
+        provider.orders.append({**order, "orderNumber": correct_id, "status": "cancelled",
+                                "merchant_created_at": started.isoformat()})
+        def lost_detail(tool, arguments, **kwargs):
+            self.assertEqual(tool, "get_order")
+            provider.confirmation_order_id = None
+            raise HouseholdError("merchant detail temporarily unavailable")
+        with mock.patch.object(provider, "call", side_effect=lost_detail):
+            with self.assertRaisesRegex(HouseholdError, "temporarily unavailable"):
+                app.handle(request)
+        self.assertEqual(store.read()["pending_checkout"], {**original, "meny_confirmation_order_id": correct_id})
+        restarted = Application(StateStore(store.directory, config), provider, self.browser)
+        result = restarted.handle(request)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["order_id"], correct_id)
+        self.assertIsNone(store.read()["pending_checkout"])
+        self.assertEqual(provider.checkout_clicks, 1)
+
+    def test_meny_detail_page_hint_only_closes_newly_placed_exact_deleted_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            request = {"operation": "checkout", "action": "reconcile",
+                       "confirmation_id": prepared["confirmation_id"]}
+            app.handle({**request, "action": "confirm"})
+            order_id = "99990002"
+            provider.checkout_order_detail_hint = mock.Mock(return_value=order_id)
+            order = {"orderNumber": order_id, "status": "cancelled", "grossAmount": 40.0,
+                     "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                     "productQuantityCount": 1,
+                     "products": [{"identity": "Brokkoli 400g", "quantity": 1}]}
+            provider.orders.append(order)
+            provider.tracking = "cancelled"
+            # The historical Vipps phone-form failure predates the durable
+            # dispatch timestamp and occurred before a payment-request receipt.
+            with store.locked() as state:
+                journal = state["pending_checkout"]
+                placed = datetime.fromisoformat(journal.pop("dispatch_started_at"))
+                journal.pop("payment_requested_at")
+                journal.pop("payment_expires_at")
+                journal["status"] = "uncertain"
+            before = store.read()["pending_checkout"]
+            exact = {"merchant_created_at": placed.isoformat(), "merchant_deleted": True}
+            for invalid in (
+                {"merchant_created_at": (placed - timedelta(days=7)).isoformat()},
+                {"merchant_created_at": (placed + timedelta(days=1)).isoformat()},
+                {"merchant_created_at": None}, {"merchant_deleted": False},
+                {"status": "confirmed"}, {"grossAmount": 39.99},
+                {"deliverySlotDisplay": "fredag 4. sep. kl. 09:00-12:00"},
+                {"products": [{"identity": "Annen vare", "quantity": 1}]},
+            ):
+                with self.subTest(invalid=invalid):
+                    original = deepcopy(order)
+                    order.update({**exact, **invalid})
+                    response = app.handle(request)
+                    self.assertFalse(response["confirmed"])
+                    self.assertFalse(response["retry_allowed"])
+                    self.assertEqual(store.read()["pending_checkout"], before)
+                    order.clear()
+                    order.update(original)
+            order.update(exact)
+            self.assertTrue(app.handle(request)["cancelled"])
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertTrue(app.handle(request)["cancelled"])
+            self.assertFalse(store.read().get("email_jobs"))
+            self.assertEqual(provider.checkout_clicks, 1)
+
+    def test_meny_legacy_order_created_before_mobile_request_can_be_reconciled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            checkout = {"operation": "checkout"}
+            confirmation = app.handle({**checkout, "action": "prepare"})["confirmation_id"]
+            checkout["confirmation_id"] = confirmation
+            app.handle({**checkout, "action": "confirm"})
+
+            with store.locked() as state:
+                pending = state["pending_checkout"]
+                pending.pop("dispatch_started_at")
+                requested = datetime.fromisoformat(pending["payment_requested_at"])
+                placed = requested - timedelta(seconds=30)
+                # Review began one minute before the merchant created the order.
+                pending["expires_at"] = (placed + timedelta(minutes=19)).isoformat()
+            order_id = "99990003"
+            provider.checkout_order_detail_hint = mock.Mock(return_value=order_id)
+            provider.tracking = "cancelled"
+            order = {"orderNumber": order_id, "status": "cancelled", "grossAmount": 40.0,
+                     "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                     "productQuantityCount": 1, "products": [{"identity": "Brokkoli 400g", "quantity": 1}],
+                     "merchant_created_at": (placed - timedelta(minutes=2)).isoformat(), "merchant_deleted": True}
+            provider.orders.append(order)
+            reconcile = {**checkout, "action": "reconcile"}
+            self.assertFalse(app.handle(reconcile).get("cancelled"))
+            self.assertIsNotNone(store.read()["pending_checkout"])
+            order["merchant_created_at"] = placed.isoformat()
+            self.assertTrue(app.handle(reconcile)["cancelled"])
             self.assertIsNone(store.read()["pending_checkout"])
             self.assertEqual(provider.checkout_clicks, 1)
 
@@ -9020,6 +9615,7 @@ class FlowTests(unittest.TestCase):
             store = StateStore(Path(temp), {**CONFIG, "provider": "meny", "confirmation_policy": "standing"})
             provider = FakeMeny()
             provider.call = mock.Mock(wraps=provider.call)
+            provider.submit_checkout = mock.Mock(wraps=provider.submit_checkout)
             app = Application(store, provider, self.browser)
             prepared = app.handle({"operation": "checkout", "action": "prepare"})
             provider.call.reset_mock()
@@ -9033,6 +9629,9 @@ class FlowTests(unittest.TestCase):
                 ["get_cart", "get_delivery_slots", "get_cart", "get_cart", "get_delivery_slots"],
             )
             self.assertEqual(provider.checkout_clicks, 1)
+            selected_requests = [call for call in provider.call.call_args_list if call.args[0] == "get_delivery_slots"]
+            self.assertTrue(all(call.args[1].get("require_selected") is True for call in selected_requests))
+            self.assertEqual(provider.submit_checkout.call_args.kwargs["selected_slot"], prepared["summary"]["delivery"]["slot"])
 
     def test_meny_confirmation_can_expire_during_final_browser_checks(self):
         started = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
@@ -9126,6 +9725,52 @@ class FlowTests(unittest.TestCase):
             self.assertIsNone(store.read()["pending_cancellation"])
             self.assertTrue(all(call.kwargs.get("allow_recovery") is True for call in provider.call.call_args_list))
             self.assertEqual(provider.checkout_review_recovery, [True, True])
+
+    def test_uncertain_meny_handoff_preserves_the_live_tab_and_original_journal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            with store.locked() as state:
+                state["pending_checkout"]["status"] = "uncertain"
+            provider.checkout_payment_handoff = mock.Mock(return_value="phone")
+            provider.checkout_confirmation_order_id = mock.Mock(side_effect=AssertionError("tab navigated"))
+            provider.call = mock.Mock(side_effect=AssertionError("merchant history opened"))
+            for change in [None, {"order_id": "123"}]:
+                with store.locked() as state:
+                    state["pending_checkout"]["order_change"] = change
+                prior = store.read()["pending_checkout"]
+                result = app.handle({"operation": "checkout", "action": "reconcile",
+                                     "confirmation_id": prepared["confirmation_id"]})
+                self.assertTrue(result["awaiting_user_payment"])
+                self.assertFalse(result["retry_allowed"])
+                self.assertIn("open Vipps page", result["next"])
+                self.assertIn("Remember choice", result["next"])
+                self.assertEqual(store.read()["pending_checkout"], prior)
+            self.assertEqual(provider.checkout_clicks, 0)
+
+    def test_unrelated_vipps_page_preserves_journal_and_returns_to_original_meny_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            provider.checkout_payment_handoff = mock.Mock(return_value="mismatch")
+            provider.call = mock.Mock(side_effect=AssertionError("unrelated tab navigated"))
+            provider.checkout_confirmation_order_id = mock.Mock(side_effect=AssertionError("unrelated tab probed"))
+            for expiry in ("2000-01-01", "2100-01-01"):
+                with store.locked() as state:
+                    pending = state["pending_checkout"]
+                    pending["status"] = "uncertain"
+                    pending["payment_expires_at"] = expiry + "T00:00:00+00:00"
+                prior = store.read()["pending_checkout"]
+                result = app.handle({"operation": "checkout", "action": "reconcile",
+                                     "confirmation_id": prepared["confirmation_id"]})
+                self.assertFalse(result["awaiting_user_payment"])
+                self.assertFalse(result["retry_allowed"])
+                self.assertIn("original MENY checkout or receipt", result["next"])
+                self.assertEqual(store.read()["pending_checkout"], prior)
 
     def test_expired_unapproved_vipps_releases_the_checkout_for_a_fresh_prepare(self):
         started = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)

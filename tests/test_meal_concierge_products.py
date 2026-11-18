@@ -660,7 +660,21 @@ class ProductObservationTests(unittest.TestCase):
             observed_at=OBSERVED_AT,
         )["products"][0]["purchase_options"][0]
         self.assertEqual(exact["total_payable_ore"], 1000)
+        for package, label, cost in (
+            ("500g Sopps", "10,00 kroner for 500 gram.", 1000),
+            ("1,5 kg", "10,00 kroner for 1,5 kilo.", 1000),
+            ("500 g", "10,00 kroner for 500 gram pluss pant.", None),
+        ):
+            with self.subTest(label=label):
+                raw = {**base, "package": package, "detail_price": label}
+                if cost is None:
+                    raw.update(deposit_status="present_unknown", detail_deposit="+ pant")
+                option = normalize_meny_product_search({"query": "detail", "products": [raw]})["products"][0]["purchase_options"][0]
+                self.assertEqual(option.get("total_payable_ore"), cost)
         for update in (
+            {"detail_price": "10,00 kroner for 250 gram."},
+            {"detail_price": "10,00 kroner for 500 gram.", "package": "500 ml"},
+            {"detail_price": "10,00 kroner per kilo."},
             {"detail_price": "11,00 kroner."},
             {"detail_price": "10,00 kroner pluss pant."},
             {"deposit_status": "present_unknown", "deposit": None},

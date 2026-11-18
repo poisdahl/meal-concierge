@@ -993,6 +993,9 @@ def _compact_candidate_product(product: Any) -> dict[str, Any]:
     return compact
 
 
+_CANDIDATE_EXCLUSION_FIELDS = ("excluded_candidate_count", "excluded_candidate_reason")
+
+
 def _compact_product_observation(observation: Any, *, candidate_limit: int) -> dict[str, Any]:
     if not isinstance(observation, dict):
         return {}
@@ -1001,7 +1004,7 @@ def _compact_product_observation(observation: Any, *, candidate_limit: int) -> d
         key: observation[key]
         for key in (
             "provider", "query", "observed_at", "scope", "unavailable_reason",
-            "excluded_candidate_count", "excluded_candidate_reason", "source_product_evidence",
+            *_CANDIDATE_EXCLUSION_FIELDS, "source_product_evidence",
         )
         if key in observation
     }
@@ -1057,7 +1060,7 @@ def _compact_product_requirement(requirement: Any, *, candidate_limit: int) -> d
         if requirement.get("status") == "selected":
             compact["observation"] = {
                 key: observation[key]
-                for key in ("provider", "query", "observed_at", "scope")
+                for key in ("provider", "query", "observed_at", "scope", *_CANDIDATE_EXCLUSION_FIELDS)
                 if key in observation
             }
             compact["observation"]["candidate_count"] = len(observation.get("products", []))
@@ -1174,6 +1177,10 @@ def _minimal_product_plan(plan: Any, *, candidate_limit: int) -> Any:
                 **({"unavailable_reason": observation["unavailable_reason"]}
                    if "unavailable_reason" in observation else {}),
             }
+        if isinstance(observation, dict):
+            for key in _CANDIDATE_EXCLUSION_FIELDS:
+                if key in observation:
+                    row.setdefault("observation", {})[key] = observation[key]
         if "selection" in requirement:
             row["selection"] = _compact_product_selection(requirement["selection"])
             observed_products = observation.get("products") if isinstance(observation, dict) else None
@@ -1370,6 +1377,7 @@ def _issues_only_product_plan(
             query = "$item" if observed_query == item_query else observed_query[:300]
             candidate_search = {
                 "query": query,
+                **{key: observation[key] for key in _CANDIDATE_EXCLUSION_FIELDS if key in observation},
                 "candidates": [
                     _compact_candidate_product(product)
                     for product in (products or [])[:candidate_limit]

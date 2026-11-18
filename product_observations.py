@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 import math
 import re
-from typing import Any, Hashable, Mapping
+from typing import Any, Callable, Hashable, Mapping
 import unicodedata
 
 from core import HouseholdError, contains_line_controls
@@ -21,7 +21,8 @@ _MENY_SIMPLE_MONEY = re.compile(r"^(?P<whole>0|[1-9]\d{0,6}),(?P<cents>\d{2})\s*
 _MENY_FROM_MONEY = re.compile(r"^fra\s+(?P<whole>0|[1-9]\d{0,6}),(?P<cents>\d{2})\s*kr$", re.IGNORECASE)
 _MENY_ORIGINAL_MONEY = re.compile(r"^f\u00f8r\s+(?P<whole>0|[1-9]\d{0,6}),(?P<cents>\d{2})\s*kr$", re.IGNORECASE)
 _MENY_DETAIL_MONEY = re.compile(
-    r"^(?:tilbud,\s*n\u00e5\s+)?(?P<whole>0|[1-9]\d{0,6}),(?P<cents>\d{2})\s+kroner(?P<deposit>\s+pluss\s+pant)?\.$",
+    r"^(?:tilbud,\s*n\u00e5\s+)?(?P<whole>0|[1-9]\d{0,6}),(?P<cents>\d{2})\s+kroner"
+    r"(?: for (?P<weight>\d{1,6}(?:,\d{1,6})?) (?P<unit>gram|kilo))?(?P<deposit>\s+pluss\s+pant)?\.$",
     re.IGNORECASE,
 )
 _MENY_DETAIL_ORIGINAL_MONEY = re.compile(
@@ -145,13 +146,20 @@ def _meny_pattern_ore(value: Any, pattern: re.Pattern[str]) -> int | None:
     return amount if amount <= MAX_MONEY_ORE else None
 
 
-def _meny_detail_price(value: Any) -> tuple[int | None, bool, bool]:
+def _meny_detail_price(value: Any, package: Mapping[str, Any] | None) -> tuple[int | None, bool, bool]:
     text = _display_text(value, maximum=100)
     if text is None:
         return None, False, False
     match = _MENY_DETAIL_MONEY.fullmatch(text)
     if match is None:
         return None, False, False
+    if match["weight"] is not None:
+        detail_weight = _canonical_quantity(match["weight"], "g" if match["unit"].casefold() == "gram" else "kg")
+        if not package or package["unit"] != "g" or detail_weight is None:
+            return None, False, False
+        quantity = package["quantity"]
+        if detail_weight[0] != Fraction(quantity["numerator"], quantity["denominator"]):
+            return None, False, False
     amount = int(match["whole"]) * 100 + int(match["cents"])
     return (
         amount if amount <= MAX_MONEY_ORE else None,
@@ -416,6 +424,10 @@ def _purchase_option(
     return option
 
 
+class MenyProductPriceError(HouseholdError):
+    """One identified product lacks consistent payable-price evidence."""
+
+
 def _normalize_meny_product(raw: Any, observed_at: str) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise HouseholdError("MENY product result is invalid")
@@ -450,7 +462,7 @@ def _normalize_meny_product(raw: Any, observed_at: str) -> dict[str, Any]:
     else:
         price_kind = "unavailable"
     detail_ore, detail_has_deposit, detail_is_discount = _meny_detail_price(
-        detail_price_text
+        detail_price_text, package
     )
     deposit_status = raw.get("deposit_status")
     detail_matches = exact_ore is not None and detail_ore == exact_ore
@@ -467,7 +479,7 @@ def _normalize_meny_product(raw: Any, observed_at: str) -> dict[str, Any]:
     if deposit_status not in {None, "none", "present_unknown"}:
         raise HouseholdError("MENY product deposit evidence is invalid")
     if deposit_status is not None and not (deposit_known or deposit_present_unknown):
-        raise HouseholdError("MENY product deposit evidence is contradictory")
+        raise MenyProductPriceError("MENY product deposit evidence is contradictory")
     member = _MEMBER.search(" ".join(part for part in (campaign_tag, campaign) if part)) is not None
     multi = _MULTIBUY.fullmatch(campaign_tag or "")
     multi_campaign = _MENY_MULTI_CAMPAIGN.fullmatch(campaign or "")
@@ -642,21 +654,42 @@ def _deduplicate(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ordered
 
 
-def normalize_meny_product_search(value: Any, *, observed_at: str | None = None) -> dict[str, Any]:
+def normalize_meny_product_search(
+    value: Any, *, observed_at: str | None = None,
+    read_price_details: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping) or not isinstance(value.get("products"), list):
         raise HouseholdError("MENY product search result changed")
     timestamp = _observed_at(observed_at)
     products = value["products"]
     if len(products) > MAX_PRODUCTS:
         raise HouseholdError("MENY product search returned too many products")
-    normalized = _deduplicate([_normalize_meny_product(product, timestamp) for product in products])
-    return {
+    rows = []
+    price_errors = []
+    for product in products:
+        try:
+            if (read_price_details is not None and isinstance(product, Mapping)
+                    and product.get("available") is True and _meny_ore(product.get("price")) is not None):
+                product = {**product, **read_price_details(product)}
+            rows.append(_normalize_meny_product(product, timestamp))
+        except MenyProductPriceError as exc:
+            if read_price_details is None:
+                raise
+            price_errors.append(exc)
+    if price_errors and not rows:
+        raise price_errors[0]
+    normalized = _deduplicate(rows)
+    result = {
         "provider": "meny",
         "query": _bounded_text(value.get("query"), required=True, maximum=200),
         "observed_at": timestamp,
         "scope": {"kind": "provider_search", "page": 1, "requested_size": len(products), "returned": len(normalized), "semantics": "bounded_relevance_ranked"},
         "products": normalized,
     }
+    if price_errors:
+        result["excluded_candidate_count"] = len(price_errors)
+        result["excluded_candidate_reason"] = "price_evidence_unavailable"
+    return result
 
 
 def normalize_retail_product_search(value: Any, *, observed_at: str | None = None, provider: str = "oda") -> dict[str, Any]:
