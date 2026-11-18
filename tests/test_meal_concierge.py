@@ -5443,6 +5443,36 @@ process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
         self.assertIn("/trumf-profil/nettbutikk/bestilling/", scripts[-1])
         self.assertIn("/profil/nettbutikk/bestilling/", scripts[-1])
 
+    @unittest.skipUnless(shutil.which("node"), "Node executes the merchant order-detail snapshot")
+    def test_order_progress_illustration_alone_does_not_confirm_order(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock(return_value={"requests": [{"requestId": "detail",
+            "method": "GET", "status": 200,
+            "url": "https://platform-rest-prod.ngdata.no/api/order/store/user/99990001"}]})
+        client._eval = mock.Mock(return_value={"ready": False, "authenticated": True})
+        with self.assertRaisesRegex(HouseholdError, "details changed"):
+            client._get_order("99990001")
+        script = client._eval.call_args.args[0]
+        harness = r"""
+const {script, lines}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:1,height:1})});
+const main={...node(lines.join('\n')),querySelectorAll:s=>s==='h1'?[node('Bestilling A01')]:[]};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.location={origin:'https://meny.no',pathname:'/trumf-profil/nettbutikk/bestilling/99990001'};
+global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[main]:[]};
+process.stdout.write(eval(script));
+"""
+        progress = ["Ordrenummer", "99990001", "Bekreftet", "Pakket", "På vei", "Levert"]
+        for extra, expected in (([], "unknown"), (["Bestillingen er kansellert"], "cancelled"),
+                                (["Bestillingen kan oppdateres"], "confirmed")):
+            with self.subTest(extra=extra):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "lines": progress + extra}),
+                                        text=True, capture_output=True, check=True)
+                self.assertEqual(json.loads(result.stdout)["status"], expected)
+
     def test_order_details_wait_for_a_late_response_or_reload_cache_and_use_deleted_status(self):
         for empty_reads, reloaded in ((5, False), (40, True)):
             with self.subTest(empty_reads=empty_reads, reloaded=reloaded):
@@ -8025,11 +8055,11 @@ const execute=async s=>JSON.parse(await eval(s));
         client._checkout_confirmation_snapshot()
         script = client._eval.call_args.args[0]
         harness = r"""
-const {script,url}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const {script,url,receiptText='Bestillingen er oppdatert'}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:1,height:1})});
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.location={href:url};
-global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[node('Bestillingen er oppdatert')]:[]};
+global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[node(receiptText)]:[]};
 process.stdout.write(eval(script));
 """
         valid = "https://meny.no/kassen/bekreftelse?orderid=7631908"
@@ -8044,6 +8074,23 @@ process.stdout.write(eval(script));
                 snapshot = json.loads(result.stdout)
                 self.assertEqual(snapshot["receipt_url"], valid if url == valid else None)
                 self.assertEqual(snapshot["order_id"], "7631908" if url == valid else None)
+
+        receipt = "https://meny.no/kassen/bekreftelse"
+        for url, receipt_text, expected in (
+            (receipt, "TAKK FOR BESTILLINGEN!\nOrdrenummer\n7631908", "7631908"),
+            (receipt, "Takk for bestillingen!\nOrdrenummer: 7631908", "7631908"),
+            (receipt, "Takk for bestillingen!\n7631908", None),
+            (receipt, "Ordrenummer\n7631908", None),
+            (receipt, "Ordrebekreftelse\nOrdrenummer\n7631908\nOrdrenummer\n7631909", None),
+            (valid, "Ordrebekreftelse\nOrdrenummer\n7631909", None),
+            (valid, "Ordrebekreftelse\nOrdrenummer\nugyldig", None),
+            (receipt.replace("meny.no", "example.org"), "Ordrebekreftelse\nOrdrenummer\n7631908", None),
+        ):
+            with self.subTest(url=url, receipt_text=receipt_text):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "url": url, "receiptText": receipt_text}),
+                                        text=True, capture_output=True, check=True)
+                self.assertEqual(json.loads(result.stdout)["order_id"], expected)
 
     def test_checkout_reconcile_keeps_the_vipps_waiting_page_alive(self):
         client = self.client()
@@ -9197,7 +9244,7 @@ class FlowTests(unittest.TestCase):
             self.assertTrue(reconciled["confirmed"])
             self.assertIsNone(store.read()["pending_checkout"])
             reconcile_calls = provider.call.call_args_list[reconcile_start:]
-            self.assertEqual(len(reconcile_calls), 3)
+            self.assertEqual([call.args[0] for call in reconcile_calls], ["get_order", "order_tracking"])
             self.assertTrue(all(call.kwargs.get("deadline") == 620.0 for call in reconcile_calls))
             self.assertEqual(provider.checkout_confirmation_order_id.call_args.kwargs["deadline"], 620.0)
             with self.assertRaisesRegex(HouseholdError, "cart_ready"):
@@ -9227,7 +9274,7 @@ class FlowTests(unittest.TestCase):
             original_call = provider.call
 
             def read_failure(tool, arguments, **kwargs):
-                # The order-list read already leaves the receipt page.
+                # The exact order read leaves the receipt page.
                 provider.confirmation_order_id = None
                 if tool == "get_order":
                     raise HouseholdError("MENY browser order response changed")
@@ -9253,6 +9300,45 @@ class FlowTests(unittest.TestCase):
             order["grossAmount"] = 40.0
             self.assertTrue(app.handle(request)["confirmed"])
             self.assertIsNone(store.read()["pending_checkout"])
+            self.assertEqual(provider.checkout_clicks, 1)
+
+    def test_meny_reconcile_cancelled_receipt_after_it_disappears_from_order_list(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            request = {"operation": "checkout", "action": "reconcile",
+                       "confirmation_id": prepared["confirmation_id"]}
+            app.handle({**request, "action": "confirm"})
+            order_id = "99990002"
+            provider.confirmation_order_id = order_id
+            order = {"orderNumber": order_id, "status": "cancelled", "grossAmount": 41.0,
+                     "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                     "productQuantityCount": 1,
+                     "products": [{"identity": "Brokkoli 400g", "quantity": 1}]}
+            provider.orders.append(order)
+            original_call = provider.call
+            def exact_read(tool, arguments, **kwargs):
+                self.assertIn(tool, {"get_order", "order_tracking"})
+                self.assertEqual(arguments, {"order_number": order_id})
+                return original_call(tool, arguments, **kwargs)
+            provider.call = exact_read
+            provider.tracking = "cancelled"
+            self.assertFalse(app.handle(request)["confirmed"])
+            self.assertIsNotNone(store.read()["pending_checkout"])
+            order["grossAmount"] = 40.0
+            provider.tracking = "confirmed"
+            self.assertFalse(app.handle(request)["confirmed"])
+            self.assertIsNotNone(store.read()["pending_checkout"])
+            provider.tracking = "cancelled"
+            result = app.handle(request)
+            self.assertTrue(result["cancelled"])
+            self.assertFalse(result["confirmed"])
+            self.assertFalse(result["retry_allowed"])
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertFalse(store.read().get("email_jobs"))
+            self.assertTrue(app.handle(request)["cancelled"])
             self.assertEqual(provider.checkout_clicks, 1)
 
     def test_standing_authorization_submits_meny_without_a_second_agent_confirmation(self):

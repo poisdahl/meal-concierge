@@ -542,6 +542,8 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
         raise HouseholdError("MENY browser order response changed") from exc
     if not isinstance(payload, Mapping):
         raise HouseholdError("MENY browser order response changed")
+    if "ngOrderId" in payload and str(payload["ngOrderId"]) != order_id:
+        raise HouseholdError("MENY response belongs to a different order")
     result = {}
     description = str(payload.get("statusDescription") or "").strip().casefold()
     if description in {"deleted", "cancelled", "canceled"}:
@@ -2689,7 +2691,7 @@ __DELIVERY_BINDING__
   const delivery = valueAfter('Varene leveres') || (deliveredDates.length === 1 ? deliveredDates[0] : null);
   const code = valueAfter('Bestillingskode (for henting/levering)') || heading[0]?.replace(/^Bestilling\s+/, '') || null;
   const text = norm(root.innerText);
-  const status = /bestillingen er kansellert|kansellert bestilling/i.test(text) ? 'cancelled' : deliveredDates.length === 1 ? 'delivered' : /bestillingen kan oppdateres|bekreftet/i.test(text) ? 'confirmed' : 'unknown';
+  const status = /bestillingen er kansellert|kansellert bestilling/i.test(text) ? 'cancelled' : deliveredDates.length === 1 ? 'delivered' : /bestillingen kan oppdateres/i.test(text) ? 'confirmed' : 'unknown';
   const itemButtons = [...root.querySelectorAll('button')].filter(visible).map(x => norm(x.innerText)).map(x => x.match(/^Bestilte varer \((\d+)\)$/)).filter(Boolean);
   const itemCount = itemButtons.length === 1 ? Number(itemButtons[0][1]) : null;
   const tables = [...root.querySelectorAll('table')].filter(visible).filter(table => {
@@ -2771,8 +2773,19 @@ __DELIVERY_BINDING__
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const main = [...document.querySelectorAll('main')].filter(visible);
-  const url = new URL(location.href), orderId = url.origin === 'https://meny.no' && url.pathname === '/kassen/bekreftelse' ? url.searchParams.get('orderid') : null;
-  const receiptUrl = /^\d{1,20}$/.test(orderId || '') && !url.hash && [...url.searchParams.keys()].length === 1 ? url.href : null;
+  const url = new URL(location.href);
+  const queryId = url.searchParams.get('orderid');
+  const numeric = value => /^\d{1,20}$/.test(value || '');
+  const queryValid = numeric(queryId) && [...url.searchParams.keys()].length === 1;
+  const receiptUrl = url.origin === 'https://meny.no' && url.pathname === '/kassen/bekreftelse' &&
+    !url.hash && (!url.search || queryValid) ? url.href : null;
+  const lines = (main.length === 1 ? main[0].innerText : '').split(/\n+/).map(norm).filter(Boolean);
+  const labels = lines.flatMap((line,i) => {
+    const match = line.match(/^Ordrenummer\s*:?\s*(.*)$/i);
+    return match ? [match[1] || lines[i+1] || ''] : [];
+  });
+  const labelId = labels.length === 1 && numeric(labels[0]) ? labels[0] : null;
+  const orderId = labels.length ? (labelId && (!queryId || labelId === queryId) ? labelId : null) : queryId;
   const blank = url.href === 'about:blank';
   const vippsGateway = url.origin === 'https://api.vipps.no' && url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
   const confirmed = main.length === 1 && /Takk for (?:din )?bestilling(?:en)?|Bestillingen (?:er|ble) (?:mottatt|oppdatert)|Ordrebekreftelse/i.test(norm(main[0].innerText));

@@ -5590,7 +5590,10 @@ class OrderOperations:
         confirmation_order_id = None
         if self.provider == "meny":
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
-        after = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
+        # A retained merchant receipt addresses the exact order, including an
+        # order removed from the first history page after cancellation.
+        after = ({"orders": []} if confirmation_order_id else
+                 self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline))
         before_ids = {str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") for item in pending["orders_before"].get("orders", []) if isinstance(item, Mapping)}
         abandoned_order_ids = self._abandoned_order_ids(self.store.read())
         candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping)
@@ -5630,8 +5633,6 @@ class OrderOperations:
         exact_failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
                                  if self.provider == "mathem" else None)
         retained_unpaid_id = pending.get("unpaid_order_id") if self.provider in {"oda", "mathem"} else None
-        if self.provider == "meny" and confirmation_order_id:
-            candidates = [item for item in candidates if str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") == confirmation_order_id]
         candidate_evidence = {}
         candidate_evidence_unresolved = False
         if (self.provider in {"oda", "mathem"} and exact_failed_order_id is None
@@ -5684,7 +5685,16 @@ class OrderOperations:
             raise HouseholdError(
                 "This merchant order was explicitly abandoned and must never be reconciled"
             )
-        if exact_failed_order_id is not None:
+        if confirmation_order_id is not None:
+            candidate_id = safe_order_id(confirmation_order_id)
+            if candidate_id in abandoned_order_ids:
+                raise HouseholdError("This MENY receipt belongs to an abandoned order")
+            order = self.provider_client.call("get_order", {"order_number": candidate_id}, deadline=deadline)
+            tracking = self.provider_client.call("order_tracking", {"order_number": candidate_id}, deadline=deadline)
+            require_provider_identity(order, candidate_id)
+            require_provider_identity(tracking, candidate_id, tracking=True)
+            details_id = tracking_id = candidate_id
+        elif exact_failed_order_id is not None:
             candidate_id = safe_order_id(exact_failed_order_id)
             matching_rows = [item for item in after.get("orders", []) if isinstance(item, Mapping)
                              and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") == candidate_id]
@@ -5718,10 +5728,14 @@ class OrderOperations:
             tracking_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
             order = {**candidates[0], **details}
         tracking_status = str((tracking or {}).get("status") or "").casefold()
-        if (self.provider == "oda" and tracking_status in {"cancelled", "canceled"}
-                and candidate_id == details_id == tracking_id == pending.get("unpaid_order_id")
-                and not self.store.read().get("pending_cancellation")):
-            self._exact_checkout_order_for_cancellation(pending, candidate_id, deadline)
+        oda_unpaid_cancelled = (self.provider == "oda" and tracking_status in {"cancelled", "canceled"}
+                                and candidate_id == details_id == tracking_id == pending.get("unpaid_order_id"))
+        meny_receipt_cancelled = (confirmation_order_id and tracking_status == "cancelled"
+                                  and order.get("status") == "cancelled"
+                                  and meny_order_matches_checkout(order, pending["summary"]))
+        if (oda_unpaid_cancelled or meny_receipt_cancelled) and not self.store.read().get("pending_cancellation"):
+            if oda_unpaid_cancelled:
+                self._exact_checkout_order_for_cancellation(pending, candidate_id, deadline)
             with self.store.locked() as state:
                 if canonical(state.get("pending_checkout")) != canonical(pending):
                     raise HouseholdError("The checkout changed while verifying merchant cancellation")
@@ -5914,6 +5928,7 @@ class OrderOperations:
                 order is not None
                 and confirmation_order_id == candidate_id
                 and candidate_id == details_id == tracking_id
+                and order.get("status") in {"confirmed", "delivered"}
                 and tracking_status in {"confirmed", "delivered"}
                 and meny_order_matches_checkout(order, pending["summary"])
             )
