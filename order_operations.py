@@ -5374,7 +5374,7 @@ class OrderOperations:
                     if handoff:
                         next_step = {
                             "sent": "Approve the existing MENY request in Vipps, then reconcile.",
-                            "phone": "Finish the existing MENY payment in the open Vipps page, then reconcile.",
+                            "phone": "On the open Vipps page, check the phone number and Remember choice, press Next, then approve the MENY payment in Vipps and reconcile.",
                             "gateway": "Keep the Vipps page open. Verify the MENY merchant and reviewed total before continuing, then reconcile.",
                         }[handoff]
                         return {"confirmed": False, "expired": False, "order": None, "tracking": None,

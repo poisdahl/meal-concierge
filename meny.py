@@ -1949,7 +1949,7 @@ __DELIVERY_BINDING__
   if (options.stage === 'gate') {
     document.querySelectorAll('[data-meal-concierge-action="vipps-next"]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
     const hit = options.hit ? document.elementFromPoint(...options.hit) : button;
-    const ready = matches() && !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+    const ready = matches() && !rememberSelected && !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
       hit && (hit === button || button.contains(hit));
     if (ready) button.setAttribute('data-meal-concierge-action','vipps-next');
     return JSON.stringify({ready:Boolean(ready)});
@@ -1985,12 +1985,12 @@ __DELIVERY_BINDING__
             if attempt < 19:
                 self._sleep(0.25)
         else:
-            raise HouseholdError("Check the phone number on the existing Vipps page, finish that handoff and reconcile this attempt.")
+            raise HouseholdError("Check the phone number and Remember choice on the open Vipps page, press Next yourself, then approve in Vipps and reconcile.")
         x, y = self._wait_for_checkout_hit('[data-meal-concierge-action="vipps-next"]', render,
                                            "Vipps mobile request control changed or is obscured")
         self._invoke("mouse", "move", str(x), str(y))
         if self._eval(render(True, x, y)) != {"ready": True}:
-            raise HouseholdError("Vipps mobile request control changed or is obscured; reconcile this attempt")
+            raise HouseholdError("Vipps mobile request control changed. Check the phone number and Remember choice on the open Vipps page, finish there, then reconcile.")
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
         for attempt in range(40):

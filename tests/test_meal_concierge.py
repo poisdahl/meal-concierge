@@ -7857,6 +7857,7 @@ process.stdout.write(eval(script));
 const assert=require('node:assert/strict');
 global.crypto=require('node:crypto').webcrypto;
 global.location=new URL('https://api.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=fixture');
+const remember={checked:false};
 const verifiedText='Continue to pay with Vipps\nMENY Levert hjem Oslo\nMENY MLH AS\n471.90 NOK';
 const attrs={};
 const button={innerText:'Next',disabled:true,getAttribute:()=>null,contains:()=>false,
@@ -7869,7 +7870,7 @@ const phone=new HTMLInputElement();
 for (const node of [button,phone]) node.getBoundingClientRect=()=>({width:30,height:20});
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.document={body:{innerText:verifiedText},elementFromPoint:()=>button,querySelectorAll:s=>
- s==='button'?[button]:s==='input[type="tel"][name="phone-number"]'?[phone]:[]};
+ s==='button'?[button]:s==='input[type="tel"][name="phone-number"]'?[phone]:s==='input[type="checkbox"]'?[remember]:[]};
 const execute=async s=>JSON.parse(await eval(s));
 (async()=>{
  const original=await execute(c.observe);
@@ -7879,6 +7880,12 @@ const execute=async s=>JSON.parse(await eval(s));
  await execute(bound(c.fill));
  assert.equal(phone.value,'90000000');
  assert.equal((await execute(bound(c.gate))).ready,true);
+ remember.checked=true;
+ assert.equal((await execute(bound(c.gate))).ready,false);
+ assert.equal((await execute(bound(c.hit))).ready,false);
+ assert.equal(remember.checked,true);
+ assert.equal(phone.value,'90000000');
+ remember.checked=false;
  document.elementFromPoint=()=>phone;
  assert.equal((await execute(bound(c.hit))).ready,false);
  document.body.innerText=verifiedText.replace('471.90','471.91');
@@ -9418,6 +9425,7 @@ class FlowTests(unittest.TestCase):
                 self.assertTrue(result["awaiting_user_payment"])
                 self.assertFalse(result["retry_allowed"])
                 self.assertIn("open Vipps page", result["next"])
+                self.assertIn("Remember choice", result["next"])
                 self.assertEqual(store.read()["pending_checkout"], prior)
             self.assertEqual(provider.checkout_clicks, 0)
 
