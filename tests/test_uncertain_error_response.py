@@ -52,6 +52,8 @@ class UncertainErrorResponseTests(unittest.TestCase):
         original = self.shop.call
         writes = []
         def lost_reply(tool, arguments, **kwargs):
+            if writes and tool == 'get_cart':
+                raise HouseholdError('synthetic readback unavailable')
             result = original(tool, arguments, **kwargs)
             if tool == 'manipulate_cart':
                 writes.append(deepcopy(arguments))
