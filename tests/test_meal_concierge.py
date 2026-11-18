@@ -6486,6 +6486,43 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "contradictory"):
             client._search("brokkoli", 5, "products")
 
+    def test_product_search_skips_only_rows_with_unverified_price_details(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._invoke = mock.Mock()
+        client._sleep = mock.Mock()
+        rows = [
+            {"product_id": f"/varer/fixture/pasta-{code}", "name": "Pasta",
+             "package": "500 g", "price": "20,00 kr", "available": True}
+            for code in range(1001, 1004)
+        ]
+        search = {"ready": True, "identity": True, "authenticated": True, "root_count": 1,
+                  "state_root_count": 1, "query_count": 1, "heading_count": 1, "products": rows}
+        pending = {"ready": False, "identity": True, "authenticated": True}
+        ready = {"ready": True, "identity": True, "authenticated": True,
+                 "original_labels": [], "current_labels": ["20,00 kroner."], "recycle": []}
+        contradictory = {**ready, "current_labels": ["21,00 kroner."]}
+        client._eval = mock.Mock(side_effect=[search, *([pending] * 40), contradictory, ready])
+        result = client._search("pasta", 3, "products")
+        self.assertEqual([p["product_ref"] for p in result["products"]], [rows[2]["product_id"]])
+        self.assertEqual(result["products"][0]["purchase_options"][0]["total_payable_ore"], 2000)
+        self.assertEqual(result["scope"]["requested_size"], 3)
+        self.assertEqual(result["scope"]["returned"], 1)
+        self.assertEqual(result["excluded_candidate_count"], 2)
+        self.assertEqual(result["excluded_candidate_reason"], "price_evidence_unavailable")
+
+        # A price failure affecting every observed row cannot become an empty catalog.
+        client._eval = mock.Mock(side_effect=[{**search, "products": rows[:1]}, *([pending] * 40)])
+        with self.assertRaisesRegex(HouseholdError, "price details did not finish rendering"):
+            client._search("pasta", 3, "products")
+        # Losing the session or transport after a successful price still fails the query.
+        for error in (HouseholdError("MENY login is required"), _BrowserTransportError("read failed")):
+            with self.subTest(error=type(error)):
+                client._eval = mock.Mock(side_effect=[search, ready, error])
+                with self.assertRaises(type(error)) as raised:
+                    client._search("pasta", 3, "products")
+                self.assertIs(raised.exception, error)
+
     def test_product_price_details_binds_one_public_detail_price_and_pant_state(self):
         client = self.client()
         client._open = mock.Mock()

@@ -31,7 +31,7 @@ from core import (
     oslo_local_timestamp,
     validate_delivery_slot,
 )
-from product_observations import normalize_meny_product_search
+from product_observations import MenyProductPriceError, normalize_meny_product_search
 from rpc_client import normalize_provider_failure
 
 
@@ -1148,14 +1148,7 @@ class MenyClient:
         response = {"provider": "meny", "query": query, kind: values}
         if kind != "products":
             return response
-        for product in values:
-            if (
-                product.get("available") is True
-                and isinstance(product.get("price"), str)
-                and re.fullmatch(r"(?:0|[1-9]\d{0,6}),\d{2}\s*kr", product["price"], re.IGNORECASE)
-            ):
-                product.update(self._product_price_details(product))
-        normalized = normalize_meny_product_search(response)
+        normalized = normalize_meny_product_search(response, read_price_details=self._product_price_details)
         normalized["scope"]["requested_size"] = limit
         return normalized
 
@@ -1203,20 +1196,20 @@ class MenyClient:
         if result.get("authenticated") is not True:
             self._require_login()
         if result.get("ready") is not True:
-            raise HouseholdError("MENY product price details did not finish rendering")
+            raise MenyProductPriceError("MENY product price details did not finish rendering")
         current_labels = result["current_labels"]
         original_labels = result["original_labels"]
         recycle = result["recycle"]
         if not isinstance(current_labels, list) or len(current_labels) != 1:
-            raise HouseholdError("MENY product price details changed")
+            raise MenyProductPriceError("MENY product price details changed")
         if not isinstance(original_labels, list) or len(original_labels) > 1:
-            raise HouseholdError("MENY product price details changed")
+            raise MenyProductPriceError("MENY product price details changed")
         if recycle == []:
             deposit_status = "none"
         elif recycle == ["+ pant"]:
             deposit_status = "present_unknown"
         else:
-            raise HouseholdError("MENY product deposit details changed")
+            raise MenyProductPriceError("MENY product deposit details changed")
         return {
             "detail_price": current_labels[0],
             "detail_original_price": original_labels[0] if original_labels else None,
