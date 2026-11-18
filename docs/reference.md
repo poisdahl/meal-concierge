@@ -321,7 +321,7 @@ recovery. Installation does not perform provider login or prompt for payment
 configuration. Oda and MENY require the private `vipps_phone_number` in their
 config before a Vipps checkout can dispatch.
 
-JSON and SQLite migrations run offline. Clean state is v14; existing v6
+JSON and SQLite migrations run offline. Clean state is v15; existing v6
 households gain `delivery.strategy="keep_selected"`, while new installations
 use `"cheapest"`. Preserve original operation identities and latest outcome
 journals. Do not restore old journals over possible external effects.
@@ -361,7 +361,7 @@ recover that same lost response; use a new key for a later user intent.
 
 The first interactive menu or recipe-discovery request returns one setup
 question with the current household, provider, people, portions, diet,
-confirmation policy, meal-plan fields and six recipe-source switches. Keep
+confirmation policy, meal-plan fields and four recipe-source switches. Keep
 all values once, or send only the values to change. The operation is
 idempotent, and `setup rerun` makes the same review available later. It never
 asks for or returns provider credentials, API keys, Vipps details or recipient
@@ -376,10 +376,10 @@ basics are not stock until accepted with `profile review_pantry`. That action
 records the answered review date. Product prepare/get surfaces the next review;
 a due check is a conversation prompt, never a purchase instruction.
 
-Oda/MENY installations retain their five enabled sources; Mathem is initially
-disabled there. Mathem installations enable the local bank, Mathem, TheMealDB
-and Wikibooks and disable Oda/MENY. Existing source preferences are retained
-when the new Mathem switch is added. Disable a source with the setup
+Oda and MENY households start with the local bank and Oda/MENY switches enabled.
+Mathem households start with the local bank and Mathem enabled. Discovery uses
+only the selected store. A household without a store can use its local bank,
+installed collections and configured recipe websites. Disable a source with the setup
 tool, the profile tool, or a private `profile_overrides.recipes.sources` value.
 Provider selection and confirmation policy remain config-bound and require a
 separate state/service change rather than an in-place setup edit.
@@ -1365,16 +1365,13 @@ snapshot never updates an existing same-source recipe silently: save returns
 that existing recipe plus a conflict requiring an explicit update with its
 `expected_revision`.
 
-TheMealDB uses its official V1 API; a private key can be supplied only through
-`THEMEALDB_API_KEY`. Recipe data and artwork are distributed with TheMealDB
-attribution, upstream recipe links where supplied, and separate image credits.
-Copyright and trademark notices are retained; API resale requires separate
-permission under the [TheMealDB Terms of Use](https://www.themealdb.com/terms_of_use.php).
-Wikibooks queries filter a bounded category-title browse; they do not translate
-queries or search the complete recipe text. A blank query browses titles.
-Wikibooks Cookbook recipes pass a strict ingredients-plus-procedure gate and
-are stored with CC BY-SA 4.0 attribution, the exact permanent revision URL, a
-content hash and a change statement. Images are never copied. Selected
+TheMealDB and Wikibooks material is available through installed collections
+and recipes already saved in the bank. Household discovery no longer queries
+either publisher directly. Existing immutable discovery references, source
+identities, permanent revisions, attribution and image credits are retained.
+The v15 state migration backs up v14 state before removing the two direct
+switches and preference IDs. Explicit collection preferences remain in place.
+Selected
 personal-library recipes are fetched exactly once by `library_recipe_ref`,
 validated and embedded as immutable menu snapshots. A missing/stale get,
 attribution/rights failure or `link_only` recipe stops menu save without
@@ -1669,6 +1666,9 @@ Slot metadata uses the additive v8→v9 migration, with
 one private atomic `state-v8.backup.json` before upgrading an existing v8 file.
 Direct v7 upgrades retain their own `state-v7.backup.json`. Backups are 0600,
 never overwritten; migration is atomic/idempotent and newer versions fail closed.
+V14→v15 preserves the original `state-v14.backup.json` before removing the
+obsolete direct recipe-source choices. Use the matching pre-update backup for
+rollback and reconcile any subsequent external outcomes.
 V13→v14 atomically preserves `state-v13.backup.json` before adding empty
 recipe-source preference lists. Older runtimes reject v14; rollback requires the
 pre-update backup and reconciliation of any later external outcomes. Unsaved
@@ -2123,14 +2123,12 @@ A managed Oda or Mathem write retains its original operation identity, menu
 revision, exact deltas and expected cart. When the response is uncertain,
 `cart reconcile_change` reads the original operation without dispatching it
 again. The transport can positively identify a local refusal before the cart
-tool was entered. A timeout or generic merchant error leaves the original
-operation pending even if another edit later produces the expected cart. An
-operation-bound ending and matching readback are required to release that
-write. The retail MCP cart tool returns the resulting grouped cart, as described
-in the [Oda tool manifest](https://oda.com/mcp/manifest/). Queue acknowledgements
-leave the operation pending. A terminal response received by the service before a caller disconnects
-is recorded and can be reconciled after restart. A lost provider response
-requires a terminal receipt from the original provider invocation. If a completed batch has visible partial
+tool was entered. For an ordinary Oda or Mathem cart, a complete readback matching the intended
+cart lets shopping continue. If a fresh read differs, show the household the
+cart. An explicit choice to use it authorizes `cart accept_current` with the
+returned operation ID and digest. The service reads again and archives the
+original operation with its actual dispatch certainty. A different read
+requires reviewing the newly observed cart. If a completed batch has visible partial
 additions with ambiguous ownership, `ownership_review.maximum_adoptable`
 shows the bounded quantities the owner may choose to assign to the menu.
 Use `cart reconcile` with the exact digest, `keep_current` and approved
@@ -2315,9 +2313,8 @@ Each supplemental cart write is journalled before dispatch; MENY uses bounded
 verified batches. An interrupted write blocks later writes and checkout across
 restart. `cart reconcile_change` reads without dispatch. A recorded terminal
 response and matching quantities verify the intended result. A different cart
-after a recorded terminal response requires review before attribution. If the
-provider response was lost, the original invocation needs terminal evidence
-even when another edit produced the expected cart. A verified MENY stop before
+after a recorded terminal response requires review before attribution. Ordinary Oda and Mathem groceries support matching readback and explicit
+acceptance of a reviewed cart as described above. A verified MENY stop before
 its first click releases the fence. A stopped prefix requires readback of the
 earlier acknowledged clicks. Workflow status
 surfaces this recovery step. A changed Oda/Mathem addition cart must be reviewed and

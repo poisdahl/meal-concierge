@@ -208,7 +208,7 @@ class NativeFinancialFlowTests(unittest.TestCase):
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.produce, daemon=True)
         self.thread.start(); self.addCleanup(self.finish)
-        self.app = muse.NativeCartMuseApplication(self.store, self.provider, self.browser, external_recipe_sources={})
+        self.app = muse.NativeCartMuseApplication(self.store, self.provider, self.browser)
 
     def finish(self):
         self.stop.set(); self.thread.join(5)

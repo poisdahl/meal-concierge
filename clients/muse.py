@@ -324,6 +324,8 @@ class HostObservationShop:
 
 
 class MuseApplication(Application):
+    allow_observed_cart_recovery = False
+
     def handle(self, request):
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")
@@ -808,7 +810,7 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
         if browser is not None:
             browser.state_store = store
         options = {"products_apply_budget_seconds": 600} if provider_transport == "browser_cart" else {}
-        app = cls(store, shop, browser, external_recipe_sources={}, **options)
+        app = cls(store, shop, browser, **options)
         Server(home / "service.sock", os.getgid(), os.getuid(), app).run()
 
 

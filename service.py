@@ -110,9 +110,6 @@ from recipe_libraries import (
 )
 from recipe_sources import (
     SOURCE_IDS,
-    TheMealDBSource,
-    WikibooksSource,
-    provider_recipe_candidates,
     validate_source_settings,
 )
 
@@ -180,7 +177,6 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def __init__(
         self, store: StateStore, provider_client: Any, browser: OdaBrowser | None,
         *, email_provider_clients: Mapping[str, Any] | None = None,
-        external_recipe_sources: Mapping[str, Any] | None = None,
         recipe_library_adapters: Mapping[str, RecipeLibraryAdapter] | None = None,
         recipe_pack_inbox: Path | None = None,
         products_apply_budget_seconds: float = PRODUCT_OPERATION_TIMEOUT,
@@ -215,10 +211,6 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self._planner_result_cache = None
         self.browser_lock = threading.Lock()
         self.email_automation_profile = str(store.config.get("email_automation_profile") or "").strip()
-        self.external_recipe_sources = dict({
-            "themealdb": TheMealDBSource(api_key=os.environ.get("THEMEALDB_API_KEY", "1")),
-            "wikibooks": WikibooksSource(),
-        } if external_recipe_sources is None else external_recipe_sources)
         self.integration: dict[str, Any]
         if self.provider == "none":
             self.integration = {"status": "not_configured", "provider": "none",
@@ -634,8 +626,21 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def _handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         operation = request.get("operation")
         pending_cart = self.store.read().get("pending_cart_change")
+        if (pending_cart and operation == "checkout" and request.get("action", "prepare") == "prepare"
+                and self._can_reread_ordinary_cart() and pending_cart.get("provider") == self.provider
+                and not any(pending_cart.get(k) for k in ("order_change", "native_cart_binding", "native_managed", "clear_requested"))):
+            with self.product_plan_lock:
+                try:
+                    review = self._cart({"action": "reconcile_change", "_deadline": request.get("_deadline")})
+                    if review.get("reconciled") is False:
+                        return {**review, "prepared": False}
+                except (HouseholdError, OSError):
+                    # The original cart can still be uncertain. No checkout was dispatched.
+                    if not self.store.read().get("pending_cart_change"):
+                        raise
+            pending_cart = self.store.read().get("pending_cart_change")
         if pending_cart and (
-            (operation == "cart" and request.get("action", "get") not in {"get", "reconcile_change"})
+            (operation == "cart" and request.get("action", "get") not in {"get", "reconcile_change", "accept_current"})
             or (operation == "products" and request.get("action") == "apply")
             or operation == "checkout"
             or (operation == "orders" and request.get("action") not in {None, "list", "get"})
@@ -662,7 +667,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     "admission_deadline_clock": time.monotonic()}
         if operation == "status":
             state = self.store.read()
-            if self.provider in {"oda", "mathem"} and self.integration.get("status") != "ready":
+            recheck = request.get("check_store_connection", False)
+            if type(recheck) is not bool:
+                raise HouseholdError("check_store_connection must be true or false")
+            if self.provider in {"oda", "mathem"} and (recheck or self.integration.get("status") != "ready"):
                 # OAuth can complete after service startup. Retry only the
                 # native connection probe; health stays a local liveness read.
                 self._refresh_integration()
@@ -853,11 +861,18 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "needs_user_action" if self.integration.get("status") == "awaiting_login" else
             "unknown"
         )
+        oauth_connection = (
+            f"Use the household's private {self.provider.title()} sign-in. For a standalone installation, "
+            "run ./install.sh store-login in the owner's terminal with the original --home. For a host-managed "
+            "service, use its private login flow or have its runtime owner launch the active provider_oauth.py "
+            f"with the configured token directory. Sign in to the same intended {self.provider.title()} account as the checkout "
+            "browser and confirm the original delivery address before resuming an interrupted cart or order. Then ask me to check again."
+        )
         guidance = {
             "oda": {
                 "store_url": "https://oda.com/no/",
                 "account": "Use your own Oda account with complete contact and delivery details in a supported delivery area.",
-                "connection": "Complete standalone Oda OAuth and log the dedicated browser into the same intended Oda account and address.",
+                "connection": oauth_connection,
                 "payment": "Choose saved_card or vipps in setup checkout_payment. During new-order preparation Oda automatically selects the configured method. Vipps requires the intended phone number in local private configuration. Saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
             },
             "meny": {
@@ -869,7 +884,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "mathem": {
                 "store_url": "https://www.mathem.se/",
                 "account": "Use your own Mathem account with complete contact and delivery details in a supported delivery area.",
-                "connection": "Complete separate Mathem OAuth. Log the dedicated checkout browser into that same intended account and selected delivery address.",
+                "connection": oauth_connection,
                 "payment": "Saved-card checkout requires one selected, usable saved card in the dedicated Mathem browser. Complete card entry and any bank approval on Mathem's website; complete other payment methods manually there.",
             },
         }[self.provider]

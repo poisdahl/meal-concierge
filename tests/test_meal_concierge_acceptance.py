@@ -395,6 +395,106 @@ class GroceryTopupTests(unittest.TestCase):
         self.assertEqual(self.quantities(app, provider)[product], 6)
         self.assertFalse(store.read().get("pending_cart_change"))
 
+    def test_observed_topup_remains_extra_when_menu_requirements_change(self):
+        store, provider, _, app, product = self.household()
+        flow_fixture.CartPlanTests.sync(app, product, 2)
+        self.approve(app, provider)
+        original = provider.call
+
+        def lose_write_reply(tool, args, **kwargs):
+            result = original(tool, args, **kwargs)
+            if tool == "manipulate_cart":
+                raise HouseholdError("lost write reply")
+            return result
+
+        with mock.patch.object(provider, "call", side_effect=lose_write_reply):
+            recovered = self.ensure(app, product, 3)
+        self.assertTrue(recovered["cart_target_observed"])
+        state = store.read()
+        self.assertEqual(state["cart_plan"]["supplemental_quantities"], {product: 1})
+        self.assertIsNone(app._cart_checkout_gate(cart_summary(provider.cart), state["menu"]))
+        flow_fixture.CartPlanTests.sync(app, product, 4)
+        self.assertEqual(self.quantities(app, provider), {product: 5})
+
+    def test_reducing_same_menu_removes_only_acknowledged_additions(self):
+        for observed in (True, False):
+            with self.subTest(observed=observed):
+                store, provider, _, app, product = self.household()
+                original = provider.call
+
+                def update_cart(tool, args, **kwargs):
+                    result = original(tool, args, **kwargs)
+                    if tool == "manipulate_cart" and observed:
+                        raise HouseholdError("lost write reply")
+                    return result
+
+                with mock.patch.object(provider, "call", side_effect=update_cart):
+                    first = flow_fixture.CartPlanTests.sync(app, product, 2, start_as_extra_product_ids=[product])
+                self.assertTrue(first["synced"])
+                self.assertEqual(self.quantities(app, provider), {product: 3})
+                self.assertEqual(store.read()["cart_plan"]["added_quantities"], {} if observed else {product: 2})
+                changed = flow_fixture.CartPlanTests.sync(app, product, 1)
+                self.assertTrue(changed["synced"])
+                self.assertEqual(self.quantities(app, provider), {product: 3 if observed else 2})
+                self.assertEqual(changed["applied_operations"], [] if observed else [{"productId": int(product), "quantity": -1}])
+
+    def test_accepted_unrelated_groceries_survive_same_menu_requirement_change(self):
+        store, provider, _, app, product = self.household()
+        flow_fixture.CartPlanTests.sync(app, product, 2)
+        original = provider.call
+
+        def concurrent_edit(tool, args, **kwargs):
+            result = original(tool, args, **kwargs)
+            if tool == "manipulate_cart":
+                provider._mutate_cart({"operations": [{"productId": 99, "quantity": 2}]})
+                raise HouseholdError("lost write reply")
+            return result
+
+        with mock.patch.object(provider, "call", side_effect=concurrent_edit):
+            with self.assertRaisesRegex(HouseholdError, "lost write reply"):
+                self.ensure(app, "20", 1)
+        view = app.handle({"operation": "cart", "action": "get"})
+        accepted = app.handle({"operation": "cart", "action": "accept_current",
+                               "operation_id": view["operation_id"], "cart_digest": view["cart_digest"]})
+        self.assertEqual(accepted["status"], "owner_accepted_cart")
+        result = flow_fixture.CartPlanTests.sync(app, product, 1)
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["applied_operations"], [{"productId": int(product), "quantity": -1}])
+        self.assertEqual(self.quantities(app, provider), {product: 1, "20": 1, "99": 2})
+        self.assertFalse(store.read().get("pending_cart_change"))
+
+    def test_inconsistent_observed_count_keeps_raw_and_managed_write_pending(self):
+        for managed, count_key in ((False, "productQuantityCount"), (True, "count")):
+            with self.subTest(managed=managed):
+                store, provider, _, app, product = self.household()
+                original = provider.call
+                writes = []
+
+                def inconsistent_readback(tool, args, **kwargs):
+                    result = original(tool, args, **kwargs)
+                    if tool == "manipulate_cart":
+                        writes.append(deepcopy(args))
+                        raise HouseholdError("lost write reply")
+                    if tool == "get_cart" and writes:
+                        return {**result, count_key: 9}
+                    return result
+
+                with mock.patch.object(provider, "call", side_effect=inconsistent_readback):
+                    if managed:
+                        result = flow_fixture.CartPlanTests.sync(app, product, 2)
+                        self.assertTrue(result["cart_write_pending"])
+                    else:
+                        with self.assertRaisesRegex(HouseholdError, "lost write reply"):
+                            self.ensure(app, product, 2)
+                    pending = store.read()["pending_cart_change"]
+                    with self.assertRaises(HouseholdError):
+                        app.handle({"operation": "cart", "action": "reconcile_change"})
+                    self.assertEqual(store.read()["pending_cart_change"], pending)
+                result = app.handle({"operation": "cart", "action": "reconcile_change"})
+                self.assertTrue(result["cart_target_observed"])
+                self.assertFalse(store.read().get("pending_cart_change"))
+                self.assertEqual(len(writes), 1)
+
     def test_excluded_supplement_does_not_return_with_changed_menu_requirements(self):
         store, provider, _browser, app, product = self.household()
         flow_fixture.CartPlanTests.sync(app, product, 1)
@@ -430,18 +530,106 @@ class GroceryTopupTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "reconcile_change"):
             reopened.handle({"operation": "checkout", "action": "prepare"})
         self.assertEqual(len(queued), 1)
-        # An independent edit satisfies the target; the original delayed
-        # operation can still arrive. Neither matching read releases it.
+        # Use the observed cart as the shopping result, without asserting
+        # which shopper made it or repeating our original delta.
         provider._mutate_cart(queued[0])
         provider.call = original
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            reopened.handle({"operation": "cart", "action": "reconcile_change"})
-        provider._mutate_cart(queued[0])
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            reopened.handle({"operation": "cart", "action": "reconcile_change"})
-        self.assertEqual(self.quantities(app, provider)[product], 3)
-        self.assertTrue(store.read()["pending_cart_change"])
+        result = reopened.handle({"operation": "cart", "action": "reconcile_change"})
+        self.assertTrue(result["cart_target_observed"])
+        receipt = store.read()["cart_change_receipts"][result["operation_id"]]
+        self.assertEqual(receipt["dispatch_outcome"], "unknown")
+        self.assertEqual(receipt["original_operation"]["expected"], {str(product): 2})
+        self.assertFalse(store.read().get("pending_cart_change"))
         self.assertEqual(len(queued), 1)
+
+    def test_checkout_prepare_rereads_after_lost_write_and_unavailable_read(self):
+        store, provider, browser, app, product = self.household()
+        original = provider.call
+        writes = []
+        def lose_replies(tool, args, **kwargs):
+            if tool == "get_cart" and writes:
+                raise HouseholdError("temporary read outage")
+            result = original(tool, args, **kwargs)
+            if tool == "manipulate_cart":
+                writes.append(deepcopy(args))
+                raise HouseholdError("lost write reply")
+            return result
+
+        provider.call = lose_replies
+        with self.assertRaisesRegex(HouseholdError, "lost write reply"):
+            self.ensure(app, product, 2)
+        journal = store.read()["pending_cart_change"]
+        provider.call = original
+        reopened = Application(StateStore(store.directory, store.config), provider, browser)
+        with mock.patch.object(reopened, "_checkout", return_value={"status": "prepared"}) as prepare:
+            self.assertEqual(reopened.handle({"operation": "checkout"})["status"], "prepared")
+            prepare.assert_called_once()
+        self.assertEqual(len(writes), 1)
+        final = store.read()
+        self.assertFalse(final.get("pending_cart_change"))
+        self.assertEqual(final["cart_change_receipts"][journal["operation_id"]]["original_operation"], journal)
+
+    def test_accept_current_ordinary_cart_with_legacy_journal_and_stale_review(self):
+        store, provider, _, app, product = self.household()
+        before = self.quantities(app, provider)
+        journal = {"before": before, "expected": {str(product): 4}, "operations": [{"productId": int(product), "quantity": 3}],
+                   "provider": "oda", "order_change": None}
+        with store.locked() as state:
+            state["pending_cart_change"] = deepcopy(journal)
+        def read():
+            return app.handle({"operation": "cart", "action": "get", "response_view": "agent"})
+        view = read()
+        self.assertTrue(view["accept_current_available"])
+        args = {"operation": "cart", "action": "accept_current", "cart_digest": view["cart_digest"],
+                "operation_id": view["operation_id"]}
+        with self.assertRaises(HouseholdError):
+            app.handle({**args, "operation_id": "other"})
+        provider._mutate_cart({"operations": [{"productId": int(product), "quantity": 1}]})
+        with self.assertRaisesRegex(HouseholdError, "changed since"):
+            app.handle(args)
+        args["cart_digest"] = read()["cart_digest"]
+        self.assertEqual(store.read()["pending_cart_change"], journal)
+        with mock.patch.object(provider, "call", wraps=provider.call) as calls:
+            self.assertEqual(app.handle(args)["status"], "owner_accepted_cart")
+            self.assertEqual(app.handle(args)["status"], "previously_accepted")
+            self.assertTrue(all(call.args[0] == "get_cart" for call in calls.call_args_list))
+        self.assertEqual(store.read()["cart_change_receipts"][args["operation_id"]]["original_operation"], journal)
+        self.assertFalse(store.read().get("pending_cart_change"))
+
+    def test_accept_physical_cart_after_original_menu_is_cleared(self):
+        store, provider, _, app, product = self.household()
+        original = provider.call
+        def lose(tool, args, **kwargs):
+            if tool == "manipulate_cart":
+                raise HouseholdError("lost cart reply")
+            return original(tool, args, **kwargs)
+        with mock.patch.object(provider, "call", side_effect=lose):
+            result = flow_fixture.CartPlanTests.sync(app, product, 2)
+        self.assertTrue(result["cart_write_pending"])
+        journal = store.read()["pending_cart_change"]
+        app.handle({"operation": "menu", "action": "clear", "menu_ref": journal["managed_menu"]})
+        shown = app.handle({"operation": "cart", "action": "get", "response_view": "agent"})
+        with mock.patch.object(provider, "call", wraps=provider.call) as reads:
+            accepted = app.handle({"operation": "cart", "action": "accept_current",
+                                   "cart_digest": shown["cart_digest"], "operation_id": shown["operation_id"]})
+            self.assertEqual([call.args[0] for call in reads.call_args_list], ["get_cart"])
+        self.assertEqual(accepted["status"], "owner_accepted_cart")
+        state = store.read()
+        self.assertIsNone(state.get("menu"))
+        self.assertIsNone(state.get("pending_cart_change"))
+        self.assertEqual(state["cart_change_receipts"][shown["operation_id"]]["original_operation"], journal)
+
+    def test_matching_legacy_cart_with_unsubmitted_cancellation_recovers(self):
+        store, provider, _, app, product = self.household()
+        quantities = self.quantities(app, provider)
+        journal = {"before": {}, "expected": quantities, "operations": [{"productId": int(product), "quantity": 1}],
+                   "provider": "oda", "order_change": None}
+        cancellation = {"status": "awaiting_confirmation", "order_id": "synthetic-other"}
+        with store.locked() as state:
+            state.update(pending_cart_change=journal, pending_cancellation=cancellation)
+        result = app.handle({"operation": "cart", "action": "reconcile_change"})
+        self.assertTrue(result["cart_target_observed"])
+        self.assertEqual(store.read()["pending_cancellation"], cancellation)
 
     def test_completed_raw_batch_with_concurrent_edit_requires_review_after_restart(self):
         store, provider, browser, app, product = self.household()

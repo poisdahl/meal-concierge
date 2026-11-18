@@ -702,7 +702,7 @@ class NativeCoreRpcTests(NativeFixture):
                 start_at=day.replace(hour=9, minute=0, second=0, microsecond=0).isoformat(),
                 end_at=day.replace(hour=12, minute=0, second=0, microsecond=0).isoformat(), price_ore=0)
         self.browser = MuseBrowser(self.directory, "original-task", self.shop, state_store=self.store)
-        self.app = muse.ProtectedMuseApplication(self.store, self.shop, self.browser, external_recipe_sources={})
+        self.app = muse.ProtectedMuseApplication(self.store, self.shop, self.browser)
         self.app._now = lambda: datetime.now(timezone.utc)
         self.produced = set()
         self.effects = []

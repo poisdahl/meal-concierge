@@ -496,7 +496,7 @@ def application(root, config, reader, command_id, deadline, *, new=False, reques
             with store.locked() as saved:
                 saved["native_config_sha256"] = dots.digest(dots.encoded(config))
         host = NativeHost(store, config, reader, command_id, deadline, request)
-        app = Application(store, host, None, external_recipe_sources={},
+        app = Application(store, host, None,
                           products_apply_budget_seconds=PRODUCTS_APPLY_BUDGET_SECONDS)
         host.app = app
         if new:

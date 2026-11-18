@@ -95,7 +95,10 @@ def source_group(recipe: Mapping[str, Any], *, entry_origin: str | None = None,
     except RecipeError:
         pass
     kind = str((recipe.get("source") or {}).get("kind") or "").casefold()
-    return kind if kind in {"themealdb", "wikibooks", "web"} else "own"
+    # Frozen legacy discoveries retain their publisher identity. Neither retired
+    # ID can carry a live preference, and only saved entries count as bank items.
+    from core import RETIRED_RECIPE_SOURCES
+    return kind if kind in (*RETIRED_RECIPE_SOURCES, "web") else "own"
 
 
 def source_tie_order(candidate, profile):

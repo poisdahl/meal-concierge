@@ -1237,6 +1237,16 @@ class ProviderLoginStatusTests(unittest.TestCase):
                 self.assertEqual(app.handle({'operation': 'health'})['integration']['status'], 'ready')
                 app.handle({'operation': 'status'})
                 self.assertEqual(calls, ['probe', 'probe', 'probe'])
+                result['error'] = provider.title() + ' login is required'
+                check = {'operation': 'status', 'response_view': 'agent', 'check_store_connection': True}
+                connection = app.handle(check)['store_readiness']['connection_check']
+                self.assertEqual(connection['status'], 'needs_user_action')
+                self.assertIn('store-login', connection['next_action'])
+                self.assertIn('host-managed', connection['next_action'])
+                self.assertIn('configured token directory', connection['next_action'])
+                result.clear()
+                self.assertEqual(app.handle(check)['store_readiness']['connection_check']['status'], 'verified')
+                self.assertEqual(len(calls), 5)
                 self.assertEqual(shop.calls, [])
                 self.assertEqual(store.read(), before)
 
@@ -1315,13 +1325,9 @@ class MathemFlowTests(unittest.TestCase):
 
     def test_uncertain_cart_is_reconciled_without_second_dispatch(self):
         self.shop.fail_after_write = True
-        with self.assertRaisesRegex(HouseholdError, 'timed out'):
-            self.app.handle({'operation': 'cart', 'action': 'change', 'operations': [{'productId': 10, 'quantity': 1}]})
-        with self.assertRaisesRegex(HouseholdError, 'reconcile_change'):
-            self.app.handle({'operation': 'checkout', 'action': 'prepare'})
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            self.app.handle({'operation': 'cart', 'action': 'reconcile_change'})
-        self.assertIsNotNone(self.store.read().get('pending_cart_change'))
+        result = self.app.handle({'operation': 'cart', 'action': 'change', 'operations': [{'productId': 10, 'quantity': 1}]})
+        self.assertTrue(result['cart_target_observed'])
+        self.assertFalse(self.store.read().get('pending_cart_change'))
         self.assertEqual(sum(tool == 'manipulate_cart' for tool, _ in self.shop.calls), 1)
 
     def test_protected_actions_never_use_oda_browser_or_create_attempts(self):
@@ -1688,17 +1694,12 @@ class CompactProductApplyTests(unittest.TestCase):
                 raise HouseholdError('synthetic lost cart response after effect')
             return result
         self.shop.call = lost_response
-        self.app.handle(self.arguments)
+        self.assertTrue(self.app.handle(self.arguments)['applied'])
         restarted = Application(StateStore(self.store.path.parent, {
             'instance': 'test', 'household': 'Test', 'profile_overrides': {}}), self.shop, object())
-        result = restarted.handle(self.arguments)
-        self.assertTrue(result["outcome_unknown"])
-        journal = restarted.store.read()["pending_cart_change"]
-        self.assertEqual(journal["operation_id"], result["operation_id"])
-        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
-            restarted.handle({"operation": "cart", "action": "reconcile_change"})
-        self.assertEqual(restarted.store.read()["pending_cart_change"], journal)
-        self.assertTrue(restarted.handle(self.arguments)["outcome_unknown"])
+        self.assertFalse(restarted.store.read().get('pending_cart_change'))
+        self.assertEqual(restarted.store.read()['cart_plan']['added_quantities'], {})
+        restarted.handle(self.arguments)
         self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
         self.assertEqual(self.shop.cart['items'][0]['quantity'], 1)
 
@@ -1789,7 +1790,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
                         'idempotency_key': 'saved-dinner-' + str(i)})['recipe']
                     refs.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
                 app.handle({'operation': 'profile', 'action': 'update', 'changes': {'recipes': {'sources': {
-                    'oda': False, 'mathem': False, 'meny': False, 'themealdb': False, 'wikibooks': False}}}})
+                    'oda': False, 'mathem': False, 'meny': False}}}})
                 plan = app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
                     'week': '2026-W38', 'dates': [f'2026-09-{14+i}' for i in range(7)],
                     'portions': 2, 'candidates': refs}})['plan']
@@ -2569,7 +2570,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
                                     'idempotency_key': 'egg-week-' + str(index)})['recipe']
             refs.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
         self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'recipes': {'sources': {
-            'oda': False, 'mathem': False, 'meny': False, 'themealdb': False, 'wikibooks': False}}}})
+            'oda': False, 'mathem': False, 'meny': False}}}})
         plan = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
             'week': '2026-W38', 'dates': [f'2026-09-{14+i}' for i in range(7)], 'portions': 2, 'candidates': refs}})['plan']
         menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_ref': plan['save_ref']})['menu']

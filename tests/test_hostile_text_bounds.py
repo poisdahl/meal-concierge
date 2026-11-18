@@ -9,7 +9,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from product_observations import _package_descriptor, parse_package
-from recipe_sources import TheMealDBSource
 import web_recipes
 from web_recipes import DEFAULT_WEB_SEARCH, search_web, url_enabled
 
@@ -72,20 +71,6 @@ class HostileTextTests(unittest.TestCase):
         self.assertEqual((statuses["godfisk.no"], statuses["matprat.no"]), ("unavailable", "completed"))
         self.assertEqual(result["coverage"], "partial")
 
-    def test_themealdb_tags_and_a_malformed_source_link_do_not_cost_the_recipe(self):
-        source = TheMealDBSource(transport=lambda *_arguments, **_options: {"meals": [
-            meal(strTags=",".join(f"tag{index}" for index in range(60_000))),
-            meal(idMeal="52773", strMeal="Bean soup", strSource="www.recipes.example/bean-soup"),
-            meal(idMeal="52774", strMeal="Pea soup", strSource="https://recipes.example/pea-soup"),
-        ]}, clock=lambda: "2026-11-16T00:00:00+00:00")
-        started = time.monotonic()
-        tagged, malformed, linked = source.search("soup", 5)
-        self.assertLess(time.monotonic() - started, 2)
-        self.assertEqual((len(tagged["tags"]), tagged["tags"][0], tagged["tags"][-1]), (50, "tag0", "tag49"))
-        self.assertEqual(malformed["name"], "Bean soup")
-        self.assertIsNone((malformed["source"].get("original") or {}).get("url"))
-        self.assertEqual(malformed["source"]["url"], "https://www.themealdb.com/meal/52773")
-        self.assertEqual(linked["source"]["original"]["url"], "https://recipes.example/pea-soup")
 
 
 if __name__ == "__main__":

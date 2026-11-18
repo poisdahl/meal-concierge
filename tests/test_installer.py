@@ -269,6 +269,32 @@ class InstallerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_store_login_uses_selected_installation_and_existing_private_helper(self):
+        home = self.root.resolve()
+        program = home / 'program'
+        release = program / 'release-first'
+        release.mkdir(parents=True)
+        (program / 'current').symlink_to(release)
+        config = home / 'config.json'
+        tokens = home / 'adopted-private-tokens'
+        install.write_json(program / 'owner.json', {'home': str(home)})
+        install.write_json(home / 'runtime.json', {'code_root': str(program), 'release': str(release),
+                           'paths': {'tokens': str(tokens), 'config': str(config)}})
+        for provider, options in [('oda', []), ('mathem', ['--no-browser'])]:
+            with self.subTest(provider=provider):
+                install.write_json(config, {'provider': provider})
+                args = ['install.py', 'store-login', '--home', str(home), *options]
+                with patch.object(sys, 'argv', args), patch.object(install, 'run') as launch:
+                    install.main()
+                    launch.assert_called_once_with(release / 'venv/bin/python', '-I', '-B',
+                        release / 'provider_oauth.py', '--provider', provider, '--tokens', str(tokens), *options)
+                self.assertFalse(tokens.exists())
+        install.write_json(home / 'maintenance.json', {'kind': 'fixture'})
+        with patch.object(sys, 'argv', args), patch.object(install, 'run') as launch:
+            with self.assertRaisesRegex(RuntimeError, 'interrupted maintenance'):
+                install.main()
+            launch.assert_not_called()
+
     def test_new_oda_and_mathem_installs_share_browser_validation(self):
         adapter, chrome = browser_dependencies(self.root)
         for provider in ('oda', 'mathem'):
@@ -1058,7 +1084,7 @@ class InstallerTests(unittest.TestCase):
         old = RecipeStore(state / 'recipes.sqlite3', CONFIG['household']).get('rec_v1', 1)
         self.assertEqual(old['name'], RECIPE['name'])
         self.assertEqual(old['library_recipe_ref']['version'], '1')
-        self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 14)
+        self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 15)
         with sqlite3.connect(state / 'recipes.sqlite3') as db:
             self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '8')
             self.assertEqual(db.execute('select response_json from idempotency where key=?', ('v1-key',)).fetchone()[0], '{"id":"rec_v1"}')

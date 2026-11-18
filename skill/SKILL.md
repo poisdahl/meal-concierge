@@ -9,6 +9,15 @@ Use this household's currently discovered Meal Concierge MCP tools. The service
 owns the configured household, recipe bank and any connected store/account/payment
 path. With `provider=none`, recipes, menus and ordinary shopping lists work
 without login. Do not require store, delivery or payment setup for these tasks.
+For an Oda or Mathem sign-in problem, call status with
+`check_store_connection=true`. If sign-in is required, explain the private
+owner login from `store_readiness.connection_check.next_action`. Use the site's private login flow for host-managed installations. The runtime
+owner launches the helper in a private terminal and the account owner completes
+sign-in in their browser. Keep authorization files, callbacks and interactive
+terminal output out of the conversation. When they return, check the connection, confirm the original retailer account
+and delivery address, and read the original cart or order before continuing
+interrupted shopping.
+
 A name in conversation never selects another account. Start with saved preferences
 and, when resuming, `status.workflow.next_action`. That indicates unfinished work,
 not a new purchase mandate. Answer simple reads without starting a larger flow.
@@ -595,6 +604,10 @@ request to empty the cart, call `get`, then `clear` with its top-level
 `cart_digest` and no operations. This keeps the saved menu and invalidates old
 product completion. Active order edits and uncertain operations must be resolved
 first. A lost cart-write result uses `reconcile_change`; never resend the delta.
+For an ordinary Oda or Mathem cart, continue automatically when the requested
+contents are observed. If they differ, show the current cart. When the user
+says to use it, call `cart accept_current` with the operation ID and digest
+from that cart read, then continue the requested workflow.
 
 Show material substitutions, exact variants, package sizes and counts. Separate
 merchandise estimates from final totals, pant and delivery fees. Unknown prices

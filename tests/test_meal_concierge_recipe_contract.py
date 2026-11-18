@@ -22,7 +22,7 @@ from product_planner import menu_requirements
 from recipe_library_mealie import MealieAdapter
 from recipe_library_recipesage import RecipeSageAdapter
 from recipe_libraries import RecipeLibraryError
-from recipe_sources import TheMealDBSource, provider_recipe_candidates
+from recipe_sources import provider_recipe_candidates
 from recipe_portable import export_private_archive, restore_private_archive
 from service import Application
 from service_common import menu_email_html
@@ -420,17 +420,6 @@ class RecipeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RecipeError, "HTTPS"):
             normalize_source_url("http://host.example:9000/r")
 
-    def test_themealdb_preserves_upstream_original_measure_and_unknown_servings(self):
-        meal = {"idMeal": "123", "strMeal": "Synthetic", "strInstructions": "Cook at 180 C for 30 minutes.", "strIngredient1": "cornflour", "strMeasure1": "3 ts", "strSource": "http://example.org/recipe?id=7&oldid=9&utm_medium=test"}
-        source = TheMealDBSource(transport=lambda *a, **k: {"meals": [meal]})
-        recipe = source.search("Synthetic", 1)[0]
-        self.assertEqual(recipe["source"]["original"]["url"], "http://example.org/recipe?id=7&oldid=9")
-        self.assertEqual(recipe["ingredients"][0]["original_text"], "3 ts cornflour")
-        self.assertEqual(recipe["ingredients"][0]["item"], "maisstivelse")
-        self.assertIsNone(recipe["portions"])
-        rendered = menu_email_html({"week": "2026-W40", "dishes": [scale_recipe(recipe)], "salads": []})
-        self.assertIn("Opprinnelig kilde", rendered)
-        self.assertIn("Cook at 180 C for 30 minutes.", rendered)
 
     def test_generated_relabeling_and_legacy_downgrade_cannot_bypass_acceptance(self):
         recipe = authored_recipe()

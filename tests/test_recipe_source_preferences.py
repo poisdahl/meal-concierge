@@ -27,16 +27,6 @@ def recipe(name, **source):
             "source": {"kind": "user", "relationship": "user_supplied", **source}, "rights": {"storage": "full"}}
 
 
-class StaticSource:
-    def __init__(self, kind, names):
-        self.kind, self.names, self.limits = kind, names, []
-
-    def search(self, query, limit):
-        self.limits.append(limit)
-        return [external_recipe(self.kind, name, f"{self.kind}-{index}", content_hash=f"{index:064x}")
-                for index, name in enumerate(self.names[:limit])]
-
-
 class SourcePreferenceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -45,7 +35,7 @@ class SourcePreferenceTests(unittest.TestCase):
         self.config = {"instance": "source-preferences", "household": "Synthetic household",
                        "provider": "oda", "profile_overrides": {}}
         self.store = StateStore(self.directory, self.config)
-        self.app = Application(self.store, FakeProvider(), object(), external_recipe_sources={})
+        self.app = Application(self.store, FakeProvider(), object())
         self.app.handle({"operation": "setup", "action": "apply", "keep_current": True})
 
     def apply(self, preferences):
@@ -95,8 +85,8 @@ class SourcePreferenceTests(unittest.TestCase):
         self.assertEqual((updated["recipes"]["repeat_cooldown_weeks"], updated["recipes"]["occasional_sources"]), (4, []))
 
     def test_setup_saves_replaces_and_moves_preferences(self):
-        self.apply({"preferred": ["own", "collection:family-cookbooks"], "occasional": ["themealdb", "wikibooks"]})
-        self.assertEqual(self.saved_levels(), (["own", "collection:family-cookbooks"], ["themealdb", "wikibooks"]))
+        self.apply({"preferred": ["own", "collection:family-cookbooks"], "occasional": ["store", "web"]})
+        self.assertEqual(self.saved_levels(), (["own", "collection:family-cookbooks"], ["store", "web"]))
         # A supplied list replaces the saved one, and takes its sources out of the other level.
         self.apply({"occasional": ["own", "store"]})
         self.assertEqual(self.saved_levels(), (["collection:family-cookbooks"], ["own", "store"]))
@@ -213,20 +203,19 @@ class SourcePreferenceTests(unittest.TestCase):
     def test_overview_lists_each_source_once_with_switch_preference_and_bank_counts(self):
         self.fill_bank()
         self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
-                         "changes": {"recipe_sources": {"wikibooks": False}}})
+                         "changes": {"recipe_sources": {"oda": False}}})
         current = self.apply({"preferred": ["collection:family-cookbooks"],
-                              "occasional": ["themealdb", "collection:not-installed"]})
+                              "occasional": ["collection:not-installed"]})
         rows = {row["id"]: row for row in current["recipe_source_overview"]}
         self.assertEqual(list(rows), ["collection:family-cookbooks", "own", "collection:wikibooks-themealdb-en",
-                                      "store", "web", "collection:not-installed", "themealdb", "wikibooks"])
+                                      "web", "collection:not-installed", "store"])
         self.assertEqual({key: rows["collection:family-cookbooks"][key] for key in ("kind", "enabled", "recipes", "installed", "preference")},
                          {"kind": "collection", "enabled": True, "recipes": 2, "installed": True, "preference": "preferred"})
         self.assertEqual((rows["own"]["recipes"], rows["own"]["preference"], rows["own"]["switch"]), (2, "normal", "internal"))
         self.assertEqual(rows["collection:family-cookbooks"]["switch"], "internal")
         self.assertEqual((rows["collection:not-installed"]["installed"], rows["collection:not-installed"]["recipes"]), (False, 0))
         # Only the selected store is a source; other stores are not listed.
-        self.assertEqual((rows["store"]["label"], rows["store"]["switch"], rows["store"]["enabled"]), ("ODA recipes", "oda", True))
-        self.assertEqual((rows["wikibooks"]["enabled"], rows["themealdb"]["preference"]), (False, "occasional"))
+        self.assertEqual((rows["store"]["label"], rows["store"]["switch"], rows["store"]["enabled"]), ("ODA recipes", "oda", False))
         self.assertEqual(rows["web"]["sites"][0], "MatPrat")
         self.assertEqual(rows["web"]["other_websites"], "only on request")
         overview = self.app.handle({"operation": "profile", "action": "overview"})["recipe_source_overview"]
@@ -348,31 +337,44 @@ class SourcePreferenceTests(unittest.TestCase):
 
     def test_cross_source_discovery_lists_preferred_sources_first_and_occasional_last(self):
         self.fill_bank()
-        meal_db, wikibooks = StaticSource("themealdb", [f"MealDB {i}" for i in range(6)]), StaticSource("wikibooks", [f"Wiki {i}" for i in range(6)])
-        self.app.external_recipe_sources = {"themealdb": meal_db, "wikibooks": wikibooks}
-        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
-                         "changes": {"recipe_sources": {"oda": False}}})
-        self.apply({"preferred": ["wikibooks"], "occasional": ["themealdb", "store"]})
-        result = self.app.handle({"operation": "recipes", "action": "discover", "limit": 9})
-        # Every source is asked for the same share; only the order follows the preference.
-        self.assertEqual(result["balanced_limit_per_source"], 3)
-        self.assertEqual((wikibooks.limits, meal_db.limits), ([3], [3]))
-        names = [row["name"] for row in result["recipes"]]
-        self.assertEqual(names[:3], ["Wiki 0", "Own 1", "MealDB 0"])
-        self.assertEqual(len(names), 9)
-        statuses = {row["source"]: row.get("preference") for row in result["sources"]}
-        # A switched-off or non-selected store carries no preference label.
-        self.assertEqual(statuses, {"internal": None, "oda": None, "meny": None, "mathem": None,
-                                    "themealdb": "occasional", "wikibooks": "preferred"})
-        self.assertEqual(result["source_preferences"], {"preferred": ["wikibooks"], "occasional": ["themealdb", "store"]})
-        # The overall limit cuts the occasional source first.
-        short = self.app.handle({"operation": "recipes", "action": "discover", "limit": 2})
-        self.assertEqual([row["name"] for row in short["recipes"]], ["Wiki 0", "Own 1"])
-        # An occasional source that is the only one switched on still fills the result.
-        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
-                         "changes": {"recipe_sources": {"internal": False, "wikibooks": False}}})
-        alone = self.app.handle({"operation": "recipes", "action": "discover", "limit": 5})
-        self.assertEqual([row["name"] for row in alone["recipes"]], [f"MealDB {i}" for i in range(5)])
+        self.apply({"preferred": ["store"], "occasional": ["own"]})
+        store_recipes = [recipe(f"Store {i}", kind="oda", url=f"https://oda.com/no/recipes/{i}-soup/") for i in range(6)]
+        with patch.object(self.app, "_provider_recipe_candidates", side_effect=lambda source, q, n: store_recipes[:n]):
+            result = self.app.handle({"operation": "recipes", "action": "discover", "query": "", "limit": 9})
+            self.assertEqual(result["balanced_limit_per_source"], 5)
+            self.assertEqual(result["recipes"][0]["name"], "Store 0")
+            self.assertEqual(len(result["recipes"]), 9)
+            self.assertEqual(result["source_preferences"], {"preferred": ["store"], "occasional": ["own"]})
+            short = self.app.handle({"operation": "recipes", "action": "discover", "limit": 1})
+            self.assertEqual([row["name"] for row in short["recipes"]], ["Store 0"])
+
+    def test_v14_migration_keeps_only_active_source_authority_and_exact_collection_preferences(self):
+        path = self.directory / "state.json"
+        original = self.store.read()
+        original["version"] = 14
+        profile = original["profile"]["recipes"]
+        profile["sources"].update(internal=False, oda=False, themealdb=True, wikibooks=False)
+        profile["preferred_sources"] = ["wikibooks", "collection:wikibooks-themealdb-en", "own"]
+        profile["occasional_sources"] = ["themealdb", "web"]
+        path.write_text(json.dumps(original))
+        current = StateStore(self.directory, self.config).read()
+        self.assertEqual(json.loads((self.directory / "state-v14.backup.json").read_text()), original)
+        expected = deepcopy(original)
+        expected["version"] = STATE_VERSION
+        recipes = expected["profile"]["recipes"]
+        del recipes["sources"]["themealdb"], recipes["sources"]["wikibooks"]
+        recipes["preferred_sources"], recipes["occasional_sources"] = ["collection:wikibooks-themealdb-en", "own"], ["web"]
+        self.assertEqual(current, expected)
+        for removed in ("themealdb", "wikibooks"):
+            with self.subTest(group=removed):
+                for projection in ("full", "summary"):
+                    with self.assertRaises(RecipeError):
+                        self.app.handle({"operation": "recipes", "action": "discover", "source": removed, "projection": projection})
+                with self.assertRaises(HouseholdError):
+                    self.apply({"preferred": [removed]})
+                with self.assertRaises(HouseholdError):
+                    self.app.handle({"operation": "setup", "action": "apply", "changes": {"recipe_sources": {removed: True}}})
+        self.assertEqual(self.store.read(), expected)
 
 
 if __name__ == "__main__":

@@ -174,7 +174,7 @@ quantities stay visible. Ask to edit, favorite or archive a saved recipe.
 - “Prefer my own cookbooks, and use the store's recipes only occasionally.”
 
 Recipes come from your own saved recipes, any installed collections, your
-store, recipe websites and two open English-language databases. Each source can
+store and recipe websites. Each source can
 be switched on or off, and marked as **preferred** (considered first) or
 **occasional** (considered after the others). Everything else is normal. A
 preference decides between comparable dishes; it never overrides your dietary
@@ -272,8 +272,20 @@ from pausing grocery planning or ordering. Confirm which activity you want to st
 separately. Neither requires starting a new household.
 
 If tools disappear, open a new conversation and ask the agent to inspect its
-connection to the existing service. If a store session expires, complete login
-again in the intended account. Preserve your installation and data while
+connection to the existing service. To check Oda or Mathem after a sign-in
+problem, ask your agent to check the store connection now. If sign-in is
+required, complete the household's private login on its installation host.
+For standalone installs, run `./install.sh store-login` from the project directory
+in the runtime owner's private terminal, with the same `--home` used at installation.
+For a host-managed service, use its private connection flow or ask its runtime
+owner to launch the existing OAuth helper in the active runtime with the household's
+configured token directory. Sign in to the same intended retailer account as the
+dedicated checkout browser, then ask your agent to check again. Headless hosts
+can use the [private sign-in procedure](runtime-reference.md#provider-oauth).
+Keep credentials, callback codes and authorization links in the private login
+session. If a cart write or order was already in progress, confirm the original
+retailer account and delivery address after sign-in. The agent can then read
+the original cart or order and continue its recovery. Preserve your installation and data while
 troubleshooting; do not reset them to resolve a missing tool or an uncertain order.
 
 ## Who chooses the food
@@ -290,8 +302,18 @@ quantities are labeled estimates with assumptions. Ask to save an adaptation
 when it should become a lasting bank entry. Oda, Mathem and MENY recipes retain
 their store binding and use the existing schema-2 format.
 
+If Oda or Mathem loses the reply to an ordinary grocery cart update, Meal
+Concierge reads the cart again. When the whole cart has the requested items
+and quantities, shopping can continue. The original write stays recorded as
+uncertain and is never resent by recovery. If that first read is unavailable,
+preparing checkout checks the cart again. If the quantities differ, Bob can show the cart. Tell Bob “use this cart and
+continue” to accept those contents. Bob checks them again before continuing.
+A cart observation cannot confirm payment or an existing order change.
+
 An explicit request to empty the cart uses its freshly observed digest. The menu
 is retained, earlier product completion is invalidated, and an uncertain removal
-is reconciled before another write. An empty cart is not a cancelled order.
+is reconciled before another write. For an uncertain ordinary Oda or Mathem clear, you can also choose to keep
+the currently shown cart. The earlier removal may still arrive, so checkout
+reads the cart again. An empty cart is not a cancelled order.
 
 Ask “Which recipe sources are on?” to see saved recipes, collections, the selected retailer and recipe websites with their current priority. “Prefer my family collection and use store recipes occasionally” changes selection priority while both sources stay enabled. The planner rotates through active recipes as planning dates and saved history change, and keeps dietary and availability checks in force.

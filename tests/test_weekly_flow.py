@@ -123,6 +123,21 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertEqual(len(dispatches), 1)
         self.assertIn('pending_cart_change', self.store.read())
         self.assertEqual(self.provider.cart['items'], [])
+        shown = self.app.handle({'operation': 'cart', 'action': 'get', 'response_view': 'agent'})
+        self.assertTrue(shown['accept_current_available'])
+        with self.store.locked() as state:
+            state["cart_plan"].update(partial_product_plan_digest="stale", partial_product_plan_summary={"stale": True})
+        with mock.patch.object(self.provider, 'call', wraps=self.provider.call) as reads:
+            accepted = self.app.handle({'operation': 'cart', 'action': 'accept_current',
+                                        'operation_id': shown['operation_id'], 'cart_digest': shown['cart_digest']})
+            self.assertEqual([call.args[0] for call in reads.call_args_list], ['get_cart'])
+        self.assertEqual(accepted['status'], 'owner_accepted_cart')
+        self.assertNotIn('cleared', accepted)
+        plan = self.store.read()['cart_plan']
+        self.assertFalse(set(plan).intersection({'product_plan_digest', 'product_plan_authority', 'product_plan_summary',
+                                                 'partial_product_plan_digest', 'partial_product_plan_summary'}))
+        self.assertTrue(self.store.read()['cart_change_receipts'][shown['operation_id']]['original_operation']['clear_requested'])
+
 
     def recurring(self, product='10'):
         name = 'Fast vare ' + product
@@ -407,7 +422,7 @@ class WeeklyFlowTests(unittest.TestCase):
             return result
         with mock.patch.object(self.provider, 'call', side_effect=lost_response):
             result = self.app.handle({'operation': 'products', **prepared['apply_arguments'], 'cart_change_requested': True})
-        self.assertFalse(result['applied'])
+        self.assertTrue(result['applied'])
         plan = self.store.read()['cart_plan']
         self.assertEqual(plan['supplemental_quantities']['10'], 1)
         self.assertNotIn('10', plan['added_quantities'])
