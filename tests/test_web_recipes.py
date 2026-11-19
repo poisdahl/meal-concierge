@@ -391,6 +391,9 @@ class WebRecipeTests(unittest.TestCase):
         self.assertEqual(imported['recipe']['source']['kind'], 'pasted_text')
         self.assertEqual(imported['recipe']['source']['url'], url)
         self.assertEqual(imported['recipe']['source']['original']['url'], url)
+        from recipe_selection import source_group
+        self.assertEqual(source_group(imported['recipe']), 'web')
+        self.assertEqual(source_group(imported['recipe'], entry_origin='user'), 'own')
         self.assertEqual(imported['import_report']['source_context']['metadata_basis']['name'],
                          'host_interpretation')
         result, _, _ = self.plan([{'discovery_ref': imported['discovery_ref']}],
