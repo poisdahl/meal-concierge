@@ -24,12 +24,15 @@ def fake_adapter(directory, *, stdout="", stderr="", exit_code=1, delay=0, invoc
     path = Path(directory) / 'adapter'
     body = (f"import sys,time; time.sleep({delay!r}); "
             f"sys.stderr.write({stderr!r}); sys.stdout.write({stdout!r}); sys.exit({exit_code!r})")
-    if invocation_log is not None:
-        body = f"with open({str(invocation_log)!r}, 'a') as log: log.write('invoked\\n')\n" + body
     script = Path(directory) / 'adapter-code.py'
     script.write_text(body)
-    path.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable)
-                    + ' -I -B ' + shlex.quote(str(script)) + ' "$@"\n')
+    # Record entry into the adapter even if the deadline expires during Python startup.
+    launcher = ['#!/bin/sh']
+    if invocation_log is not None:
+        launcher.append('echo invoked >> ' + shlex.quote(str(invocation_log)))
+    launcher.append('exec ' + shlex.quote(sys.executable)
+                    + ' -I -B ' + shlex.quote(str(script)) + ' "$@"')
+    path.write_text('\n'.join(launcher) + '\n')
     path.chmod(0o700)
     return path
 
