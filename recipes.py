@@ -450,7 +450,7 @@ _SECOND_AMOUNT = re.compile(
 # A separately stated amount after a named food must not become part of its
 # shopping identity. Keep proportional wording ("2% milk") unaffected.
 _JOINED_SOURCE_AMOUNT = re.compile(
-    r"(?:(?<!\w)(?:og|och|and|pluss?|samt|or|eller)\b|[+&;])\s*(?=[0-9¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])",
+    r"(?:(?<!\w)(?:og|och|and|pluss?|samt|or|eller)\b|[+&;]|(?<!\d)[/|])\s*(?=[0-9¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])",
     re.IGNORECASE,
 )
 
@@ -534,6 +534,7 @@ def source_ingredient_parts(text: str, *, language: str, max_rows: int) -> list[
     """Split only explicit additive quantities of independently identifiable foods."""
     joins = list(_JOINED_SOURCE_AMOUNT.finditer(text))
     if (joins and len(joins) < max_rows
+            and all(join[0].strip() not in {"/", "|"} for join in joins)
             and not re.search(r"\b(?:or|eller)\b|[/|]\s*[A-Za-zÆØÅæøå]", text, re.IGNORECASE)):
         parts = _JOINED_SOURCE_AMOUNT.split(text)
         parsed = [source_ingredient(part.strip(), language=language, attached_metric_units=True) for part in parts]

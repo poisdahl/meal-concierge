@@ -355,14 +355,16 @@ class RetailerPublicDetailTests(unittest.TestCase):
         from retailer_recipes import retail_web_recipe_input
         source = self.source()
         incoming = ["1 msk olja och 2 tsk salt", "1 msk olja eller 3 msk smör",
-                    "1 msk olja och 2 msk till servering"]
+                    "1 msk olja och 2 msk till servering",
+                    "2 msk olja/4 msk smör", "1/2 msk olja | 3/4 msk smör (optional)"]
         with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=self.fetched(source, ingredients=incoming)):
             rows = retail_web_recipe_input(source, "mathem")["ingredients"]
         self.assertEqual([(r["item"], r["quantity"]["numerator"], r["unit"]) for r in rows[:2]],
                          [("matolje", 1, "ss"), ("salt", 2, "ts")])
         self.assertEqual([r["original_text"] for r in rows], ["1 msk olja", "2 tsk salt", *incoming[1:]])
         self.assertTrue(all(r["evidence"]["quantity"]["input"] == r["original_text"] for r in rows))
-        self.assertTrue(all(r["quantity"] is None for r in rows[2:]))
+        self.assertTrue(all(r["quantity"] is None and not r.get("optional") for r in rows[2:]))
+        self.assertEqual(rows[-1]["original_text"], incoming[-1])
 
     def test_wrong_origin_identity_query_or_budget_never_fetches(self):
         from copy import deepcopy
