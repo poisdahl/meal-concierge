@@ -433,25 +433,27 @@ for(const c of cases){
         url = 'https://oda.com/no/account/orders/TOTAL_LABEL/'
         harness = r"""
 const {script,url}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
-const run=(text,{page=url,login=false,dialog=false,mains=1}={})=>{
+const modals=['[role="dialog"]','[role="alertdialog"]','dialog[open]','[aria-modal="true"]'];
+const run=(text,{page=url,login=false,modal,hidden=false,mains=1}={})=>{
  const root={innerText:text,getBoundingClientRect:()=>({width:10,height:10})};
  global.location={href:page};
- global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+ global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
  global.document={body:root,querySelector:()=>login,querySelectorAll:s=>
-  s==='main'?Array(mains).fill(root):dialog?[root]:[]};
+  s==='main'?Array(mains).fill(root):s.split(',').includes(modal)?[{...root,hidden}]:[]};
  return JSON.parse(eval(script)).incomplete;
 };
 const title='Bestilling TOTAL_LABEL';
 process.stdout.write(JSON.stringify([
  run('',{mains:0}),run(title),run(title+'\nOther address\nTotal inkl. MVA'),
  run('Bestilling another-order'),run('Logg inn'),run('',{login:true}),
- run('',{dialog:true}),run('',{mains:2}),run('',{page:url+'?other=1'})
+ run('',{mains:2}),run('',{page:url+'?other=1'}),
+ ...modals.map(modal=>run('',{modal})),...modals.map(modal=>run('',{modal,hidden:true}))
 ]));
 """
         result = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({
             'script': _oda_incomplete_receipt_script('TOTAL_LABEL', url), 'url': url}),
             text=True, capture_output=True, check=True, timeout=10)
-        self.assertEqual(json.loads(result.stdout), [True, True] + [False] * 7)
+        self.assertEqual(json.loads(result.stdout), [True, True] + [False] * 10 + [True] * 4)
 
     def test_oda_receipt_reopens_once_only_during_cancellation_preparation(self):
         from oda_browser import OdaBrowser

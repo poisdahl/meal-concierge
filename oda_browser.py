@@ -619,7 +619,7 @@ def _oda_incomplete_receipt_script(order_id: str, url: str) -> str:
  if(location.href!==EXPECTED_URL||document.querySelector('input[type="password"], form[action*="login"]'))
    return JSON.stringify({incomplete:false});
  const roots=[...document.querySelectorAll('main')].filter(visible);
- if(roots.length>1||[...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].some(visible))
+ if(roots.length>1||[...document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog[open],[aria-modal="true"]')].some(visible))
    return JSON.stringify({incomplete:false});
  const root=roots[0]||document.body;
  if(!root)return JSON.stringify({incomplete:true});
