@@ -332,6 +332,24 @@ class ImportConvenienceTests(unittest.TestCase):
             oil_row.update(quote=quoted, choice=choice)
             with self.assertRaisesRegex(RecipeImportReaderError, message):
                 read_transcript(source)
+        oil_row.update(quote=base, choice="vegetable oil")
+        source["pages"][0]["text"] = source["pages"][0]["text"].replace(oil, base + "\nplus a little extra for frying")
+        with self.assertRaisesRegex(RecipeImportReaderError, "complete oil"):
+            read_transcript(source)
+        source["pages"][0]["text"] = source["pages"][0]["text"].replace(base + "\nplus", base + " plus")
+        oil_row.pop("choice")
+        oil_row.update(estimated_amount={"quantity": 5, "unit": "ml", "assumptions": "Estimated oil."},
+                       item="vegetable oil")
+        for fragment in ("oil", "1 tbsp", "a little extra"):
+            oil_row["quote"] = fragment
+            with self.subTest(fragment=fragment), self.assertRaisesRegex(RecipeImportReaderError, "complete oil"):
+                read_transcript(source)
+        # A second ingredient with the same name in a separate section is legitimate.
+        source["pages"][0]["text"] += "\nGarnish\noil"
+        oil_row["quote"] = "oil"
+        garnish = read_transcript(source)["candidate"]["ingredients"][1]
+        self.assertEqual((garnish["item"], garnish["quantity"]["numerator"]), ("matolje", 5))
+        del oil_row["estimated_amount"], oil_row["item"]
         oil_row.update(quote=base, choice="sunflower oil")
         source["pages"][0]["text"] = source["pages"][0]["text"].replace(oil, base)
         without_extra = read_transcript(source)["candidate"]["ingredients"][1]

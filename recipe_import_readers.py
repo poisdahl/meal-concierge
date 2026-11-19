@@ -845,15 +845,18 @@ def read_transcript(value: Any) -> dict[str, Any]:
         quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item", "choice", "whole_count"))
         original_quote = quote
         oil_choice = SOURCE_OIL_CHOICE.fullmatch(quote)
-        if not oil_choice and re.search(r"\b(?:sunflower|vegetable)\b", quote, re.IGNORECASE):
-            page_oils = SOURCE_OIL_CHOICE.finditer(page_text[item["page"]])
-            if any(quote.casefold() in match[0].casefold() for match in page_oils):
-                raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
-        if oil_choice and not oil_choice[3]:
-            # The shorter wording can also occur in the method on the same page.
-            if any(match[3] and match[1] == oil_choice[1]
-                   for match in SOURCE_OIL_CHOICE.finditer(page_text[item["page"]])):
-                raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
+        page = page_text[item["page"]]
+        if not oil_choice or not oil_choice[3]:
+            # A fragment such as "oil" or "1 tbsp" can be real page text while
+            # losing the complete identity and its frying allowance. Accept it
+            # only if the same text is also an independent source line.
+            folded_quote = quote.casefold()
+            for match in SOURCE_OIL_CHOICE.finditer(page):
+                if folded_quote in match[0].casefold() and folded_quote != match[0].casefold():
+                    other_lines = SOURCE_OIL_CHOICE.sub("\ufffc", page).splitlines()
+                    if not any(line.strip() == quote for line in other_lines):
+                        raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
+                    break
         if "choice" in item and oil_choice:
             if item["choice"] not in ("sunflower oil", "vegetable oil") or "item" in item or "whole_count" in item:
                 raise RecipeImportReaderError("choose the complete oil identity: sunflower oil or vegetable oil")
