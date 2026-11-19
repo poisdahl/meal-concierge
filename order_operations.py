@@ -1186,6 +1186,9 @@ class OrderOperations:
         else:
             choice = self._current_delivery_choice(
                 occurrence=occurrence or None, deadline=deadline, expected_slot=expected_slot,
+                **({"scope_cart": self.provider_client.call(
+                    "get_cart", {"confirm_order_code": (change or {}).get("code")}, deadline=deadline,
+                )} if self.provider == "meny" else {}),
             )
             current = validate_delivery_slot(choice["selected"])
             if not self._same_delivery_identity(current, expected_slot):
@@ -4728,8 +4731,9 @@ class OrderOperations:
         reprepared = self._revalidate_checkout_delivery(pending, deadline=deadline)
         if reprepared is not None:
             return reprepared
-        cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {}, deadline=deadline)
         pending_change = pending.get("order_change") or {}
+        arguments = {"confirm_order_code": pending_change.get("code")} if self.provider == "meny" else {}
+        cart = self.provider_client.call("get_cart", arguments, deadline=deadline)
         expected_cart = cart_summary(pending["cart"])
         if canonical(cart_summary(cart)) != canonical(expected_cart):
             with self.store.locked() as state:

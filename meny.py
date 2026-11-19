@@ -186,6 +186,10 @@ def _bounded_browser_stderr():
         os.close(read_fd)
 
 
+class _CartPanelNotReady(HouseholdError):
+    """The authenticated cart drawer or its rows have not finished loading."""
+
+
 class _CartControlReplaced(HouseholdError):
     """The product page replaced the marked control before mouse dispatch."""
 
@@ -610,6 +614,9 @@ def normalize_cart_snapshot(value: Any) -> dict[str, Any]:
 
     if not isinstance(value, Mapping) or value.get("authenticated") is not True:
         raise HouseholdError("MENY login is required in the configured browser profile")
+    if (value.get("ready") is False and type(value.get("root_count")) is int
+            and value["root_count"] in {0, 1}):
+        raise _CartPanelNotReady("MENY cart did not finish rendering")
     if (
         value.get("ready") is not True
         or isinstance(value.get("root_count"), bool)
@@ -971,6 +978,8 @@ class MenyClient:
                     "message": "MENY's personalised often-bought list is not available through the browser flow.",
                 }
             if tool == "get_cart":
+                if "confirm_order_code" in arguments:
+                    return self._read_confirmation_cart(arguments["confirm_order_code"])
                 if arguments.get("observe_order_mode") is True:
                     return self._read_cart(observe_order_mode=True)
                 return self._read_cart()
@@ -2062,6 +2071,47 @@ __DELIVERY_BINDING__
                 break
         return observed
 
+    def _read_confirmation_cart(self, order_code: str | None) -> dict[str, Any]:
+        # Only the pre-journal get_cart reads use this path. A second read
+        # stays in the current tab and shares this operation's deadline.
+        if order_code is not None and not re.fullmatch(r"[A-Za-z0-9-]{2,40}", str(order_code)):
+            raise HouseholdError("MENY checkout cart order identity is invalid")
+        context = r"""
+(() => {
+  const norm=x=>(x||'').normalize('NFC').replace(/\s+/g,' ').trim();
+  const visible=x=>{const s=getComputedStyle(x),b=x.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&b.width>0&&b.height>0};
+  const expected=__CODE__, exact=location.href==='https://meny.no/varer';
+  const buttons=[...document.querySelectorAll('button')].filter(visible);
+  const signedIn=buttons.filter(b=>norm(b.getAttribute('aria-label')||b.innerText).startsWith('Brukermeny')).length===1;
+  const drawers=[...document.querySelectorAll('[aria-label="Handlevogn"]')].filter(visible);
+  const prompt=[...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')]
+    .some(d=>visible(d)&&!drawers.includes(d));
+  if(!exact||!signedIn||prompt||drawers.length>1)return JSON.stringify({mode:'unverified'});
+  if(!drawers.length)return JSON.stringify({mode:'missing'});
+  const cart=drawers[0], text=norm(cart.innerText);
+  const codes=[...text.matchAll(/Du endrer bestilling\s+([A-Za-z0-9-]+)/gi)].map(m=>m[1]);
+  const editing=/Du endrer bestilling/i.test(text);
+  const aborts=[...cart.querySelectorAll('button')].filter(visible).filter(b=>norm(b.innerText)==='Avbryt endring');
+  const matches=expected===null ? !editing&&!aborts.length : codes.length===1&&codes[0]===expected&&aborts.length===1;
+  return JSON.stringify({mode:matches?'matched':'unverified'});
+})()
+""".replace("__CODE__", json.dumps(order_code))
+        try:
+            return self._read_cart()
+        except _CartPanelNotReady:
+            mode = self._eval(context).get("mode")
+            if mode not in {"matched", "missing"}:
+                raise HouseholdError("MENY checkout cart context changed; inspect the cart and any open prompt before confirming")
+            self._sleep(0.25)
+        try:
+            cart = self._read_cart(allow_reload=False)
+        except _CartPanelNotReady as exc:
+            raise HouseholdError(f"{exc} after a second read; open the cart on the store page and "
+                                 "check its contents before confirming again") from exc
+        if self._eval(context) != {"mode": "matched"}:
+            raise HouseholdError("MENY checkout cart context changed; inspect the cart and any open prompt before confirming")
+        return cart
+
     def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False) -> dict[str, Any]:
         state: dict[str, Any] = {}
         for _ in range(20):
@@ -2084,6 +2134,8 @@ __DELIVERY_BINDING__
         if state.get("authenticated") is not True:
             raise HouseholdError("MENY login is required in the configured browser profile")
         if state.get("ready") is not True:
+            if state.get("root_count") == 0 and state.get("open_count") in {0, 1}:
+                raise _CartPanelNotReady("MENY cart is unavailable")
             raise HouseholdError("MENY cart is unavailable")
         if state.get("open") is not True:
             self._invoke("click", '[data-meal-concierge-action="open-cart"]')
