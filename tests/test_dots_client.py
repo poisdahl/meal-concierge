@@ -18,7 +18,7 @@ class DotsClientTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="mc-dots-")
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        self.home = Path(self.temp.name).resolve()
         self.batch = self.home / "batch"
         self.root = self.home / "observation"
         self.value = {"request_id": "synthetic-oats", "recipes": [{"key": "oats", "recipe": {
