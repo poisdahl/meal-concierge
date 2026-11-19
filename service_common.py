@@ -302,7 +302,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 raw = str(value.get("raw") or "").strip()
                 if "display_item" in value:
                     raw = item
-                display_notes = value.get("display_notes")
+                display_notes = value.get("display_notes", value.get("notes") if amount else None)
                 if display_notes:
                     item += " (" + str(display_notes) + ")"
                     raw += " (" + str(display_notes) + ")"

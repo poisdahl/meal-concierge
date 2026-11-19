@@ -461,12 +461,23 @@ def source_ingredient(
     step. numeric_measure marks a measure built from a number in the source data.
     """
     quantity = unit = None
+    preparation_note = None
     if measure is not None:
         quantity, unit = parse_measure(measure, numeric=numeric_measure)
     # Text spanning several lines is more than one ingredient and stays unread.
     elif item is None and not re.search(r"[\r\n]", text.strip()):
         # Single spaces also keep the unit patterns below linear on a hostile line.
         parse_text = " ".join(text.split())
+        if not preserve_source_item:
+            # A båt of garlic is a clove; a båt of another food is not.
+            garlic = re.fullmatch(r"(.+) båt(?:er)? hvitløk", parse_text, re.IGNORECASE)
+            if garlic and parse_measure(f"{garlic[1]} fedd")[0] is not None:
+                parse_text = f"{garlic[1]} fedd hvitløk"
+            fruit = re.fullmatch(r"saft(?:en)? av (.+?) (?:(?:stk\.?|stykk) )?(lime|sitron|appelsin)",
+                                 parse_text, re.IGNORECASE)
+            if fruit and parse_measure(f"{fruit[1]} stk")[0] is not None:
+                parse_text = f"{fruit[1]} stk {fruit[2]}"
+                preparation_note = "Bruk saften av frukten."
         if attached_metric_units:
             parse_text = _ATTACHED_METRIC_UNIT.sub(r"\1 \2", parse_text)
         for candidate in sorted(UNITS, key=len, reverse=True):
@@ -493,6 +504,7 @@ def source_ingredient(
     if unit in {"tsp", "teaspoon", "teaspoons", "tbsp", "tablespoon", "tablespoons"}:
         unit_evidence = {"basis": "estimate", "input": text, "assumptions": "Use the metric culinary measure: teaspoon=5 ml and tablespoon=15 ml; source locale is unverified."}
     return {**({"optional": True} if optional_marker else {}),
+            **({"notes": preparation_note} if preparation_note else {}),
             "item": source_item if preserve_source_item else normalized_item,
             "raw": text, "original_text": text,
             "amount": measure,
