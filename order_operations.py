@@ -1136,6 +1136,10 @@ class OrderOperations:
         reselections = pending.get("delivery_reselections", 0)
         if isinstance(reselections, bool) or not isinstance(reselections, int) or reselections not in {0, 1}:
             raise HouseholdError("checkout delivery reselection state is invalid")
+        # Read the MENY cart before either branch can navigate to the delivery picker.
+        scope_cart = self.provider_client.call(
+            "get_cart", {"confirm_order_code": (change or {}).get("code")}, deadline=deadline,
+        ) if self.provider == "meny" else None
         if origin == "cheapest":
             state = self.store.read()
             current = [
@@ -1186,9 +1190,7 @@ class OrderOperations:
         else:
             choice = self._current_delivery_choice(
                 occurrence=occurrence or None, deadline=deadline, expected_slot=expected_slot,
-                **({"scope_cart": self.provider_client.call(
-                    "get_cart", {"confirm_order_code": (change or {}).get("code")}, deadline=deadline,
-                )} if self.provider == "meny" else {}),
+                scope_cart=scope_cart,
             )
             current = validate_delivery_slot(choice["selected"])
             if not self._same_delivery_identity(current, expected_slot):

@@ -950,7 +950,13 @@ class MenyClient:
         if tool not in supported:
             raise HouseholdError("MENY operation is not supported")
         timeout = MENY_CART_TIMEOUT if tool == "manipulate_cart" else MENY_ORDER_TIMEOUT if tool in {"get_delivery_slots", "select_delivery_slot", "get_orders", "get_order", "order_tracking"} else MENY_READ_TIMEOUT
-        with self._locked_operation(timeout, deadline, allow_recovery=allow_recovery):
+        protected_cart = tool == "get_cart" and ("confirm_order_code" in arguments or arguments.get("observe_order_mode") is True)
+        with self._locked_operation(timeout, deadline, allow_recovery=allow_recovery and not protected_cart):
+            if protected_cart:
+                self._enter_protected_cart(arguments)
+                if "confirm_order_code" in arguments:
+                    return self._read_confirmation_cart(arguments["confirm_order_code"])
+                return self._read_cart(allow_reload=False, observe_order_mode=True)
             try:
                 self._require_login()
             except HouseholdError as exc:
@@ -978,10 +984,6 @@ class MenyClient:
                     "message": "MENY's personalised often-bought list is not available through the browser flow.",
                 }
             if tool == "get_cart":
-                if "confirm_order_code" in arguments:
-                    return self._read_confirmation_cart(arguments["confirm_order_code"])
-                if arguments.get("observe_order_mode") is True:
-                    return self._read_cart(observe_order_mode=True)
                 return self._read_cart()
             if tool == "manipulate_cart":
                 return self._change_cart(arguments)
@@ -2071,11 +2073,65 @@ __DELIVERY_BINDING__
                 break
         return observed
 
+    def _enter_protected_cart(self, arguments: Mapping[str, Any]) -> None:
+        # The general login probe opens or reloads /varer, which can dismiss a
+        # merchant prompt. Inspect the existing tab before leaving a known page.
+        code = arguments.get("confirm_order_code")
+        if code is not None and (not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9-]{2,40}", code)):
+            raise HouseholdError("MENY checkout cart order identity is invalid")
+        entry = r"""
+(() => {
+  const store='https://meny.no/varer', expected=__CODE__, confirm=__CONFIRM__;
+  const norm=x=>(x||'').normalize('NFC').replace(/\s+/g,' ').trim();
+  const visible=x=>{const s=getComputedStyle(x),b=x.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&b.width>0&&b.height>0};
+  if(location.origin!=='https://meny.no')return JSON.stringify({state:'blocked'});
+  const onStore=location.href===store;
+  const drawers=[...document.querySelectorAll('[aria-label="Handlevogn"]')].filter(visible);
+  const prompts=[...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')].filter(visible);
+  if(drawers.length>1||prompts.some(p=>!onStore||!drawers.includes(p)))
+    return JSON.stringify({state:'blocked'});
+  const buttons=[...document.querySelectorAll('button')].filter(visible);
+  const users=buttons.filter(b=>norm(b.getAttribute('aria-label')||b.innerText).startsWith('Brukermeny'));
+  if(users.length!==1){
+    if(buttons.some(b=>norm(b.getAttribute('aria-label')||b.innerText)==='Logg inn'))
+      return JSON.stringify({state:'login'});
+    return JSON.stringify({state:'loading'});
+  }
+  if(onStore)return JSON.stringify({state:'ready'});
+  const catalog=(location.pathname==='/sok'&&!location.hash)||
+    (/^\/varer\/(?!kampanjer\/)[A-Za-z0-9._~%/-]+-\d{4,14}$/.test(location.pathname)&&!location.search&&!location.hash);
+  if(!catalog){
+    if(!confirm||location.href!=='https://meny.no/kassen')return JSON.stringify({state:'blocked'});
+    const main=[...document.querySelectorAll('main')].filter(visible);
+    if(main.length!==1)return JSON.stringify({state:'blocked'});
+    const text=norm(main[0].innerText), editing=/Du endrer bestilling/i.test(text);
+    const codes=[...text.matchAll(/Du endrer bestilling\s+([A-Za-z0-9-]+)/gi)].map(m=>m[1]);
+    const submit=[...main[0].querySelectorAll('button')].filter(visible)
+      .filter(b=>norm(b.innerText)===(expected===null?'Til betaling':'Send oppdatering'));
+    if(submit.length!==1||(expected===null?editing:codes.length!==1||codes[0]!==expected))
+      return JSON.stringify({state:'blocked'});
+  }
+  if(__NAVIGATE__)location.assign(store);
+  return JSON.stringify({state:'navigating'});
+})()
+""".replace("__CODE__", json.dumps(code)).replace("__CONFIRM__", json.dumps("confirm_order_code" in arguments))
+        navigate = True
+        for _ in range(20):
+            state = self._eval(entry.replace("__NAVIGATE__", json.dumps(navigate))).get("state")
+            if state == "ready":
+                return
+            if state == "login":
+                raise HouseholdError("MENY login is required in the configured browser profile")
+            if state not in {"loading", "navigating"}:
+                raise HouseholdError("MENY cart context changed; finish any open prompt, then open the store cart and try again")
+            if state == "navigating":
+                navigate = False
+            self._sleep(0.25)
+        raise HouseholdError("MENY cart page did not finish rendering; inspect the store page and try again")
+
     def _read_confirmation_cart(self, order_code: str | None) -> dict[str, Any]:
         # Only the pre-journal get_cart reads use this path. A second read
         # stays in the current tab and shares this operation's deadline.
-        if order_code is not None and not re.fullmatch(r"[A-Za-z0-9-]{2,40}", str(order_code)):
-            raise HouseholdError("MENY checkout cart order identity is invalid")
         context = self._cart_mode_script(order_code)
         for attempt in range(2):
             try:
