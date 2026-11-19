@@ -2076,7 +2076,19 @@ __DELIVERY_BINDING__
         # stays in the current tab and shares this operation's deadline.
         if order_code is not None and not re.fullmatch(r"[A-Za-z0-9-]{2,40}", str(order_code)):
             raise HouseholdError("MENY checkout cart order identity is invalid")
-        context = r"""
+        context = self._cart_mode_script(order_code)
+        for attempt in range(2):
+            try:
+                return self._read_cart(allow_reload=False, confirmation_context=context)
+            except _CartPanelNotReady as exc:
+                if attempt:
+                    raise HouseholdError(f"{exc} after a second read; open the cart on the store page and "
+                                         "check its contents before confirming again") from exc
+                self._sleep(0.25)
+
+    @staticmethod
+    def _cart_mode_script(order_code: str | None, *, observe: bool = False) -> str:
+        return r"""
 (() => {
   const norm=x=>(x||'').normalize('NFC').replace(/\s+/g,' ').trim();
   const visible=x=>{const s=getComputedStyle(x),b=x.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&b.width>0&&b.height>0};
@@ -2096,24 +2108,17 @@ __DELIVERY_BINDING__
   if(!editing&&!aborts.length&&!cartButtons.some(b=>['Til kassen','Fortsett'].includes(norm(b.innerText))))
     return JSON.stringify({mode:'hydrating'});
   const matches=expected===null ? !editing&&!aborts.length : codes.length===1&&codes[0]===expected&&aborts.length===1;
-  return JSON.stringify({mode:matches?'matched':'unverified'});
+  return JSON.stringify({mode:matches?'matched':__MISMATCH__});
 })()
-""".replace("__CODE__", json.dumps(order_code))
-        for attempt in range(2):
-            try:
-                return self._read_cart(allow_reload=False, confirmation_context=context)
-            except _CartPanelNotReady as exc:
-                if attempt:
-                    raise HouseholdError(f"{exc} after a second read; open the cart on the store page and "
-                                         "check its contents before confirming again") from exc
-                self._sleep(0.25)
+""".replace("__MISMATCH__", json.dumps("different" if observe else "unverified")).replace("__CODE__", json.dumps(order_code))
 
     def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False,
                    confirmation_context: str | None = None) -> dict[str, Any]:
         # Check mode in the same DOM evaluation as the drawer opener and the
         # extracted quantities. A missing drawer can hydrate or be opened once.
-        mode_expression = f"JSON.parse({confirmation_context}).mode" if confirmation_context else "null"
-        changed = "MENY checkout cart context changed; inspect the cart and any open prompt before confirming"
+        context = self._cart_mode_script(None, observe=True) if observe_order_mode else confirmation_context
+        mode_expression = f"JSON.parse({context}).mode" if context else "null"
+        changed = "MENY cart context changed; inspect the cart and any open prompt before continuing"
         state: dict[str, Any] = {}
         for _ in range(20):
             state = self._eval(r"""
@@ -2128,7 +2133,7 @@ __DELIVERY_BINDING__
   if (carts.length === 1) return JSON.stringify({open:true, ready:true, authenticated:authenticated.length === 1, root_count:1});
   const open = [...document.querySelectorAll('button')].filter(visible).filter(button => !button.disabled && norm(button.getAttribute('aria-label')) === 'Åpne handlevognen');
   if (carts.length !== 0 || open.length !== 1) return JSON.stringify({open:false, ready:false, authenticated:authenticated.length === 1, root_count:carts.length, open_count:open.length});
-  if (mode === 'matched') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
+  if (mode === 'matched' || mode === 'different') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
   if (mode === 'missing') {
     if (open[0].getAttribute('aria-disabled') === 'true') return JSON.stringify({ready:false, authenticated:true, root_count:0, open_count:1});
     open[0].click();
@@ -2167,11 +2172,7 @@ __DELIVERY_BINDING__
   if (carts.length !== 1) return JSON.stringify({ready:false, authenticated:authenticated.length === 1, root_count:carts.length});
   if (mode === 'missing') return JSON.stringify({ready:false, authenticated:true, root_count:0});
   const cart = carts[0];
-  const ordinaryCart = location.href === 'https://meny.no/varer' &&
-    !/Du endrer bestilling/i.test(norm(cart.innerText)) &&
-    ![...cart.querySelectorAll('button')].some(b => visible(b) && norm(b.innerText) === 'Avbryt endring') &&
-    ![...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')]
-      .some(d => visible(d) && /Vil du legge til varer på eksisterende bestilling/i.test(norm(d.innerText)));
+  const ordinaryCart = mode === 'matched';
   const productPattern = /^\/varer\/(?!kampanjer\/)[A-Za-z0-9._~%/-]+-\d{4,14}$/;
   const itemRoots = [];
   for (const anchor of cart.querySelectorAll('a[href]')) {
@@ -2236,7 +2237,8 @@ __DELIVERY_BINDING__
             if result.get("ready") is True:
                 break
             if (
-                result.get("authenticated") is True
+                not observe_order_mode
+                and result.get("authenticated") is True
                 and result.get("item_root_count", 0) > 0
                 and (
                     (result.get("total_count") == 1 and result.get("total") == 0)
@@ -2246,7 +2248,7 @@ __DELIVERY_BINDING__
                 break
             self._sleep(0.25)
         if (
-            allow_reload
+            allow_reload and not observe_order_mode
             and result.get("authenticated") is True
             and result.get("item_root_count", 0) > 0
             and (

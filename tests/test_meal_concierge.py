@@ -6196,20 +6196,25 @@ process.stdout.write(JSON.stringify({snapshot:JSON.parse(eval(script)),marked}))
     @unittest.skipUnless(shutil.which("node"), "Node executes the signed-in MENY cart fixture")
     def test_empty_cart_recovery_checks_edit_mode_in_the_observed_cart(self):
         client = self.client()
+        client._invoke = mock.Mock(side_effect=AssertionError("unexpected browser click or reload"))
         def evaluate(script):
-            if "const ordinaryCart" not in script:
-                return {"ready": True, "open": True, "authenticated": True}
+            mode = modes.pop(0) if len(modes) > 1 else modes[0]
             fixture = r"""
 const {mode,script}=JSON.parse(require('fs').readFileSync(0,'utf8'));
 global.location=new URL(mode==='foreign'?'https://elsewhere.example/varer':'https://meny.no/varer');
 const node=(innerText,alt=null)=>({innerText,getAttribute:()=>alt,
  getBoundingClientRect:()=>({width:15,height:15}),querySelectorAll:()=>[]});
 const user=node('Brukermeny'),next=node('Til kassen'),abort=node('Avbryt endring');
+const opener=node('','Åpne handlevognen');
+opener.click=()=>{throw new Error('opener must not dismiss the active prompt')};
 const cart=node(mode==='edit'?'Du endrer bestilling ABC. Handlevognen din er tom':'Handlevognen din er tom');
 cart.querySelectorAll=s=>s==='button'?(mode==='abort'?[next,abort]:[next]):[];
-const dialog=node('Vil du legge til varer på eksisterende bestilling?');
-global.document={querySelectorAll:s=>s==='button'?[user]:s==='[aria-label="Handlevogn"]'?[cart]:
- s.includes('dialog[open]')&&mode==='route'?[dialog]:[]};
+const shell=node('Du endrer bestilling ABC');
+shell.querySelectorAll=s=>s==='button'?[abort]:[];
+const dialog=node(mode==='route'?'Vil du legge til varer på eksisterende bestilling?':'Bekreft endring');
+const dialogs=mode==='cart-dialog'?[cart]:['route','modal','before-open'].includes(mode)?[dialog]:[];
+global.document={querySelectorAll:s=>s==='button'?[user,opener]:s==='[aria-label="Handlevogn"]'?
+ (mode==='before-open'?[]:mode==='duplicate'?[cart,shell]:[cart]):s.includes('dialog[open]')?dialogs:[]};
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 process.stdout.write(eval(script));
 """
@@ -6218,11 +6223,19 @@ process.stdout.write(eval(script));
                                     text=True, capture_output=True, check=True)
             return json.loads(result.stdout)
         client._eval = evaluate
-        for mode in ("ordinary", "edit", "abort", "route", "foreign"):
+        for mode in ("ordinary", "cart-dialog", "edit", "abort"):
             with self.subTest(mode=mode):
+                modes = [mode]
                 cart = client._read_cart(observe_order_mode=True)
-                self.assertEqual(cart["ordinary_cart"], mode == "ordinary")
+                self.assertEqual(cart["ordinary_cart"], mode in {"ordinary", "cart-dialog"})
                 self.assertEqual(cart["items"], [])
+        for unsafe in ("route", "modal", "foreign", "duplicate", "before-open"):
+            for snapshots in ([unsafe], ["ordinary", unsafe]):
+                with self.subTest(snapshots=snapshots):
+                    modes = list(snapshots)
+                    with self.assertRaisesRegex(HouseholdError, "context changed"):
+                        client._read_cart(observe_order_mode=True)
+        client._invoke.assert_not_called()
 
     def test_confirm_retries_only_an_incomplete_cart_read_before_dispatch(self):
         from meny import _CartPanelNotReady
@@ -6441,6 +6454,20 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),opened}));
         self.assertEqual(client._sleep.call_args_list, [mock.call(0.5), mock.call(0.5)])
         self.assertIn("linePrices.length === 1", client._eval.call_args_list[1].args[0])
         self.assertIn("filter(visible)", client._eval.call_args_list[1].args[0])
+
+        # A recovery read can wait for the same drawer without navigating
+        # away from the order context that the household must review.
+        client._invoke.reset_mock()
+        client._sleep.reset_mock()
+        client._eval = mock.Mock(side_effect=[
+            {"open": True, "ready": True, "authenticated": True, "root_count": 1},
+            zero, {**valid, "ordinaryCart": True},
+        ])
+        observed = client._read_cart(observe_order_mode=True)
+        self.assertTrue(observed["ordinary_cart"])
+        self.assertEqual(observed["total"], 19.9)
+        client._sleep.assert_called_once_with(0.25)
+        client._invoke.assert_not_called()
 
     def test_search_uses_encoded_bound_results_route_and_one_scoped_root(self):
         client = self.client()
