@@ -43,14 +43,13 @@ def _publish_parts(staged, destination):
     reserved = destination.stat()
     try:
         staged.rename(destination)
-    except OSError:
+    finally:
         try:
             if os.path.samestat(reserved, destination.lstat()):
                 destination.rmdir()
         except OSError as exc:
             if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
                 raise
-        raise
 
 
 def split(source, parts_dir, expected_bytes, expected_sha256, max_part_bytes):

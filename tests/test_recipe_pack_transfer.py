@@ -83,6 +83,16 @@ class RecipePackTransferTests(unittest.TestCase):
         assemble(directory / 'pack-transfer.json', self.output, self.size, self.digest)
         self.assertEqual(self.output.read_bytes(), self.content)
 
+    def test_interrupted_publication_can_retry(self):
+        directory = self.root / 'cancelled-split'
+        with patch.object(Path, 'rename', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                split(self.source, directory, self.size, self.digest, 500)
+        self.assertFalse(directory.exists())
+        split(self.source, directory, self.size, self.digest, 500)
+        assemble(directory / 'pack-transfer.json', self.output, self.size, self.digest)
+        self.assertEqual(self.output.read_bytes(), self.content)
+
     def test_failed_split_preserves_unrelated_files_in_new_directory(self):
         directory = self.root / 'interrupted'
         marker = directory / 'part-000000'

@@ -524,8 +524,6 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                     label = tr("Grunnoppskrift for {base} porsjoner. Planen krever {target} porsjoner {date}, men kildegrunnlaget kan ikke skaleres automatisk.", "Base recipe for {base} servings. The plan requires {target} servings on {date}, but source quantities cannot be scaled automatically.").format(base=format_portions(recipe.get("portions")), target=format_portions(batch["prepared_portions"]), date=display_date(cooking_date))
                 cooking_recipes.append((cooked, label, batch))
         for recipe, cooking_label, batch in cooking_recipes:
-            if menu.get("output_language"):
-                recipe = display_recipe(recipe, menu["output_language"])
             omissions = []
             if omission_warnings is not None:
                 if (recipe.get("rights") or {}).get("storage") == "link_only":
@@ -537,6 +535,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                     if not recipe.get("steps"):
                         omissions.append(tr("Fremgangsmåte mangler i kilden.", "The source has no instructions."))
                 omission_warnings.extend(omissions)
+            if menu.get("output_language"):
+                recipe = display_recipe(recipe, menu["output_language"])
             batch_storage, batch_reheating = batch_guidance(batch) if batch else ('', '')
             portions_text = f"{format_portions(recipe['portions'])}{tr(' porsjoner', ' servings')}" if recipe.get("portions") else tr('Antall personporsjoner er ukjent', 'Number of servings is unknown')
             fallback = (recipe.get("presentation") or {}).get("fallback")

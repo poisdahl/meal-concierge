@@ -116,7 +116,7 @@ class RecipeDeliveryPresentationTests(unittest.TestCase):
         from recipe_delivery import render_menu, split_text
         from recipe_languages import source_text_digest
         soup = {"name": "Suppe", "language": "nb", "notes": "Kildens notat", "rights": {"storage": "full"},
-                "ingredients": [], "steps": ["Kok."]}
+                "ingredients": [], "steps": []}
         soup["translations"] = {"en": {"name": "Soup", "ingredients": [], "steps": ["Boil."],
                                        "notes": "Original note", "source_text_digest": source_text_digest(soup)}}
         menu = {"output_language": "en-GB", "dishes": [soup], "salads": [
@@ -125,11 +125,11 @@ class RecipeDeliveryPresentationTests(unittest.TestCase):
         rendered = render_menu(menu, None, images=False)
         messages = "\n".join(split_text(rendered["html"], 256))
         for output in (rendered["text"], messages):
-            for expected in ("Soup", "Boil.", "Original note", "The source has no ingredient list.",
+            for expected in ("Soup", "Boil.", "Original note", "The source has no ingredient list.", "The source has no instructions.",
                              "Only a link to the source is available", "https://example.com/salad"):
                 self.assertIn(expected, output)
             self.assertNotIn("Requested language unavailable", output)
-        self.assertEqual(rendered["warnings"], ["The source has no ingredient list.",
+        self.assertEqual(rendered["warnings"], ["The source has no ingredient list.", "The source has no instructions.",
                                                 "Only a link to the source is available for this recipe."])
         self.assertEqual(soup["notes"], "Kildens notat")
 
