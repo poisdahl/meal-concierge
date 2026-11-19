@@ -6261,15 +6261,21 @@ process.stdout.write(eval(script));
     @unittest.skipUnless(shutil.which("node"), "Node executes the protected MENY cart entry")
     def test_protected_cart_public_entry_preserves_prompts_and_returns_from_known_routes(self):
         harness = r"""
-const {js, href, prompt, label, code, login}=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const {js,href,prompt,label,code,login,drawerCode,drawerModal,hydrate,firstRead,hiddenAccount,resized,promptAfterResize}=JSON.parse(require('fs').readFileSync(0,'utf8'));
 global.location=new URL(href);
 let assigned=null;
 location.assign=value=>{assigned=value};
 const el=text=>({innerText:text, getAttribute:()=>null, getBoundingClientRect:()=>({width:20,height:20})});
 const submit=el(label), main=el(code?'Du endrer bestilling '+code:'');
-main.querySelectorAll=selector=>selector==='button'?[submit]:[];
-global.document={querySelectorAll:selector=>selector==='button'?[el(login?'Logg inn':'Brukermeny'),submit]:
- selector==='main'?[main]:selector.includes('dialog[open]')&&prompt?[el('Open prompt')]:[]};
+main.querySelectorAll=selector=>selector==='button'&&!(hydrate==='submit'&&firstRead)?[submit]:[];
+const drawer=el(drawerCode?'Du endrer bestilling '+drawerCode:'Handlevognen din er tom');
+drawer.querySelectorAll=selector=>selector==='button'?[el('Til kassen'),...(drawerCode?[el('Avbryt endring')]:[])]:[];
+const user=el(login?'Logg inn':'Brukermeny');
+if(hiddenAccount&&!resized)user.getBoundingClientRect=()=>({width:0,height:20});
+global.document={querySelectorAll:selector=>selector==='button'?[user,submit]:
+ selector==='main'?(hydrate==='main'&&firstRead?[]:[main]):
+ selector==='[aria-label="Handlevogn"]'&&drawerCode!==undefined?[drawer]:
+ selector.includes('dialog[open]')?[...(drawerModal?[drawer]:[]),...(prompt||(promptAfterResize&&resized)?[el('Open prompt')]:[])]:[]};
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),assigned}));
 """
@@ -6292,21 +6298,39 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),assigned}));
             ({"observe_order_mode": True}, product, {}, "navigate"),
             ({"observe_order_mode": True}, product, {"prompt":True}, "blocked"),
             ({"observe_order_mode": True}, checkout, {}, "blocked"),
+            ({"confirm_order_code": None}, product, {"drawerCode":"OTHER"}, "blocked"),
+            ({"observe_order_mode": True}, product, {"drawerCode":"OTHER"}, "blocked"),
+            ({"observe_order_mode": True}, product, {"drawerCode":"","drawerModal":True}, "navigate"),
+            ({"confirm_order_code": None}, checkout, {"drawerCode":"OTHER"}, "blocked"),
+            ({"confirm_order_code": "ABC12"}, checkout, {"label":"Send oppdatering","code":"ABC12","drawerCode":"ABC12","drawerModal":True}, "navigate"),
+            ({"confirm_order_code": None}, checkout, {"hydrate":"main"}, "navigate"),
+            ({"confirm_order_code": None}, checkout, {"hydrate":"submit"}, "navigate"),
+            ({"confirm_order_code": None}, store, {"hiddenAccount":True}, "same"),
+            ({"confirm_order_code": "ABC12"}, checkout, {"hiddenAccount":True,"code":"ABC12","label":"Send oppdatering"}, "navigate"),
+            ({"observe_order_mode": True}, store, {"hiddenAccount":True}, "same"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"drawerCode":"OTHER"}, "blocked"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"prompt":True}, "blocked"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"promptAfterResize":True}, "blocked"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"routeAfterResize":store}, "blocked"),
+            ({"observe_order_mode": True}, "https://meny.no/profil/nettbutikk", {"hiddenAccount":True}, "blocked"),
         ]:
             with self.subTest(args=args, href=href, view=view):
                 client = self.client()
                 client._sleep = mock.Mock()
-                client._invoke = mock.Mock(side_effect=AssertionError("unexpected open/reload/click"))
+                client._invoke = mock.Mock()
                 client._read_cart = mock.Mock(return_value={"cart":True})
                 client._read_confirmation_cart = mock.Mock(return_value={"cart":True})
                 location = href
                 navigations = []
+                reads = 0
 
                 def evaluate(js):
-                    nonlocal location
+                    nonlocal location, reads
+                    reads += 1
                     self.assertFalse(client.recovery_allowed)
                     run = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps({
-                        "js":js, "href":location, "label":"Til betaling", **view,
+                        "js":js, "href":view.get("routeAfterResize", location) if client._invoke.called else location,
+                        "label":"Til betaling", "firstRead":reads == 1, "resized":client._invoke.called, **view,
                     }), text=True, capture_output=True, check=True, timeout=10)
                     observed = json.loads(run.stdout)
                     if observed["assigned"]:
@@ -6327,7 +6351,10 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),assigned}));
                     else:
                         client._read_cart.assert_called_once_with(allow_reload=False, observe_order_mode=True)
                 self.assertEqual(navigations, [store] if outcome == "navigate" else [])
-                client._invoke.assert_not_called()
+                if view.get("hiddenAccount") and (outcome != "blocked" or view.get("promptAfterResize") or view.get("routeAfterResize")):
+                    client._invoke.assert_called_once_with("set", "viewport", "1280", "900")
+                else:
+                    client._invoke.assert_not_called()
 
     @unittest.skipUnless(shutil.which("node"), "Node executes the MENY checkout cart read guard")
     def test_confirmation_cart_read_preserves_exact_mode_and_visible_prompts(self):

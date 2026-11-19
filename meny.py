@@ -88,6 +88,18 @@ MENY_MONTH_NAMES = (
     "januar", "februar", "mars", "april", "mai", "juni",
     "juli", "august", "september", "oktober", "november", "desember",
 )
+# Embedded only in DOM reads that supply the same norm() and visible() helpers.
+CART_DRAWER_MODE_JS = r"""(cart,expected) => {
+  const text=norm(cart.innerText);
+  const codes=[...text.matchAll(/Du endrer bestilling\s+([A-Za-z0-9-]+)/gi)].map(m=>m[1]);
+  const editing=/Du endrer bestilling/i.test(text);
+  const cartButtons=[...cart.querySelectorAll('button')].filter(visible);
+  const aborts=cartButtons.filter(b=>norm(b.innerText)==='Avbryt endring');
+  if(!editing&&!aborts.length&&!cartButtons.some(b=>['Til kassen','Fortsett'].includes(norm(b.innerText))))
+    return 'hydrating';
+  const matches=expected===null ? !editing&&!aborts.length : codes.length===1&&codes[0]===expected&&aborts.length===1;
+  return matches?'matched':'different';
+}"""
 CHECKOUT_DELIVERY_BINDING_JS = r"""
   const deliveryPattern = /^(?:man(?:dag)?|tir(?:sdag)?|ons(?:dag)?|tor(?:sdag)?|fre(?:dag)?|lør(?:dag)?|søn(?:dag)?)\s+(?:[1-9]|[12]\d|3[01])\.\s+(?:jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\.?\s+kl\.\s+(?:[01]\d|2[0-3]):[0-5]\d[-–](?:[01]\d|2[0-3]):[0-5]\d$/i;
   const deliveryHeadings = [...root.querySelectorAll('h2,h3')].filter(visible).filter(x => norm(x.innerText) === 'Dato og tid');
@@ -2084,48 +2096,68 @@ __DELIVERY_BINDING__
   const store='https://meny.no/varer', expected=__CODE__, confirm=__CONFIRM__;
   const norm=x=>(x||'').normalize('NFC').replace(/\s+/g,' ').trim();
   const visible=x=>{const s=getComputedStyle(x),b=x.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&b.width>0&&b.height>0};
-  if(location.origin!=='https://meny.no')return JSON.stringify({state:'blocked'});
+  const resizedRoute=__RESIZED_ROUTE__;
+  if(location.origin!=='https://meny.no'||resizedRoute!==null&&location.href!==resizedRoute)
+    return JSON.stringify({state:'blocked'});
   const onStore=location.href===store;
   const drawers=[...document.querySelectorAll('[aria-label="Handlevogn"]')].filter(visible);
   const prompts=[...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')].filter(visible);
-  if(drawers.length>1||prompts.some(p=>!onStore||!drawers.includes(p)))
+  if(drawers.length>1||prompts.some(p=>!drawers.includes(p)))
     return JSON.stringify({state:'blocked'});
-  const buttons=[...document.querySelectorAll('button')].filter(visible);
-  const users=buttons.filter(b=>norm(b.getAttribute('aria-label')||b.innerText).startsWith('Brukermeny'));
-  if(users.length!==1){
-    if(buttons.some(b=>norm(b.getAttribute('aria-label')||b.innerText)==='Logg inn'))
-      return JSON.stringify({state:'login'});
-    return JSON.stringify({state:'loading'});
-  }
-  if(onStore)return JSON.stringify({state:'ready'});
   const catalog=(location.pathname==='/sok'&&!location.hash)||
     (/^\/varer\/(?!kampanjer\/)[A-Za-z0-9._~%/-]+-\d{4,14}$/.test(location.pathname)&&!location.search&&!location.hash);
-  if(!catalog){
-    if(!confirm||location.href!=='https://meny.no/kassen')return JSON.stringify({state:'blocked'});
+  const checkout=confirm&&location.href==='https://meny.no/kassen';
+  if(!onStore&&!catalog&&!checkout)return JSON.stringify({state:'blocked'});
+  const drawerMode=drawers.length?(__DRAWER_MODE__)(drawers[0],expected):'missing';
+  if(!onStore&&drawerMode==='hydrating')return JSON.stringify({state:'loading'});
+  if(!onStore&&drawerMode==='different')return JSON.stringify({state:'blocked'});
+  if(checkout){
     const main=[...document.querySelectorAll('main')].filter(visible);
+    if(!main.length)return JSON.stringify({state:'loading'});
     if(main.length!==1)return JSON.stringify({state:'blocked'});
     const text=norm(main[0].innerText), editing=/Du endrer bestilling/i.test(text);
     const codes=[...text.matchAll(/Du endrer bestilling\s+([A-Za-z0-9-]+)/gi)].map(m=>m[1]);
     const submit=[...main[0].querySelectorAll('button')].filter(visible)
       .filter(b=>norm(b.innerText)===(expected===null?'Til betaling':'Send oppdatering'));
-    if(submit.length!==1||(expected===null?editing:codes.length!==1||codes[0]!==expected))
+    if(submit.length>1||editing&&(expected===null||codes.length!==1||codes[0]!==expected))
       return JSON.stringify({state:'blocked'});
+    if(!submit.length||expected!==null&&!editing)return JSON.stringify({state:'loading'});
   }
+  const buttons=[...document.querySelectorAll('button')];
+  const users=buttons.filter(b=>norm(b.getAttribute('aria-label')||b.innerText||b.textContent).startsWith('Brukermeny'));
+  const visibleUsers=users.filter(visible).length;
+  if(visibleUsers!==1){
+    if(drawerMode==='different')return JSON.stringify({state:'blocked'});
+    if(buttons.some(b=>visible(b)&&norm(b.getAttribute('aria-label')||b.innerText)==='Logg inn'))
+      return JSON.stringify({state:'login'});
+    return JSON.stringify(visibleUsers===0&&users.length===1?{state:'hidden_account',route:location.href}:{state:'loading'});
+  }
+  if(onStore)return JSON.stringify({state:'ready'});
   if(__NAVIGATE__)location.assign(store);
   return JSON.stringify({state:'navigating'});
 })()
 """.replace("__CODE__", json.dumps(code)).replace("__CONFIRM__", json.dumps("confirm_order_code" in arguments))
+        entry = entry.replace("__DRAWER_MODE__", CART_DRAWER_MODE_JS)
         navigate = True
+        resized_route = None
+        viewport_restored = False
         for _ in range(20):
-            state = self._eval(entry.replace("__NAVIGATE__", json.dumps(navigate))).get("state")
+            script = entry.replace("__NAVIGATE__", json.dumps(navigate)).replace("__RESIZED_ROUTE__", json.dumps(resized_route))
+            result = self._eval(script)
+            state = result.get("state")
             if state == "ready":
                 return
             if state == "login":
                 raise HouseholdError("MENY login is required in the configured browser profile")
-            if state not in {"loading", "navigating"}:
+            if state == "hidden_account" and not viewport_restored:
+                resized_route = result["route"]
+                self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
+                viewport_restored = True
+            elif state not in {"loading", "hidden_account", "navigating"}:
                 raise HouseholdError("MENY cart context changed; finish any open prompt, then open the store cart and try again")
             if state == "navigating":
                 navigate = False
+                resized_route = None
             self._sleep(0.25)
         raise HouseholdError("MENY cart page did not finish rendering; inspect the store page and try again")
 
@@ -2156,17 +2188,10 @@ __DELIVERY_BINDING__
     .some(d=>visible(d)&&!drawers.includes(d));
   if(!exact||!signedIn||prompt||drawers.length>1)return JSON.stringify({mode:'unverified'});
   if(!drawers.length)return JSON.stringify({mode:'missing'});
-  const cart=drawers[0], text=norm(cart.innerText);
-  const codes=[...text.matchAll(/Du endrer bestilling\s+([A-Za-z0-9-]+)/gi)].map(m=>m[1]);
-  const editing=/Du endrer bestilling/i.test(text);
-  const cartButtons=[...cart.querySelectorAll('button')].filter(visible);
-  const aborts=cartButtons.filter(b=>norm(b.innerText)==='Avbryt endring');
-  if(!editing&&!aborts.length&&!cartButtons.some(b=>['Til kassen','Fortsett'].includes(norm(b.innerText))))
-    return JSON.stringify({mode:'hydrating'});
-  const matches=expected===null ? !editing&&!aborts.length : codes.length===1&&codes[0]===expected&&aborts.length===1;
-  return JSON.stringify({mode:matches?'matched':__MISMATCH__});
+  const mode=(__DRAWER_MODE__)(drawers[0],expected);
+  return JSON.stringify({mode:mode==='different'?__MISMATCH__:mode});
 })()
-""".replace("__MISMATCH__", json.dumps("different" if observe else "unverified")).replace("__CODE__", json.dumps(order_code))
+""".replace("__DRAWER_MODE__", CART_DRAWER_MODE_JS).replace("__MISMATCH__", json.dumps("different" if observe else "unverified")).replace("__CODE__", json.dumps(order_code))
 
     def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False,
                    confirmation_context: str | None = None) -> dict[str, Any]:
