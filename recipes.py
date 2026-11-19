@@ -492,6 +492,13 @@ def source_ingredient(
                 preparation_note = "Bruk saften av frukten."
         if attached_metric_units:
             parse_text = _ATTACHED_METRIC_UNIT.sub(r"\1 \2", parse_text)
+            # Swedish retailer pages state these short metric measures. Apply
+            # them to each measured clause before validating the whole amount.
+            if str(language or "").split("-")[0].casefold() == "sv":
+                swedish = re.fullmatch(r"(.+?) (st|tsk|msk|krm) (.+)", parse_text, re.IGNORECASE)
+                if swedish:
+                    unit_alias = {"st": "stk", "tsk": "ts", "msk": "ss", "krm": "ml"}[swedish[2].casefold()]
+                    parse_text = f"{swedish[1]} {unit_alias} {swedish[3]}"
         for candidate in sorted(UNITS, key=len, reverse=True):
             suffix = r"\.?" if candidate in {"stk", "ss", "ts", "pk"} else ""
             matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + suffix + r"\s+(.+)", parse_text, re.IGNORECASE)
@@ -531,7 +538,7 @@ def source_ingredient_parts(text: str, *, language: str, max_rows: int) -> list[
         parts = _JOINED_SOURCE_AMOUNT.split(text)
         parsed = [source_ingredient(part.strip(), language=language, attached_metric_units=True) for part in parts]
         known_foods = {item for mapping in _SOURCE_INGREDIENT_IDENTITIES.values() for item in mapping.values()}
-        known_foods.update({"løk", "melk", "fløte", "smør", "mel", "sukker", "olje"})
+        known_foods.update({"løk", "melk", "fløte", "smør", "mel", "sukker", "olje", "sitron", "lime", "appelsin"})
         if all(row["scalable"] and row["item"].casefold() in known_foods for row in parsed):
             return parsed
     return [source_ingredient(text, language=language, attached_metric_units=True)]

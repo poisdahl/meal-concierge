@@ -286,7 +286,7 @@ def meny_recipe_input(observation: Any, recipe_id: str, *, fetched_at: str | Non
     No downloaded field supplies binding, estimates acceptance or dietary facts.
     """
     source = meny_recipe_jsonld(observation, recipe_id)
-    from recipes import source_ingredient, source_yield
+    from recipes import source_ingredient_rows, source_yield
     from recipe_quantities import quantity_json, read_quantity
     original_yield = source["recipeYield"]
     yield_value, _ = source_yield(original_yield)
@@ -304,10 +304,7 @@ def meny_recipe_input(observation: Any, recipe_id: str, *, fetched_at: str | Non
         "portions": portions,
         "portions_evidence": evidence,
         "yield": yield_value,
-        "ingredients": [
-            source_ingredient(text, language=source["inLanguage"])
-            for text in source["recipeIngredient"]
-        ],
+        "ingredients": source_ingredient_rows(source["recipeIngredient"], language=source["inLanguage"]),
         "steps": source["recipeInstructions"],
         "notes": source.get("description"),
         "source_provider": "meny",
@@ -332,7 +329,7 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
     from copy import deepcopy
     from html import unescape
     from urllib.parse import urlsplit
-    from recipes import source_ingredient
+    from recipes import source_ingredient_rows
     from recipe_import_sources import TIMEOUT
     import time
     from recipe_quantities import quantity_json, read_quantity
@@ -372,17 +369,8 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
         "unit": "portioner" if provider == "mathem" else "porsjoner",
         "evidence": {"quantity": deepcopy(evidence), "unit": deepcopy(evidence)}}
     if provider == "mathem":
-        # Verified Swedish metric measures. Preserve wording and keep e.g.
-        # cloves/handfuls unresolved; a clove is not a whole garlic product.
-        aliases = {"st": "stk", "tsk": "ts", "msk": "ss", "krm": "ml"}
-        for index, ingredient in enumerate(candidate["ingredients"]):
-            raw = ingredient.get("original_text", "")
-            found = re.fullmatch(r"(.+?)\s+(st|tsk|msk|krm)\s+(.+)", raw)
-            if found:
-                candidate["ingredients"][index] = source_ingredient(
-                    raw, item=found[3], measure=found[1] + " " + aliases[found[2]],
-                    language="sv-SE",
-                )
+        # The /se/ locale supplies Swedish units even when JSON-LD omits inLanguage.
+        candidate["ingredients"] = source_ingredient_rows(rows[0]["extracted"]["ingredients"], language="sv-SE")
     elif provider == "oda":
         _attach_oda_product_hints(candidate, _oda_product_hints(raw_page))
     candidate["source"].update(kind=provider, publisher=provider.upper(),
