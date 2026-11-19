@@ -77,6 +77,12 @@ class SourceUnitTests(unittest.TestCase):
         menu.pop("output_language")
         self.assertIn("Bruk saften av frukten.", menu_email_html(menu))
         self.assertEqual([r["original_text"] for r in recipe["ingredients"]], [garlic, lime])
+        for line, item, unit in (("saft av ½ lime (kan sløyfes)", "lime", "stk"),
+                                 ("2 båter hvitløk (valgfri)", "hvitløk", "fedd")):
+            parsed = source_ingredient(line, language="nb")
+            self.assertTrue(parsed["optional"] and parsed["scalable"])
+            self.assertEqual((parsed["item"], parsed["unit"]), (item, unit))
+            self.assertEqual(parsed["original_text"], line)
         for wording in ("1 båt appelsin", "saften av en neve lime", "saften av 1 lime eller 1 sitron"):
             self.assertFalse(source_ingredient(wording, language="nb")["scalable"])
         self.assertEqual(source_ingredient("2 dl limesaft", language="nb")["unit"], "dl")

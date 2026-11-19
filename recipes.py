@@ -467,6 +467,11 @@ def source_ingredient(
     pasted text opt in; the reviewed collection build keeps its own recovery
     step. numeric_measure marks a measure built from a number in the source data.
     """
+    source_item = item or text
+    optional_marker = None if preserve_source_item else _SOURCE_OPTIONAL.fullmatch(source_item)
+    compound = _JOINED_SOURCE_AMOUNT.search(source_item) is not None
+    if optional_marker and not compound:
+        source_item = optional_marker[1]
     quantity = unit = None
     preparation_note = None
     if measure is not None:
@@ -474,7 +479,7 @@ def source_ingredient(
     # Text spanning several lines is more than one ingredient and stays unread.
     elif item is None and not re.search(r"[\r\n]", text.strip()):
         # Single spaces also keep the unit patterns below linear on a hostile line.
-        parse_text = " ".join(text.split())
+        parse_text = " ".join(source_item.split())
         if not preserve_source_item:
             # A båt of garlic is a clove; a båt of another food is not.
             garlic = re.fullmatch(r"(.+) båt(?:er)? hvitløk", parse_text, re.IGNORECASE)
@@ -498,13 +503,8 @@ def source_ingredient(
                 amount, measured_unit = parse_measure(f"{matched[1]} {candidate}")
                 if (amount is not None and not _SECOND_AMOUNT.match(matched[2])
                         and not _JOINED_SOURCE_AMOUNT.search(matched[2])):
-                    quantity, unit, item = amount, measured_unit, matched[2]
+                    quantity, unit, source_item = amount, measured_unit, matched[2]
                     break
-    source_item = item or text
-    optional_marker = None if preserve_source_item else _SOURCE_OPTIONAL.fullmatch(source_item)
-    compound = _JOINED_SOURCE_AMOUNT.search(source_item) is not None
-    if optional_marker and not compound:
-        source_item = optional_marker[1]
     normalized_item, identity_review_required = _source_ingredient_identity(
         source_item, language,
     )
