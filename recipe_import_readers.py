@@ -586,7 +586,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
     them. Input is an internal result of one of the read_* functions above.
     """
     try:
-        from recipes import source_ingredient, source_ingredient_sections, source_yield, categories_from_tags
+        from recipes import source_ingredient, source_ingredient_rows, source_ingredient_sections, source_yield, categories_from_tags
     except ImportError as exc:
         raise RecipeImportReaderError("shared schema-2 source parsers are not installed") from exc
     raw = record["extracted"]
@@ -605,7 +605,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
         ingredients, empty_sections = source_ingredient_sections(raw["ingredients"], language=raw["language"],
                                                                attached_metric_units=True)
     else:
-        ingredients = [source_ingredient(text, language=raw["language"], attached_metric_units=True) for text in raw["ingredients"]]
+        ingredients = source_ingredient_rows(raw["ingredients"], language=raw["language"])
     portions_input = raw["yield_text"] or None
     if raw["source"]["kind"] == "mealie":
         # Mealie explicitly stores person servings independently from yield.

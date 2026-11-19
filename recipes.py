@@ -447,6 +447,13 @@ _SECOND_AMOUNT = re.compile(
     r"(?:(?:\+|&|[/|–—-]|(?:pluss?|samt|och|og|and|til|to|or|eller)\b)\s*(?:\d|[¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])"
     r"|\d+(?:[.,]\d+)?\s*(?:kg|mg|g|ml|cl|dl|l|ss|ts|stk)\b)", re.IGNORECASE)
 
+# A separately stated amount after a named food must not become part of its
+# shopping identity. Keep proportional wording ("2% milk") unaffected.
+_JOINED_SOURCE_AMOUNT = re.compile(
+    r"(?:(?<!\w)(?:og|och|and|pluss?|samt|or|eller)\b|[+&;])\s*(?=[0-9¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])",
+    re.IGNORECASE,
+)
+
 
 def source_ingredient(
     text: str, *, item: str | None = None, measure: str | None = None,
@@ -489,7 +496,8 @@ def source_ingredient(
                 # line's unit, and "1 dl + 2 ss sugar" is not one dl of
                 # "+ 2 ss sugar"; both stay unresolved for the caller.
                 amount, measured_unit = parse_measure(f"{matched[1]} {candidate}")
-                if amount is not None and not _SECOND_AMOUNT.match(matched[2]):
+                if (amount is not None and not _SECOND_AMOUNT.match(matched[2])
+                        and not _JOINED_SOURCE_AMOUNT.search(matched[2])):
                     quantity, unit, item = amount, measured_unit, matched[2]
                     break
     source_item = item or text
@@ -511,6 +519,26 @@ def source_ingredient(
             "quantity": quantity, "unit": unit,
             "scalable": not identity_review_required and quantity is not None and unit in UNITS,
             "evidence": {"quantity": deepcopy(evidence), "unit": unit_evidence}}
+
+
+def source_ingredient_rows(lines: list[str], *, language: str) -> list[dict[str, Any]]:
+    """Read additive source lines only when each part independently names a measured food."""
+    known_foods = {item for mapping in _SOURCE_INGREDIENT_IDENTITIES.values() for item in mapping.values()}
+    known_foods.update({"løk", "melk", "fløte", "smør", "mel", "sukker", "olje"})
+    rows = []
+    extra_capacity = 200 - len(lines)
+    for text in lines:
+        joins = list(_JOINED_SOURCE_AMOUNT.finditer(text))
+        if (joins and len(joins) <= extra_capacity
+                and not re.search(r"\b(?:or|eller)\b|[/|]\s*[A-Za-zÆØÅæøå]", text, re.IGNORECASE)):
+            parts = _JOINED_SOURCE_AMOUNT.split(text)
+            parsed = [source_ingredient(part.strip(), language=language, attached_metric_units=True) for part in parts]
+            if all(row["scalable"] and row["item"].casefold() in known_foods for row in parsed):
+                rows.extend(parsed)
+                extra_capacity -= len(joins)
+                continue
+        rows.append(source_ingredient(text, language=language, attached_metric_units=True))
+    return rows
 
 
 def source_ingredient_sections(
