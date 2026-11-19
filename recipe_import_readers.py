@@ -747,6 +747,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
     No file, network, bank or provider operation occurs here.
     """
     from recipes import (
+        SOURCE_OIL_CHOICE,
         bind_recipe_source,
         categories_from_tags,
         normalize_recipe,
@@ -843,17 +844,42 @@ def read_transcript(value: Any) -> dict[str, Any]:
     for index, item in enumerate(ingredient_excerpts, 1):
         quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item", "choice", "whole_count"))
         original_quote = quote
-        if "choice" in item:
+        oil_choice = SOURCE_OIL_CHOICE.fullmatch(quote)
+        if not oil_choice and re.search(r"\b(?:sunflower|vegetable)\b", quote, re.IGNORECASE):
+            page_oils = SOURCE_OIL_CHOICE.finditer(page_text[item["page"]])
+            if any(quote.casefold() in match[0].casefold() for match in page_oils):
+                raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
+        if oil_choice and not oil_choice[3]:
+            # The shorter wording can also occur in the method on the same page.
+            if any(match[3] and match[1] == oil_choice[1]
+                   for match in SOURCE_OIL_CHOICE.finditer(page_text[item["page"]])):
+                raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
+        if "choice" in item and oil_choice:
+            if item["choice"] not in ("sunflower oil", "vegetable oil") or "item" in item or "whole_count" in item:
+                raise RecipeImportReaderError("choose the complete oil identity: sunflower oil or vegetable oil")
+            if oil_choice[3]:
+                if "estimated_amount" not in item:
+                    raise RecipeImportReaderError("estimate the total oil including the extra for frying")
+                quantity, oil_unit, _ = estimate(item["estimated_amount"], unit=True)
+                dimension, multiplier = UNITS[oil_unit]
+                if dimension != "ml" or read_quantity(quantity) * multiplier <= int(oil_choice[1]) * UNITS["tbsp"][1]:
+                    raise RecipeImportReaderError("estimate a total volume above the stated amount to include the frying oil")
+            elif "estimated_amount" in item:
+                raise RecipeImportReaderError("the selected oil already has an explicit measure")
+            quote = f"{oil_choice[1]} tbsp {item['choice']}"
+        elif "choice" in item:
             # Only a single shared explicit measure and two complete named
             # alternatives establish the amount for either selected ingredient.
             parts = re.fullmatch(r"(\d+(?:[.,/]\d+)?\s+[^\W\d_]+)\s+([^\W\d_]+)\s+(?:or|eller)\s+([^\W\d_]+)",
                                  quote, re.IGNORECASE)
+            if parts and tuple(part.casefold() for part in parts.groups()[1:]) == ("sunflower", "vegetable"):
+                raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
             if (not parts or item["choice"] not in parts.groups()[1:]
                     or "estimated_amount" in item or "item" in item or "whole_count" in item):
                 raise RecipeImportReaderError("choose one complete source alternative with the same stated measure")
             quote = f"{parts[1]} {item['choice']}"
         if "whole_count" in item:
-            pieces = re.fullmatch(r"([1-9]\d{0,2})\s+(egg|eggs|løk|onion|onions|gulrot|gulrøtter|carrot|carrots)",
+            pieces = re.fullmatch(r"([1-9]\d{0,2})\s+((?:large )?eggs?|løk|onion|onions|gulrot|gulrøtter|carrot|carrots)",
                                   quote, re.IGNORECASE)
             if (not pieces or item["whole_count"] is not True or "estimated_amount" in item
                     or "item" in item or "choice" in item):
@@ -885,7 +911,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
                 raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
             if has_dependency(estimated_item):
                 raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
-        elif "estimated_amount" in item:
+        elif "estimated_amount" in item and not oil_choice:
             without_leading_amount = re.sub(
                 r"^\s*\d+(?:[.,]\d+)?\s+", "", quote, count=1,
             ).strip()

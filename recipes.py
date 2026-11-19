@@ -334,6 +334,7 @@ _SOURCE_INGREDIENT_IDENTITIES = {
         "beef and pork mince": "kjøttfarse av storfe og svin",
         "olive oil": "olivenolje",
         "vegetable oil": "matolje",
+        "sunflower oil": "solsikkeolje",
         "kefir grains": "kefirkorn",
         "chicken breast": "kyllingbryst",
         "chicken breasts": "kyllingbryst",
@@ -359,6 +360,8 @@ _SOURCE_INGREDIENT_IDENTITIES = {
         "milk": "melk",
         "egg": "egg",
         "eggs": "egg",
+        "large egg": "store egg",
+        "large eggs": "store egg",
         "rice": "ris",
         "water": "vann",
         "salt": "salt",
@@ -455,6 +458,14 @@ _JOINED_SOURCE_AMOUNT = re.compile(
 )
 
 
+# Both modifiers share the noun "oil". The BBC formulation sometimes adds an
+# unmeasured frying allowance, which must never be counted as exactly one tbsp.
+SOURCE_OIL_CHOICE = re.compile(
+    r"(?<![\w.,/])([1-9]\d{0,2})\s+(tbsp)\s+sunflower\s+or\s+vegetable\s+oil\b"
+    r"(?:,?\s+(plus\s+a\s+little\s+extra\s+for\s+frying)\b)?", re.IGNORECASE,
+)
+
+
 def source_ingredient(
     text: str, *, item: str | None = None, measure: str | None = None,
     language: str | None = None, preserve_source_item: bool = False,
@@ -491,6 +502,13 @@ def source_ingredient(
                 parse_text = f"{fruit[1]} stk {fruit[2]}"
                 preparation_note = "Bruk saften av frukten."
         if attached_metric_units:
+            # Count an explicitly sized whole egg, retaining the size in the item.
+            sized_eggs = re.fullmatch(r"([1-9]\d{0,2}) (large eggs?)", parse_text, re.IGNORECASE)
+            if sized_eggs:
+                parse_text = f"{sized_eggs[1]} stk {sized_eggs[2]}"
+            if SOURCE_OIL_CHOICE.fullmatch(parse_text):
+                # The caller may choose a complete oil identity during interpretation.
+                parse_text = ""
             parse_text = _ATTACHED_METRIC_UNIT.sub(r"\1 \2", parse_text)
             # Swedish retailer pages state these short metric measures. Apply
             # them to each measured clause before validating the whole amount.
