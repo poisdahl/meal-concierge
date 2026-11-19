@@ -112,6 +112,27 @@ class RecipeDeliveryPresentationTests(unittest.TestCase):
                 self.assertEqual('<a href=' in rendered, linked)
                 self.assertNotIn("javascript:", rendered)
 
+    def test_english_delivery_of_incomplete_translated_and_link_only_recipes(self):
+        from recipe_delivery import render_menu, split_text
+        from recipe_languages import source_text_digest
+        soup = {"name": "Suppe", "language": "nb", "notes": "Kildens notat", "rights": {"storage": "full"},
+                "ingredients": [], "steps": ["Kok."]}
+        soup["translations"] = {"en": {"name": "Soup", "ingredients": [], "steps": ["Boil."],
+                                       "notes": "Original note", "source_text_digest": source_text_digest(soup)}}
+        menu = {"output_language": "en-GB", "dishes": [soup], "salads": [
+            {"name": "Salad", "language": "en", "rights": {"storage": "link_only"},
+             "source": {"kind": "web", "url": "https://example.com/salad"}}]}
+        rendered = render_menu(menu, None, images=False)
+        messages = "\n".join(split_text(rendered["html"], 256))
+        for output in (rendered["text"], messages):
+            for expected in ("Soup", "Boil.", "Original note", "The source has no ingredient list.",
+                             "Only a link to the source is available", "https://example.com/salad"):
+                self.assertIn(expected, output)
+            self.assertNotIn("Requested language unavailable", output)
+        self.assertEqual(rendered["warnings"], ["The source has no ingredient list.",
+                                                "Only a link to the source is available for this recipe."])
+        self.assertEqual(soup["notes"], "Kildens notat")
+
     def test_new_delivery_preferences_default_to_visible_estimate_labels(self):
         preferences = initial_recipe_delivery()["preferences"]
 

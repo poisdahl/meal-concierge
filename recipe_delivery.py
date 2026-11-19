@@ -1,7 +1,6 @@
 """Render only a saved menu and its managed covers. No URLs or host paths opened."""
 from __future__ import annotations
 
-from copy import deepcopy
 from email.message import EmailMessage
 from email.policy import SMTP
 import html
@@ -25,29 +24,16 @@ def render_menu(menu, assets, *, images=True, show_estimate_labels=True):
             media["image_cids"].pop(descriptor["asset_id"], None)
             media["image_warnings"].append({"reason": "cover_missing_or_invalid"})
     warnings = [w["reason"] for w in media["image_warnings"]] if images else []
-    frozen = deepcopy(menu)
     for group in ("dishes", "salads"):
-        for recipe in frozen.get(group, []):
-            missing = []
-            if (recipe.get("rights") or {}).get("storage") == "link_only":
-                missing.append("Kilden tillater bare lenke; full oppskrift er ikke tilgjengelig her.")
-            else:
-                if not recipe.get("ingredients"):
-                    missing.append("Ingredienser mangler i kilden.")
-                if not recipe.get("steps"):
-                    missing.append("Fremgangsmåte mangler i kilden.")
-            if missing:
-                recipe["notes"] = "\n".join(filter(None, [recipe.get("notes"), *missing]))
-                warnings.extend(missing)
-    for group in ("dishes", "salads"):
-        for recipe in frozen.get(group, []):
+        for recipe in menu.get(group, []):
             presentation = recipe.get("presentation") or {}
             if presentation.get("fallback"):
                 warnings.append("requested language unavailable: " + presentation["requested_language"] + "; showing " + presentation["resolved_language"])
-    full = menu_email_html(frozen, image_cids=media["image_cids"], show_estimate_labels=show_estimate_labels)
+    full = menu_email_html(menu, image_cids=media["image_cids"], show_estimate_labels=show_estimate_labels,
+                          omission_warnings=warnings)
     return {"html": full, "text": _plain_text(full), "covers": covers,
-            "warnings": list(dict.fromkeys(warnings)), "language": frozen.get("output_language"),
-            "title": menu_delivery_title(frozen)}
+            "warnings": list(dict.fromkeys(warnings)), "language": menu.get("output_language"),
+            "title": menu_delivery_title(menu)}
 
 
 def split_text(document, maximum):
