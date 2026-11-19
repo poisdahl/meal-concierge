@@ -186,6 +186,10 @@ def _bounded_browser_stderr():
         os.close(read_fd)
 
 
+class _CartPanelNotReady(HouseholdError):
+    """The authenticated cart drawer or its rows have not finished loading."""
+
+
 class _CartControlReplaced(HouseholdError):
     """The product page replaced the marked control before mouse dispatch."""
 
@@ -610,6 +614,9 @@ def normalize_cart_snapshot(value: Any) -> dict[str, Any]:
 
     if not isinstance(value, Mapping) or value.get("authenticated") is not True:
         raise HouseholdError("MENY login is required in the configured browser profile")
+    if (value.get("ready") is False and type(value.get("root_count")) is int
+            and value["root_count"] in {0, 1}):
+        raise _CartPanelNotReady("MENY cart did not finish rendering")
     if (
         value.get("ready") is not True
         or isinstance(value.get("root_count"), bool)
@@ -971,6 +978,10 @@ class MenyClient:
                     "message": "MENY's personalised often-bought list is not available through the browser flow.",
                 }
             if tool == "get_cart":
+                if "confirm_order_code" in arguments:
+                    return self._read_confirmation_cart(arguments["confirm_order_code"])
+                if arguments.get("observe_order_mode") is True:
+                    return self._read_cart(observe_order_mode=True)
                 return self._read_cart()
             if tool == "manipulate_cart":
                 return self._change_cart(arguments)
@@ -2060,11 +2071,56 @@ __DELIVERY_BINDING__
                 break
         return observed
 
-    def _read_cart(self, *, allow_reload: bool = True) -> dict[str, Any]:
+    def _read_confirmation_cart(self, order_code: str | None) -> dict[str, Any]:
+        # Only the pre-journal get_cart reads use this path. A second read
+        # stays in the current tab and shares this operation's deadline.
+        if order_code is not None and not re.fullmatch(r"[A-Za-z0-9-]{2,40}", str(order_code)):
+            raise HouseholdError("MENY checkout cart order identity is invalid")
+        context = r"""
+(() => {
+  const norm=x=>(x||'').normalize('NFC').replace(/\s+/g,' ').trim();
+  const visible=x=>{const s=getComputedStyle(x),b=x.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&b.width>0&&b.height>0};
+  const expected=__CODE__, exact=location.href==='https://meny.no/varer';
+  const buttons=[...document.querySelectorAll('button')].filter(visible);
+  const signedIn=buttons.filter(b=>norm(b.getAttribute('aria-label')||b.innerText).startsWith('Brukermeny')).length===1;
+  const drawers=[...document.querySelectorAll('[aria-label="Handlevogn"]')].filter(visible);
+  const prompt=[...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')]
+    .some(d=>visible(d)&&!drawers.includes(d));
+  if(!exact||!signedIn||prompt||drawers.length>1)return JSON.stringify({mode:'unverified'});
+  if(!drawers.length)return JSON.stringify({mode:'missing'});
+  const cart=drawers[0], text=norm(cart.innerText);
+  const codes=[...text.matchAll(/Du endrer bestilling\s+([A-Za-z0-9-]+)/gi)].map(m=>m[1]);
+  const editing=/Du endrer bestilling/i.test(text);
+  const cartButtons=[...cart.querySelectorAll('button')].filter(visible);
+  const aborts=cartButtons.filter(b=>norm(b.innerText)==='Avbryt endring');
+  if(!editing&&!aborts.length&&!cartButtons.some(b=>['Til kassen','Fortsett'].includes(norm(b.innerText))))
+    return JSON.stringify({mode:'hydrating'});
+  const matches=expected===null ? !editing&&!aborts.length : codes.length===1&&codes[0]===expected&&aborts.length===1;
+  return JSON.stringify({mode:matches?'matched':'unverified'});
+})()
+""".replace("__CODE__", json.dumps(order_code))
+        for attempt in range(2):
+            try:
+                return self._read_cart(allow_reload=False, confirmation_context=context)
+            except _CartPanelNotReady as exc:
+                if attempt:
+                    raise HouseholdError(f"{exc} after a second read; open the cart on the store page and "
+                                         "check its contents before confirming again") from exc
+                self._sleep(0.25)
+
+    def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False,
+                   confirmation_context: str | None = None) -> dict[str, Any]:
+        # Check mode in the same DOM evaluation as the drawer opener and the
+        # extracted quantities. A missing drawer can hydrate or be opened once.
+        mode_expression = f"JSON.parse({confirmation_context}).mode" if confirmation_context else "null"
+        changed = "MENY checkout cart context changed; inspect the cart and any open prompt before confirming"
         state: dict[str, Any] = {}
         for _ in range(20):
             state = self._eval(r"""
 (() => {
+  const mode = __CONFIRM_MODE__;
+  if (mode === 'unverified') return JSON.stringify({context_changed:true});
+  if (mode === 'hydrating') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
@@ -2072,16 +2128,27 @@ __DELIVERY_BINDING__
   if (carts.length === 1) return JSON.stringify({open:true, ready:true, authenticated:authenticated.length === 1, root_count:1});
   const open = [...document.querySelectorAll('button')].filter(visible).filter(button => !button.disabled && norm(button.getAttribute('aria-label')) === 'Åpne handlevognen');
   if (carts.length !== 0 || open.length !== 1) return JSON.stringify({open:false, ready:false, authenticated:authenticated.length === 1, root_count:carts.length, open_count:open.length});
+  if (mode === 'matched') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
+  if (mode === 'missing') {
+    if (open[0].getAttribute('aria-disabled') === 'true') return JSON.stringify({ready:false, authenticated:true, root_count:0, open_count:1});
+    open[0].click();
+    return JSON.stringify({open:true, ready:true, authenticated:true, root_count:0});
+  }
   open[0].setAttribute('data-meal-concierge-action', 'open-cart');
   return JSON.stringify({open:false, ready:true, authenticated:authenticated.length === 1, root_count:0, open_count:1});
 })()
-""")
+""".replace("__CONFIRM_MODE__", mode_expression))
+            if state.get("context_changed") is True:
+                raise HouseholdError(changed)
             if state.get("ready") is True:
                 break
             self._sleep(0.25)
         if state.get("authenticated") is not True:
             raise HouseholdError("MENY login is required in the configured browser profile")
         if state.get("ready") is not True:
+            if (state.get("open") is True and state.get("root_count") == 1
+                    or state.get("root_count") == 0 and state.get("open_count") in {0, 1}):
+                raise _CartPanelNotReady("MENY cart is unavailable")
             raise HouseholdError("MENY cart is unavailable")
         if state.get("open") is not True:
             self._invoke("click", '[data-meal-concierge-action="open-cart"]')
@@ -2090,12 +2157,21 @@ __DELIVERY_BINDING__
         for _ in range(60):
             result = self._eval(r"""
 (() => {
+  const mode = __CONFIRM_MODE__;
+  if (mode === 'unverified') return JSON.stringify({context_changed:true});
+  if (mode === 'hydrating') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const carts = [...document.querySelectorAll('[aria-label="Handlevogn"]')].filter(visible).filter(x => [...x.querySelectorAll('button')].filter(visible).some(button => ['Til kassen','Fortsett'].includes(norm(button.innerText))));
   if (carts.length !== 1) return JSON.stringify({ready:false, authenticated:authenticated.length === 1, root_count:carts.length});
+  if (mode === 'missing') return JSON.stringify({ready:false, authenticated:true, root_count:0});
   const cart = carts[0];
+  const ordinaryCart = location.href === 'https://meny.no/varer' &&
+    !/Du endrer bestilling/i.test(norm(cart.innerText)) &&
+    ![...cart.querySelectorAll('button')].some(b => visible(b) && norm(b.innerText) === 'Avbryt endring') &&
+    ![...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')]
+      .some(d => visible(d) && /Vil du legge til varer på eksisterende bestilling/i.test(norm(d.innerText)));
   const productPattern = /^\/varer\/(?!kampanjer\/)[A-Za-z0-9._~%/-]+-\d{4,14}$/;
   const itemRoots = [];
   for (const anchor of cart.querySelectorAll('a[href]')) {
@@ -2152,9 +2228,11 @@ __DELIVERY_BINDING__
     }
   }
   const ready = authenticated.length === 1 && itemRoots.length === controls.length && items.length === itemRoots.length && (items.length > 0 || empty) && totalReady && subtotalReady && deliveryReady;
-  return JSON.stringify({ready, authenticated:authenticated.length === 1, root_count:1, item_root_count:itemRoots.length, control_count:controls.length, empty, total_count:totals.length, subtotal_count:subtotalRows.length, subtotal, delivery_count:deliveryCount, delivery, items, count:items.reduce((sum,item) => sum + item.quantity, 0), total});
+  return JSON.stringify({ready, ordinaryCart, authenticated:authenticated.length === 1, root_count:1, item_root_count:itemRoots.length, control_count:controls.length, empty, total_count:totals.length, subtotal_count:subtotalRows.length, subtotal, delivery_count:deliveryCount, delivery, items, count:items.reduce((sum,item) => sum + item.quantity, 0), total});
 })()
-""")
+""".replace("__CONFIRM_MODE__", mode_expression))
+            if result.get("context_changed") is True:
+                raise HouseholdError(changed)
             if result.get("ready") is True:
                 break
             if (
@@ -2178,10 +2256,11 @@ __DELIVERY_BINDING__
         ):
             self._invoke("reload")
             self._sleep(0.5)
-            return self._read_cart(allow_reload=False)
+            return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
         snapshot = normalize_cart_snapshot(result)
         return {
             "provider": "meny",
+            **({"ordinary_cart": result.get("ordinaryCart") is True} if observe_order_mode else {}),
             "items": snapshot["items"],
             "count": snapshot["count"],
             "subtotal": snapshot["product_subtotal"],
