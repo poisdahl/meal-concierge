@@ -44,6 +44,49 @@ def fixture(*ingredients):
 
 
 class SourceUnitTests(unittest.TestCase):
+    def test_source_optional_annotation_is_not_a_required_product_or_search_term(self):
+        for marker in ("kan sløyfes", "valgfritt", "optional"):
+            with self.subTest(marker=marker):
+                line = f"50 g revet sjokolade ({marker})"
+                row = source_ingredient(line, language="nb", attached_metric_units=True)
+                menu = {"dishes": [scale_recipe(fixture(row), 2)], "salads": []}
+                reqs, unresolved = menu_requirements(menu)
+                self.assertEqual(unresolved, [])
+                self.assertEqual(reqs[0]["search"], "revet sjokolade")
+                self.assertTrue(row["optional"])
+                self.assertEqual(row["original_text"], line)
+                self.assertEqual(row["evidence"]["quantity"]["input"], line)
+                self.assertEqual(menu_requirements(menu, ingredient_decisions=[{
+                    "source": {"collection": "dishes", "recipe_index": 0, "ingredient_index": 0},
+                    "action": "omit",
+                }]), ([], []))
+        label = source_ingredient("10 g sjokolade (uten melk)", language="nb")
+        self.assertEqual(label["item"], "sjokolade (uten melk)")
+        self.assertNotIn("optional", label)
+
+    def test_garlic_boat_is_a_clove_and_juice_of_fresh_fruit_is_a_fruit_count(self):
+        garlic = "1 båt hvitløk"
+        lime = "saften av 0,5 stk lime"
+        recipe = fixture(*(source_ingredient(line, language="nb") for line in (garlic, lime)))
+        menu = {"dishes": [scale_recipe(recipe, 4)], "salads": [], "output_language": "nb"}
+        rows, unresolved = menu_requirements(menu)
+        self.assertEqual(unresolved, [])
+        self.assertEqual([(r["search"], r["unit"], read_quantity(r["quantity"])) for r in rows],
+                         [("hvitløk", "clove", 2), ("lime", "count", 1)])
+        self.assertIn("Bruk saften av frukten.", menu_email_html(menu))
+        menu.pop("output_language")
+        self.assertIn("Bruk saften av frukten.", menu_email_html(menu))
+        self.assertEqual([r["original_text"] for r in recipe["ingredients"]], [garlic, lime])
+        for line, item, unit in (("saft av ½ lime (kan sløyfes)", "lime", "stk"),
+                                 ("2 båter hvitløk (valgfri)", "hvitløk", "fedd")):
+            parsed = source_ingredient(line, language="nb")
+            self.assertTrue(parsed["optional"] and parsed["scalable"])
+            self.assertEqual((parsed["item"], parsed["unit"]), (item, unit))
+            self.assertEqual(parsed["original_text"], line)
+        for wording in ("1 båt appelsin", "saften av en neve lime", "saften av 1 lime eller 1 sitron"):
+            self.assertFalse(source_ingredient(wording, language="nb")["scalable"])
+        self.assertEqual(source_ingredient("2 dl limesaft", language="nb")["unit"], "dl")
+
     def test_source_aliases_scale_exact_ratios_and_preserve_evidence(self):
         for dimension, aliases in ALIASES.items():
             for alias in aliases:

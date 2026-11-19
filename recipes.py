@@ -334,6 +334,7 @@ _SOURCE_INGREDIENT_IDENTITIES = {
         "beef and pork mince": "kjøttfarse av storfe og svin",
         "olive oil": "olivenolje",
         "vegetable oil": "matolje",
+        "sunflower oil": "solsikkeolje",
         "kefir grains": "kefirkorn",
         "chicken breast": "kyllingbryst",
         "chicken breasts": "kyllingbryst",
@@ -359,6 +360,8 @@ _SOURCE_INGREDIENT_IDENTITIES = {
         "milk": "melk",
         "egg": "egg",
         "eggs": "egg",
+        "large egg": "store egg",
+        "large eggs": "store egg",
         "rice": "ris",
         "water": "vann",
         "salt": "salt",
@@ -436,6 +439,9 @@ def source_ingredient_identity(
     return _source_ingredient_identity(value, language, require_reviewed=require_reviewed)
 
 
+# A publisher's standalone trailing annotation describes the ingredient row.
+# Keep it in the source evidence while shopping for the food name itself.
+_SOURCE_OPTIONAL = re.compile(r"(.+?\S|\S)\s*\(\s*(?:kan sløyfes|valgfri(?:tt)?|optional)\s*\)\s*", re.IGNORECASE)
 _ATTACHED_METRIC_UNIT = re.compile(r"^(\s*\d+(?:[.,]\d+)?)(kg|mg|g|ml|cl|dl|l)(?=\s)", re.IGNORECASE)
 # What follows a first amount is another amount of the same line: a joiner or
 # range mark and a number ("+ 2 ss", "og 1 ts", "til 300 g", "- 300g"), or a
@@ -443,6 +449,21 @@ _ATTACHED_METRIC_UNIT = re.compile(r"^(\s*\d+(?:[.,]\d+)?)(kg|mg|g|ml|cl|dl|l)(?
 _SECOND_AMOUNT = re.compile(
     r"(?:(?:\+|&|[/|–—-]|(?:pluss?|samt|och|og|and|til|to|or|eller)\b)\s*(?:\d|[¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])"
     r"|\d+(?:[.,]\d+)?\s*(?:kg|mg|g|ml|cl|dl|l|ss|ts|stk)\b)", re.IGNORECASE)
+
+# A separately stated amount after a named food must not become part of its
+# shopping identity. Keep proportional wording ("2% milk") unaffected.
+_JOINED_SOURCE_AMOUNT = re.compile(
+    r"(?:(?<!\w)(?:og|och|and|pluss?|samt|or|eller)\b|[+&;]|(?<!\d)[/|])\s*(?=[0-9¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])",
+    re.IGNORECASE,
+)
+
+
+# Both modifiers share the noun "oil". The BBC formulation sometimes adds an
+# unmeasured frying allowance, which must never be counted as exactly one tbsp.
+SOURCE_OIL_CHOICE = re.compile(
+    r"(?<![\w.,/])([1-9]\d{0,2})\s+(tbsp)\s+sunflower\s+or\s+vegetable\s+oil\b"
+    r"(?:,?\s+(plus\s+a\s+little\s+extra\s+for\s+frying)\b)?", re.IGNORECASE,
+)
 
 
 def source_ingredient(
@@ -457,15 +478,45 @@ def source_ingredient(
     pasted text opt in; the reviewed collection build keeps its own recovery
     step. numeric_measure marks a measure built from a number in the source data.
     """
+    source_item = item or text
+    optional_marker = None if preserve_source_item else _SOURCE_OPTIONAL.fullmatch(source_item)
+    compound = _JOINED_SOURCE_AMOUNT.search(source_item) is not None
+    if optional_marker and not compound:
+        source_item = optional_marker[1]
     quantity = unit = None
+    preparation_note = None
     if measure is not None:
         quantity, unit = parse_measure(measure, numeric=numeric_measure)
     # Text spanning several lines is more than one ingredient and stays unread.
     elif item is None and not re.search(r"[\r\n]", text.strip()):
         # Single spaces also keep the unit patterns below linear on a hostile line.
-        parse_text = " ".join(text.split())
+        parse_text = " ".join(source_item.split())
+        if not preserve_source_item:
+            # A båt of garlic is a clove; a båt of another food is not.
+            garlic = re.fullmatch(r"(.+) båt(?:er)? hvitløk", parse_text, re.IGNORECASE)
+            if garlic and parse_measure(f"{garlic[1]} fedd")[0] is not None:
+                parse_text = f"{garlic[1]} fedd hvitløk"
+            fruit = re.fullmatch(r"saft(?:en)? av (.+?) (?:(?:stk\.?|stykk) )?(lime|sitron|appelsin)",
+                                 parse_text, re.IGNORECASE)
+            if fruit and parse_measure(f"{fruit[1]} stk")[0] is not None:
+                parse_text = f"{fruit[1]} stk {fruit[2]}"
+                preparation_note = "Bruk saften av frukten."
         if attached_metric_units:
+            # Count an explicitly sized whole egg, retaining the size in the item.
+            sized_eggs = re.fullmatch(r"([1-9]\d{0,2}) (large eggs?)", parse_text, re.IGNORECASE)
+            if sized_eggs:
+                parse_text = f"{sized_eggs[1]} stk {sized_eggs[2]}"
+            if SOURCE_OIL_CHOICE.fullmatch(parse_text):
+                # The caller may choose a complete oil identity during interpretation.
+                parse_text = ""
             parse_text = _ATTACHED_METRIC_UNIT.sub(r"\1 \2", parse_text)
+            # Swedish retailer pages state these short metric measures. Apply
+            # them to each measured clause before validating the whole amount.
+            if str(language or "").split("-")[0].casefold() == "sv":
+                swedish = re.fullmatch(r"(.+?) (st|tsk|msk|krm) (.+)", parse_text, re.IGNORECASE)
+                if swedish:
+                    unit_alias = {"st": "stk", "tsk": "ts", "msk": "ss", "krm": "ml"}[swedish[2].casefold()]
+                    parse_text = f"{swedish[1]} {unit_alias} {swedish[3]}"
         for candidate in sorted(UNITS, key=len, reverse=True):
             suffix = r"\.?" if candidate in {"stk", "ss", "ts", "pk"} else ""
             matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + suffix + r"\s+(.+)", parse_text, re.IGNORECASE)
@@ -475,10 +526,10 @@ def source_ingredient(
                 # line's unit, and "1 dl + 2 ss sugar" is not one dl of
                 # "+ 2 ss sugar"; both stay unresolved for the caller.
                 amount, measured_unit = parse_measure(f"{matched[1]} {candidate}")
-                if amount is not None and not _SECOND_AMOUNT.match(matched[2]):
-                    quantity, unit, item = amount, measured_unit, matched[2]
+                if (amount is not None and not _SECOND_AMOUNT.match(matched[2])
+                        and not _JOINED_SOURCE_AMOUNT.search(matched[2])):
+                    quantity, unit, source_item = amount, measured_unit, matched[2]
                     break
-    source_item = item or text
     normalized_item, identity_review_required = _source_ingredient_identity(
         source_item, language,
     )
@@ -486,12 +537,39 @@ def source_ingredient(
     unit_evidence = deepcopy(evidence)
     if unit in {"tsp", "teaspoon", "teaspoons", "tbsp", "tablespoon", "tablespoons"}:
         unit_evidence = {"basis": "estimate", "input": text, "assumptions": "Use the metric culinary measure: teaspoon=5 ml and tablespoon=15 ml; source locale is unverified."}
-    return {"item": source_item if preserve_source_item else normalized_item,
+    # A marker on one component cannot allow the whole unresolved line to be omitted.
+    optional_flags = {"optional": False} if compound else {"optional": True} if optional_marker else {}
+    return {**optional_flags, **({"notes": preparation_note} if preparation_note else {}),
+            "item": source_item if preserve_source_item else normalized_item,
             "raw": text, "original_text": text,
             "amount": measure,
             "quantity": quantity, "unit": unit,
             "scalable": not identity_review_required and quantity is not None and unit in UNITS,
             "evidence": {"quantity": deepcopy(evidence), "unit": unit_evidence}}
+
+
+def source_ingredient_parts(text: str, *, language: str, max_rows: int) -> list[dict[str, Any]]:
+    """Split only explicit additive quantities of independently identifiable foods."""
+    joins = list(_JOINED_SOURCE_AMOUNT.finditer(text))
+    if (joins and len(joins) < max_rows
+            and all(join[0].strip() not in {"/", "|"} for join in joins)
+            and not re.search(r"\b(?:or|eller)\b|[/|]\s*[A-Za-zÆØÅæøå]", text, re.IGNORECASE)):
+        parts = _JOINED_SOURCE_AMOUNT.split(text)
+        parsed = [source_ingredient(part.strip(), language=language, attached_metric_units=True) for part in parts]
+        known_foods = {item for mapping in _SOURCE_INGREDIENT_IDENTITIES.values() for item in mapping.values()}
+        known_foods.update({"løk", "melk", "fløte", "smør", "mel", "sukker", "olje", "sitron", "lime", "appelsin"})
+        if all(row["scalable"] and row["item"].casefold() in known_foods for row in parsed):
+            return parsed
+    return [source_ingredient(text, language=language, attached_metric_units=True)]
+
+
+def source_ingredient_rows(lines: list[str], *, language: str) -> list[dict[str, Any]]:
+    rows = []
+    for index, text in enumerate(lines, 1):
+        # Reserve one row for every later source line, even when a split cannot fit.
+        capacity = 200 - len(rows) - (len(lines) - index)
+        rows.extend(source_ingredient_parts(text, language=language, max_rows=capacity))
+    return rows
 
 
 def source_ingredient_sections(

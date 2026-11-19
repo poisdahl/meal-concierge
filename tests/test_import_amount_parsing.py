@@ -43,6 +43,79 @@ class UnresolvedLineTests(unittest.TestCase):
         self.assertEqual([amount(row) for row in recipe["ingredients"]], [(200, 1, "g"), None, None, None])
         self.assertEqual([row["original_text"] for row in recipe["ingredients"][1:]], list(cases))
 
+    def test_two_measured_foods_on_one_web_line_both_reach_the_cart_plan(self):
+        from product_planner import build_product_plan, cart_requirements, menu_requirements
+        from recipes import scale_recipe
+        from test_meal_concierge_products import observation, option, product
+
+        candidate = webpage("200 g gulrot og 100 g løk", "2dl fløte + 1dl melk", "50 g gulrot")
+        recipe = scale_recipe(normalize_recipe(candidate), 4)
+        menu = {"dishes": [recipe], "salads": []}
+        requirements, unresolved = menu_requirements(menu)
+        self.assertFalse(unresolved)
+        self.assertEqual({r["item"]: r["quantity"]["numerator"] for r in requirements},
+                         {"gulrot": 250, "løk": 100, "fløte": 200, "melk": 100})
+        observed, approved = {}, []
+        for row in requirements:
+            candidate_product = product(row["item"], row["item"], 100, row["unit"], [option(100)])
+            observed[row["requirement_id"]] = observation(row["search"], [candidate_product])
+            approved.append({"requirement_id": row["requirement_id"], "candidate_refs": [row["item"]]})
+        plan = build_product_plan(provider="oda", binding={}, menu=menu, observations=observed,
+                                  candidate_approvals=approved)
+        self.assertEqual({row["product_id"]: row["quantity"] for row in cart_requirements(plan)},
+                         {"gulrot": 3, "løk": 1, "fløte": 2, "melk": 1})
+        for piece, qty_unit in zip(candidate["ingredients"][:4],
+                ("200 g gulrot", "100 g løk", "2dl fløte", "1dl melk")):
+            self.assertEqual(piece["original_text"], qty_unit)
+            self.assertEqual(piece["evidence"]["quantity"]["input"], qty_unit)
+
+    def test_unknown_compound_or_alternative_does_not_buy_only_the_first_amount(self):
+        for text in ("1 ss olje eller 2 ss smør", "1 dl melk + 2 dl til pensling",
+                     "200 g gulrot (og 100 g løk)", "2 dl fløte og 1 dl ukjent vare"):
+            with self.subTest(text=text):
+                candidate = webpage(text)
+                self.assertEqual(len(candidate["ingredients"]), 1)
+                row = candidate["ingredients"][0]
+                self.assertEqual(row["original_text"], text)
+                self.assertIsNone(row["quantity"])
+                self.assertFalse(row["scalable"])
+
+    def test_optional_marker_only_applies_to_its_named_component(self):
+        for text, optionality in (
+            ("200 g gulrot og 100 g løk (kan sløyfes)", [False, True]),
+            ("200 g gulrot (optional) + 100 g løk", [True, False]),
+            ("1 dl melk + 2 dl ukjent vare (optional)", [False]),
+            ("1 dl melk (optional) + 2 dl ukjent vare", [False]),
+        ):
+            with self.subTest(text=text):
+                rows = normalize_recipe(webpage(text))["ingredients"]
+                self.assertEqual([row["optional"] for row in rows], optionality)
+
+    def test_transcript_splits_named_amounts_with_the_complete_page_quote_as_evidence(self):
+        def transcript(lines):
+            return read_transcript({"kind": "pasted_text",
+                "pages": [{"page": 1, "text": "\n".join(["Suppe", "4 personer", *lines, "Kok alt."])}],
+                "interpretation": {"name": "Suppe", "language": "nb", "yield": {"page": 1, "quote": "4 personer"},
+                    "ingredients": [{"page": 1, "quote": line} for line in lines],
+                    "steps": [{"page": 1, "quote": "Kok alt."}]}})["candidate"]
+
+        line = "200 g gulrot og 100 g løk (valgfri)"
+        rows = transcript([line])["ingredients"]
+        self.assertEqual([(r["item"], amount(r), r["optional"]) for r in rows],
+                         [("gulrot", (200, 1, "g"), False), ("løk", (100, 1, "g"), True)])
+        for row in rows:
+            self.assertEqual(row["evidence"]["quantity"]["input"], "Page 1: " + line)
+            self.assertEqual(row["evidence"]["unit"]["input"], "Page 1: " + line)
+        rows = transcript([line] + ["5 g salt"] * 199)["ingredients"]
+        self.assertEqual(len(rows), 200)
+        self.assertFalse(rows[0]["scalable"])
+        self.assertFalse(rows[0]["optional"])
+        self.assertEqual(rows[-1]["item"], "salt")
+        with self.assertRaisesRegex(RecipeImportReaderError, "alternatives"):
+            transcript(["200 g gulrot eller 100 g løk"])
+        with self.assertRaisesRegex(RecipeImportReaderError, "dependencies"):
+            transcript(["200 g gulrot og 100 g saus fra i går"])
+
     def test_a_structured_measure_still_reports_its_unsupported_unit(self):
         row = source_ingredient("2 ladles ris", item="ris", measure="2 ladles")
         self.assertEqual((row["quantity"], row["unit"], row["item"]), (None, "ladles", "ris"))

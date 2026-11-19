@@ -94,7 +94,12 @@ def source_group(recipe: Mapping[str, Any], *, entry_origin: str | None = None,
             return "store"
     except RecipeError:
         pass
-    kind = str((recipe.get("source") or {}).get("kind") or "").casefold()
+    source = recipe.get("source") or {}
+    kind = str(source.get("kind") or "").casefold()
+    # Interpreted URL imports keep the transcript format and the fetched page.
+    # An ordinary pasted transcript has only the original, declared attribution.
+    if kind == "pasted_text" and source.get("url") and source["url"] == (recipe.get("external_snapshot") or {}).get("permanent_url"):
+        return "web"
     # Frozen legacy discoveries retain their publisher identity. Neither retired
     # ID can carry a live preference, and only saved entries count as bank items.
     from core import RETIRED_RECIPE_SOURCES

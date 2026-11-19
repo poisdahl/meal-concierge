@@ -58,6 +58,17 @@ process.stdout.write(eval(script));
 
 
 class MenyRecipeObservationTests(unittest.TestCase):
+    def test_meny_shopping_keeps_both_independently_measured_foods(self):
+        observed = page()
+        source = json.loads(observed["scripts"][0])
+        source["recipeIngredient"] = ["200 g gulrot og 100 g løk", "1 dl melk eller 2 dl fløte"]
+        observed["scripts"] = [json.dumps(source)]
+        rows = meny_recipe_input(observed, RECIPE_PATH)["ingredients"]
+        self.assertEqual([(r["item"], r["quantity"]["numerator"]) for r in rows[:2]],
+                         [("gulrot", 200), ("løk", 100)])
+        self.assertEqual(rows[2]["original_text"], source["recipeIngredient"][1])
+        self.assertIsNone(rows[2]["quantity"])
+
     def test_exact_observed_structure_retains_text_and_servings_label(self):
         result = meny_recipe_jsonld(page(), RECIPE_PATH)
         self.assertEqual(result["recipeYield"], "Antall personer: 4")
@@ -339,6 +350,21 @@ class RetailerPublicDetailTests(unittest.TestCase):
         quantities = [item["quantity"] for item in scaled["shopping_requirements"]]
         self.assertEqual((scaled["shopping_requirements"][1]["unit"], quantities[1]), ("ss", {"numerator": 1, "denominator": 4}))
         self.assertEqual(normalized["source_provider"], "mathem")
+
+    def test_swedish_measures_never_promote_only_the_first_food_of_a_compound(self):
+        from retailer_recipes import retail_web_recipe_input
+        source = self.source()
+        incoming = ["1 msk olja och 2 tsk salt", "1 msk olja eller 3 msk smör",
+                    "1 msk olja och 2 msk till servering",
+                    "2 msk olja/4 msk smör", "1/2 msk olja | 3/4 msk smör (optional)"]
+        with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=self.fetched(source, ingredients=incoming)):
+            rows = retail_web_recipe_input(source, "mathem")["ingredients"]
+        self.assertEqual([(r["item"], r["quantity"]["numerator"], r["unit"]) for r in rows[:2]],
+                         [("matolje", 1, "ss"), ("salt", 2, "ts")])
+        self.assertEqual([r["original_text"] for r in rows], ["1 msk olja", "2 tsk salt", *incoming[1:]])
+        self.assertTrue(all(r["evidence"]["quantity"]["input"] == r["original_text"] for r in rows))
+        self.assertTrue(all(r["quantity"] is None and not r.get("optional") for r in rows[2:]))
+        self.assertEqual(rows[-1]["original_text"], incoming[-1])
 
     def test_wrong_origin_identity_query_or_budget_never_fetches(self):
         from copy import deepcopy

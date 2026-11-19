@@ -287,6 +287,74 @@ class ImportConvenienceTests(unittest.TestCase):
         with self.assertRaisesRegex(RecipeImportReaderError, "cross-meal"):
             read_transcript(data)
 
+    def test_pancake_eggs_and_oil_keep_size_identity_and_unmeasured_frying_extra(self):
+        from test_import_amount_parsing import webpage
+        from recipes import scale_recipe
+        from product_planner import menu_requirements
+
+        eggs = "2 large eggs"
+        base = "1 tbsp sunflower or vegetable oil"
+        oil = base + " plus a little extra for frying"
+        step = "Whisk the large eggs."
+        recipe = normalize_recipe(webpage(eggs, oil, language="en"))
+        egg, unresolved = recipe["ingredients"]
+        self.assertEqual((egg["item"], egg["unit"], egg["quantity"]), ("store egg", "stk", {"numerator": 2, "denominator": 1}))
+        self.assertEqual(egg["original_text"], eggs)
+        self.assertFalse(unresolved["scalable"])
+        self.assertIsNone(unresolved["quantity"])
+        self.assertEqual(unresolved["original_text"], oil)
+        source = transcript("\n".join(["Serves 4", eggs, oil, step]), [eggs, oil], [step], language="en", yield_quote="Serves 4")
+        egg_row, oil_row = source["interpretation"]["ingredients"]
+        egg_row["whole_count"] = True
+        for selected, identity in (("sunflower oil", "solsikkeolje"), ("vegetable oil", "matolje")):
+            oil_row.update(choice=selected, estimated_amount={"quantity": 20, "unit": "ml",
+                           "assumptions": "15 ml in batter and about 5 ml for the pan."})
+            interpreted = read_transcript(source)["candidate"]
+            self.assertEqual(interpreted["steps"], [step])
+            self.assertEqual(interpreted["ingredients"][1]["original_text"], oil)
+            self.assertEqual(interpreted["ingredients"][1]["evidence"]["quantity"], {
+                "basis": "estimate", "input": "Page 1: " + oil, "assumptions": oil_row["estimated_amount"]["assumptions"],
+                "conversion": None})
+            required, problems = menu_requirements({"dishes": [scale_recipe(interpreted, 4)], "salads": []})
+            self.assertFalse(problems)
+            self.assertEqual({r["item"]: r["quantity"]["numerator"] for r in required},
+                             {"store egg": 2, identity: 20})
+        for qty, unit in ((15, "ml"), (1, "tbsp"), (30, "g")):
+            oil_row["estimated_amount"].update(quantity=qty, unit=unit)
+            with self.assertRaisesRegex(RecipeImportReaderError, "total volume"):
+                read_transcript(source)
+        del oil_row["estimated_amount"]
+        for quoted, choice, message in (
+            (oil, "sunflower oil", "estimate the total"), (oil, "sunflower", "complete oil"),
+            (base, "vegetable oil", "complete oil"), ("1 tbsp sunflower", "sunflower", "complete oil"),
+            ("1 tbsp sunflower or vegetable", "sunflower", "complete oil"),
+        ):
+            oil_row.update(quote=quoted, choice=choice)
+            with self.assertRaisesRegex(RecipeImportReaderError, message):
+                read_transcript(source)
+        oil_row.update(quote=base, choice="vegetable oil")
+        source["pages"][0]["text"] = source["pages"][0]["text"].replace(oil, base + "\nplus a little extra for frying")
+        with self.assertRaisesRegex(RecipeImportReaderError, "complete oil"):
+            read_transcript(source)
+        source["pages"][0]["text"] = source["pages"][0]["text"].replace(base + "\nplus", base + " plus")
+        oil_row.pop("choice")
+        oil_row.update(estimated_amount={"quantity": 5, "unit": "ml", "assumptions": "Estimated oil."},
+                       item="vegetable oil")
+        for fragment in ("oil", "1 tbsp", "a little extra"):
+            oil_row["quote"] = fragment
+            with self.subTest(fragment=fragment), self.assertRaisesRegex(RecipeImportReaderError, "complete oil"):
+                read_transcript(source)
+        # A second ingredient with the same name in a separate section is legitimate.
+        source["pages"][0]["text"] += "\nGarnish\noil"
+        oil_row["quote"] = "oil"
+        garnish = read_transcript(source)["candidate"]["ingredients"][1]
+        self.assertEqual((garnish["item"], garnish["quantity"]["numerator"]), ("matolje", 5))
+        del oil_row["estimated_amount"], oil_row["item"]
+        oil_row.update(quote=base, choice="sunflower oil")
+        source["pages"][0]["text"] = source["pages"][0]["text"].replace(oil, base)
+        without_extra = read_transcript(source)["candidate"]["ingredients"][1]
+        self.assertEqual((without_extra["item"], without_extra["quantity"]["numerator"]), ("solsikkeolje", 1))
+
     def test_a_refused_redirect_names_only_a_same_site_https_target(self):
         def hint(requested, location):
             response = type("Response", (), {"headers": Message()})()

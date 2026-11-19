@@ -420,6 +420,33 @@ class _WebpageText(HTMLParser):
     def ignored(self) -> bool:
         return bool(self.stack and self.stack[-1][1])
 
+    def _in_table_row(self) -> bool:
+        row = False
+        for tag, _ in reversed(self.stack):
+            if tag == "table":
+                return row
+            if tag == "tr":
+                row = True
+        return False
+
+    def _boundary(self, tag: str) -> None:
+        self._append("\t" if tag in {"td", "th"} and self._in_table_row() else "\n")
+
+    def lines(self):
+        from recipe_quantities import parse_measure
+        for line in "".join(self.parts).splitlines():
+            cells = [" ".join(cell.split()) for cell in line.split("\t")]
+            cells = [cell for cell in cells if cell]
+            # An amount and its adjacent food are one usable source excerpt.
+            # A layout table with independent recipes or headings keeps its cells.
+            whole_cells = line.strip(" ")
+            if (len(cells) == 2 and whole_cells.startswith("\t") and whole_cells.endswith("\t")
+                    and cells[1][0].isalpha() and len(cells[0]) <= 100
+                    and parse_measure(cells[0])[0] is not None):
+                yield " ".join(cells)
+            else:
+                yield from cells
+
     def _close(self, names: set[str], boundaries: set[str] | frozenset[str] = frozenset()) -> None:
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index][0] in names:
@@ -468,7 +495,7 @@ class _WebpageText(HTMLParser):
         if tag == "main" and not ignored:
             self.found_main = True
         if not ignored and tag in self._blocks:
-            self._append("\n")
+            self._boundary(tag)
         if tag not in self._void:
             if len(self.stack) >= 128:
                 raise RecipeImportReaderError("webpage nesting exceeds the supported text limit")
@@ -477,11 +504,16 @@ class _WebpageText(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         self._close({tag})
         if not self.ignored and tag in self._blocks:
-            self._append("\n")
+            self._boundary(tag)
 
     def handle_data(self, data: str) -> None:
         if not self.ignored:
-            self._append(data)
+            # HTML source indentation is not a rendered line break inside a cell.
+            # Reserve tabs for cell boundaries. Explicit <br> and block tags
+            # still emit newlines independently of the surrounding markup.
+            if self._in_table_row() and not any(tag == "pre" for tag, _ in self.stack):
+                data = re.sub(r"[ \t\r\n\f]+", " ", data)
+            self._append(data.replace("\t", " "))
 
 
 def _decoded_web_prose(value: str) -> str:
@@ -497,7 +529,7 @@ def _decoded_web_prose(value: str) -> str:
         parser.close()
         if any(tag in parser._ignored for tag, _ in parser.stack):
             raise RecipeImportReaderError("structured recipe prose has an unclosed non-text element")
-        value = "\n".join(line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split())))
+        value = "\n".join(parser.lines())
     return value
 
 
@@ -539,7 +571,7 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
         parser.close()
     if any(tag in parser._ignored for tag, _ in parser.stack):
         raise RecipeImportReaderError("webpage text has an unclosed non-text element")
-    visible_lines = [line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split()))]
+    visible_lines = list(parser.lines())
     def record_lines(record):
         extracted = record["extracted"]
         return [value for value in (
@@ -586,7 +618,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
     them. Input is an internal result of one of the read_* functions above.
     """
     try:
-        from recipes import source_ingredient, source_ingredient_sections, source_yield, categories_from_tags
+        from recipes import source_ingredient, source_ingredient_rows, source_ingredient_sections, source_yield, categories_from_tags
     except ImportError as exc:
         raise RecipeImportReaderError("shared schema-2 source parsers are not installed") from exc
     raw = record["extracted"]
@@ -605,7 +637,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
         ingredients, empty_sections = source_ingredient_sections(raw["ingredients"], language=raw["language"],
                                                                attached_metric_units=True)
     else:
-        ingredients = [source_ingredient(text, language=raw["language"], attached_metric_units=True) for text in raw["ingredients"]]
+        ingredients = source_ingredient_rows(raw["ingredients"], language=raw["language"])
     portions_input = raw["yield_text"] or None
     if raw["source"]["kind"] == "mealie":
         # Mealie explicitly stores person servings independently from yield.
@@ -715,10 +747,12 @@ def read_transcript(value: Any) -> dict[str, Any]:
     No file, network, bank or provider operation occurs here.
     """
     from recipes import (
+        SOURCE_OIL_CHOICE,
         bind_recipe_source,
         categories_from_tags,
         normalize_recipe,
         source_ingredient,
+        source_ingredient_parts,
         source_ingredient_identity,
         source_yield,
     )
@@ -807,20 +841,48 @@ def read_transcript(value: Any) -> dict[str, Any]:
     )
     def has_dependency(text):
         return any(pattern.search(text) for pattern in dependency_patterns)
-    for item in ingredient_excerpts:
+    for index, item in enumerate(ingredient_excerpts, 1):
         quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item", "choice", "whole_count"))
         original_quote = quote
-        if "choice" in item:
+        oil_choice = SOURCE_OIL_CHOICE.fullmatch(quote)
+        page = page_text[item["page"]]
+        if not oil_choice or not oil_choice[3]:
+            # A fragment such as "oil" or "1 tbsp" can be real page text while
+            # losing the complete identity and its frying allowance. Accept it
+            # only if the same text is also an independent source line.
+            folded_quote = quote.casefold()
+            for match in SOURCE_OIL_CHOICE.finditer(page):
+                if folded_quote in match[0].casefold() and folded_quote != match[0].casefold():
+                    other_lines = SOURCE_OIL_CHOICE.sub("\ufffc", page).splitlines()
+                    if not any(line.strip() == quote for line in other_lines):
+                        raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
+                    break
+        if "choice" in item and oil_choice:
+            if item["choice"] not in ("sunflower oil", "vegetable oil") or "item" in item or "whole_count" in item:
+                raise RecipeImportReaderError("choose the complete oil identity: sunflower oil or vegetable oil")
+            if oil_choice[3]:
+                if "estimated_amount" not in item:
+                    raise RecipeImportReaderError("estimate the total oil including the extra for frying")
+                quantity, oil_unit, _ = estimate(item["estimated_amount"], unit=True)
+                dimension, multiplier = UNITS[oil_unit]
+                if dimension != "ml" or read_quantity(quantity) * multiplier <= int(oil_choice[1]) * UNITS["tbsp"][1]:
+                    raise RecipeImportReaderError("estimate a total volume above the stated amount to include the frying oil")
+            elif "estimated_amount" in item:
+                raise RecipeImportReaderError("the selected oil already has an explicit measure")
+            quote = f"{oil_choice[1]} tbsp {item['choice']}"
+        elif "choice" in item:
             # Only a single shared explicit measure and two complete named
             # alternatives establish the amount for either selected ingredient.
             parts = re.fullmatch(r"(\d+(?:[.,/]\d+)?\s+[^\W\d_]+)\s+([^\W\d_]+)\s+(?:or|eller)\s+([^\W\d_]+)",
                                  quote, re.IGNORECASE)
+            if parts and tuple(part.casefold() for part in parts.groups()[1:]) == ("sunflower", "vegetable"):
+                raise RecipeImportReaderError("quote the complete oil alternatives and any extra for frying")
             if (not parts or item["choice"] not in parts.groups()[1:]
                     or "estimated_amount" in item or "item" in item or "whole_count" in item):
                 raise RecipeImportReaderError("choose one complete source alternative with the same stated measure")
             quote = f"{parts[1]} {item['choice']}"
         if "whole_count" in item:
-            pieces = re.fullmatch(r"([1-9]\d{0,2})\s+(egg|eggs|løk|onion|onions|gulrot|gulrøtter|carrot|carrots)",
+            pieces = re.fullmatch(r"([1-9]\d{0,2})\s+((?:large )?eggs?|løk|onion|onions|gulrot|gulrøtter|carrot|carrots)",
                                   quote, re.IGNORECASE)
             if (not pieces or item["whole_count"] is not True or "estimated_amount" in item
                     or "item" in item or "choice" in item):
@@ -831,6 +893,14 @@ def read_transcript(value: Any) -> dict[str, Any]:
             raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
         if has_dependency(quote):
             raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+        if set(item) == {"page", "quote"}:
+            capacity = 200 - len(ingredients) - (len(ingredient_excerpts) - index)
+            parts = source_ingredient_parts(quote, language=language, max_rows=capacity)
+            for ingredient in parts:
+                for evidence in ingredient["evidence"].values():
+                    evidence["input"] = evidence_input
+            ingredients.extend(parts)
+            continue
         estimated_item = None
         if "item" in item:
             # The quote stays the evidence; the host names what its estimate measures
@@ -844,7 +914,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
                 raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
             if has_dependency(estimated_item):
                 raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
-        elif "estimated_amount" in item:
+        elif "estimated_amount" in item and not oil_choice:
             without_leading_amount = re.sub(
                 r"^\s*\d+(?:[.,]\d+)?\s+", "", quote, count=1,
             ).strip()

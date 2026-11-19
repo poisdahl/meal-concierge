@@ -747,7 +747,12 @@ For a quoted transcript ingredient, `choice` selects one of two named source
 alternatives sharing the same explicit amount and unit, such as `smør` in
 `2 ss olje eller smør`. The original quote remains attached. For a bare integer
 and a recognized whole egg, onion or carrot, set `whole_count=true` to keep the
-piece count. A can with no stated capacity still needs a labeled estimate to
+piece count. Explicitly sized `2 large eggs` keeps its size and count directly.
+For `sunflower or vegetable oil`, select the complete identity (`sunflower oil`
+or `vegetable oil`). When the source also calls for extra oil for frying,
+quote the entire ingredient and supply an `estimated_amount` for the total
+volume, including your assumption for the unmeasured extra.
+A can with no stated capacity still needs a labeled estimate to
 convert it to mass or volume. A later use of leftover marinade can refer to
 marinade explicitly reserved in an earlier selected step.
 
