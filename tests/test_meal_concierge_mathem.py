@@ -427,6 +427,87 @@ for(const c of cases){
                     text=True, capture_output=True, check=True, timeout=10)
                 self.assertEqual(json.loads(result.stdout), [True] + [False] * (len(cases)-1))
 
+    @unittest.skipUnless(shutil.which('node'), 'Node required for receipt contract')
+    def test_only_incomplete_exact_oda_receipt_is_eligible_for_reopen(self):
+        from oda_browser import _oda_incomplete_receipt_script
+        url = 'https://oda.com/no/account/orders/TOTAL_LABEL/'
+        harness = r"""
+const {script,url}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const modals=['[role="dialog"]','[role="alertdialog"]','dialog[open]','[aria-modal="true"]'];
+const run=(text,{page=url,login=false,modal,hidden=false,mains=1}={})=>{
+ const root={innerText:text,getBoundingClientRect:()=>({width:10,height:10})};
+ global.location={href:page};
+ global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
+ global.document={body:root,querySelector:()=>login,querySelectorAll:s=>
+  s==='main'?Array(mains).fill(root):s.split(',').includes(modal)?[{...root,hidden}]:[]};
+ return JSON.parse(eval(script)).incomplete;
+};
+const title='Bestilling TOTAL_LABEL';
+process.stdout.write(JSON.stringify([
+ run('',{mains:0}),run(title),run(title+'\nOther address\nTotal inkl. MVA'),
+ run('Bestilling another-order'),run('Logg inn'),run('',{login:true}),
+ run('',{mains:2}),run('',{page:url+'?other=1'}),
+ ...modals.map(modal=>run('',{modal})),...modals.map(modal=>run('',{modal,hidden:true}))
+]));
+"""
+        result = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({
+            'script': _oda_incomplete_receipt_script('TOTAL_LABEL', url), 'url': url}),
+            text=True, capture_output=True, check=True, timeout=10)
+        self.assertEqual(json.loads(result.stdout), [True, True] + [False] * 10 + [True] * 4)
+
+    def test_oda_receipt_reopens_once_only_during_cancellation_preparation(self):
+        from oda_browser import OdaBrowser
+        order_id = 'synthetic-123'
+        for retry, incomplete, verified, account, error in (
+            (True, True, True, True, None),
+            (True, False, False, False, 'address cannot be verified'),
+            (True, True, False, True, 'address cannot be verified'),
+            (True, True, True, False, 'account do not match'),
+            (False, True, False, False, 'address cannot be verified'),
+        ):
+            with self.subTest(retry=retry, incomplete=incomplete, verified=verified, account=account):
+                browser = OdaBrowser.__new__(OdaBrowser)
+                browser.provider_client = mock.Mock(provider='oda')
+                browser.provider_client.call.return_value = {'result': [{'id': 123, 'address': 'Test Street 1'}]}
+                browser._open = mock.Mock()
+                browser._settle = mock.Mock()
+                receipt = browser._order_url(order_id)
+                def evaluate(script):
+                    if 'const receiptIds=' in script:
+                        return {'incomplete': incomplete}
+                    if 'account_matches:' in script:
+                        return {'account_matches': account}
+                    self.assertIn('address_verified:', script)
+                    return {'address_verified': verified and browser._open.call_count == 2}
+                browser._eval = mock.Mock(side_effect=evaluate)
+                order = {'orderNumber': order_id, 'currency': 'NOK'}
+                if error:
+                    with self.assertRaisesRegex(HouseholdError, error):
+                        browser._read_order_binding(order_id, order, retry_incomplete_receipt=retry)
+                else:
+                    binding = browser._read_order_binding(order_id, order, retry_incomplete_receipt=retry)
+                    self.assertEqual(binding['receipt_address'], 'Test Street 1')
+                opens = [mock.call(receipt)]
+                if retry and incomplete:
+                    opens.append(mock.call(receipt))
+                    if verified:
+                        opens.append(mock.call('https://oda.com/no/account/delivery/'))
+                self.assertEqual(browser._open.call_args_list, opens)
+
+    def test_oda_receipt_reopen_respects_original_deadline(self):
+        from oda_browser import OdaBrowser
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.provider_client = mock.Mock(provider='oda')
+        browser.provider_client.call.return_value = {'result': [{'id': 123, 'address': 'Test Street 1'}]}
+        browser._open = mock.Mock()
+        browser._settle = mock.Mock()
+        browser._eval = mock.Mock(side_effect=[{'address_verified': False}] * 20 + [{'incomplete': True}])
+        order = {'orderNumber': 'synthetic-123', 'currency': 'NOK'}
+        with mock.patch('oda_browser.time.monotonic', side_effect=[0, 10]):
+            with self.assertRaisesRegex(HouseholdError, 'deadline reached'):
+                browser._read_order_binding('synthetic-123', order, retry_incomplete_receipt=True, deadline=10)
+        browser._open.assert_called_once_with(browser._order_url('synthetic-123'))
+
     @unittest.skipUnless(shutil.which('node'), 'Node required for account contract')
     def test_account_reference_is_bound_to_its_provider_and_visible_edit_link(self):
         from oda_browser import _checkout_account_script
