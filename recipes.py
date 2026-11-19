@@ -523,23 +523,26 @@ def source_ingredient(
             "evidence": {"quantity": deepcopy(evidence), "unit": unit_evidence}}
 
 
+def source_ingredient_parts(text: str, *, language: str, max_rows: int) -> list[dict[str, Any]]:
+    """Split only explicit additive quantities of independently identifiable foods."""
+    joins = list(_JOINED_SOURCE_AMOUNT.finditer(text))
+    if (joins and len(joins) < max_rows
+            and not re.search(r"\b(?:or|eller)\b|[/|]\s*[A-Za-zÆØÅæøå]", text, re.IGNORECASE)):
+        parts = _JOINED_SOURCE_AMOUNT.split(text)
+        parsed = [source_ingredient(part.strip(), language=language, attached_metric_units=True) for part in parts]
+        known_foods = {item for mapping in _SOURCE_INGREDIENT_IDENTITIES.values() for item in mapping.values()}
+        known_foods.update({"løk", "melk", "fløte", "smør", "mel", "sukker", "olje"})
+        if all(row["scalable"] and row["item"].casefold() in known_foods for row in parsed):
+            return parsed
+    return [source_ingredient(text, language=language, attached_metric_units=True)]
+
+
 def source_ingredient_rows(lines: list[str], *, language: str) -> list[dict[str, Any]]:
-    """Read additive source lines only when each part independently names a measured food."""
-    known_foods = {item for mapping in _SOURCE_INGREDIENT_IDENTITIES.values() for item in mapping.values()}
-    known_foods.update({"løk", "melk", "fløte", "smør", "mel", "sukker", "olje"})
     rows = []
-    extra_capacity = 200 - len(lines)
-    for text in lines:
-        joins = list(_JOINED_SOURCE_AMOUNT.finditer(text))
-        if (joins and len(joins) <= extra_capacity
-                and not re.search(r"\b(?:or|eller)\b|[/|]\s*[A-Za-zÆØÅæøå]", text, re.IGNORECASE)):
-            parts = _JOINED_SOURCE_AMOUNT.split(text)
-            parsed = [source_ingredient(part.strip(), language=language, attached_metric_units=True) for part in parts]
-            if all(row["scalable"] and row["item"].casefold() in known_foods for row in parsed):
-                rows.extend(parsed)
-                extra_capacity -= len(joins)
-                continue
-        rows.append(source_ingredient(text, language=language, attached_metric_units=True))
+    for index, text in enumerate(lines, 1):
+        # Reserve one row for every later source line, even when a split cannot fit.
+        capacity = 200 - len(rows) - (len(lines) - index)
+        rows.extend(source_ingredient_parts(text, language=language, max_rows=capacity))
     return rows
 
 

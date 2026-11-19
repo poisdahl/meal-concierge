@@ -719,6 +719,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
         categories_from_tags,
         normalize_recipe,
         source_ingredient,
+        source_ingredient_parts,
         source_ingredient_identity,
         source_yield,
     )
@@ -807,7 +808,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
     )
     def has_dependency(text):
         return any(pattern.search(text) for pattern in dependency_patterns)
-    for item in ingredient_excerpts:
+    for index, item in enumerate(ingredient_excerpts, 1):
         quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item", "choice", "whole_count"))
         original_quote = quote
         if "choice" in item:
@@ -831,6 +832,14 @@ def read_transcript(value: Any) -> dict[str, Any]:
             raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
         if has_dependency(quote):
             raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+        if set(item) == {"page", "quote"}:
+            capacity = 200 - len(ingredients) - (len(ingredient_excerpts) - index)
+            parts = source_ingredient_parts(quote, language=language, max_rows=capacity)
+            for ingredient in parts:
+                for evidence in ingredient["evidence"].values():
+                    evidence["input"] = evidence_input
+            ingredients.extend(parts)
+            continue
         estimated_item = None
         if "item" in item:
             # The quote stays the evidence; the host names what its estimate measures

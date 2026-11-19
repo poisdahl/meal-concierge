@@ -91,6 +91,31 @@ class UnresolvedLineTests(unittest.TestCase):
                 rows = normalize_recipe(webpage(text))["ingredients"]
                 self.assertEqual([row["optional"] for row in rows], optionality)
 
+    def test_transcript_splits_named_amounts_with_the_complete_page_quote_as_evidence(self):
+        def transcript(lines):
+            return read_transcript({"kind": "pasted_text",
+                "pages": [{"page": 1, "text": "\n".join(["Suppe", "4 personer", *lines, "Kok alt."])}],
+                "interpretation": {"name": "Suppe", "language": "nb", "yield": {"page": 1, "quote": "4 personer"},
+                    "ingredients": [{"page": 1, "quote": line} for line in lines],
+                    "steps": [{"page": 1, "quote": "Kok alt."}]}})["candidate"]
+
+        line = "200 g gulrot og 100 g løk (valgfri)"
+        rows = transcript([line])["ingredients"]
+        self.assertEqual([(r["item"], amount(r), r["optional"]) for r in rows],
+                         [("gulrot", (200, 1, "g"), False), ("løk", (100, 1, "g"), True)])
+        for row in rows:
+            self.assertEqual(row["evidence"]["quantity"]["input"], "Page 1: " + line)
+            self.assertEqual(row["evidence"]["unit"]["input"], "Page 1: " + line)
+        rows = transcript([line] + ["5 g salt"] * 199)["ingredients"]
+        self.assertEqual(len(rows), 200)
+        self.assertFalse(rows[0]["scalable"])
+        self.assertFalse(rows[0]["optional"])
+        self.assertEqual(rows[-1]["item"], "salt")
+        with self.assertRaisesRegex(RecipeImportReaderError, "alternatives"):
+            transcript(["200 g gulrot eller 100 g løk"])
+        with self.assertRaisesRegex(RecipeImportReaderError, "dependencies"):
+            transcript(["200 g gulrot og 100 g saus fra i går"])
+
     def test_a_structured_measure_still_reports_its_unsupported_unit(self):
         row = source_ingredient("2 ladles ris", item="ris", measure="2 ladles")
         self.assertEqual((row["quantity"], row["unit"], row["item"]), (None, "ladles", "ris"))
