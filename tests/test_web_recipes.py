@@ -1,6 +1,7 @@
 """Web settings, import persistence and mixed menu flow; no external effects."""
 from copy import deepcopy
 from datetime import date
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -403,6 +404,38 @@ class WebRecipeTests(unittest.TestCase):
         saved = self.app.handle({'operation': 'menu', 'action': 'save',
                                  'planner_handoff': result['save_handoff']})['menu']
         self.assertIn(url, json.dumps(saved))
+
+    def test_visible_ingredient_table_preserves_rows_for_checked_url_import(self):
+        url = 'https://trinesmatblogg.no/recipe/table-fixture/'
+        html = b"""<main><h1>Test bread</h1><p>Serves 2</p><table>
+            <tr><td><span>500</span> g</td><td>
+                hvetemel</td></tr>
+            <tr><td>1 ts</td><td>sukker</td></tr>
+            <tr><td>20 g mel</td><td>2 ts salt</td></tr>
+            <tr><td>3 dl</td></tr><tr><td>melk</td></tr>
+            <tr><td>400 g<br>200 g</td><td>smor</td></tr>
+            <tr><td hidden>10 dl</td><td>1 dl</td><td>vann</td></tr>
+            </table><ol><li>Kna.</li><li>Stek.</li></ol></main>"""
+        request = {'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                   'url': url, 'web_discovery': True, 'storage_decision': DECISION}
+        interpretation = {'name': 'Test bread',
+                          'ingredients': [{'page': 1, 'quote': '500 g hvetemel'}],
+                          'steps': [{'page': 1, 'quote': 'Kna.'}],
+                          'yield': {'page': 1, 'quote': 'Serves 2'}}
+        with patch('recipe_import_sources._get_bytes', return_value=(html, 'text/html')):
+            first = self.app.handle(request)
+            self.assertEqual(first['source_sha256'], hashlib.sha256(html).hexdigest())
+            self.assertEqual(first['text'].splitlines(), [
+                'Test bread', 'Serves 2', '500 g hvetemel', '1 ts sukker',
+                '20 g mel', '2 ts salt', '3 dl', 'melk', '400 g', '200 g', 'smor',
+                '1 dl vann', 'Kna.', 'Stek.'])
+            imported = self.app.handle({**request, 'interpretation': interpretation})
+            row = imported['recipe']['ingredients'][0]
+            self.assertEqual((row['item'], row['unit'], row['quantity']),
+                             ('hvetemel', 'g', {'numerator': 500, 'denominator': 1}))
+            interpretation['ingredients'][0]['quote'] = '500 g sukker'
+            with self.assertRaisesRegex(RecipeError, 'absent'):
+                self.app.handle({**request, 'interpretation': interpretation})
 
     def test_structured_only_incomplete_page_can_be_interpreted_then_converted(self):
         url = 'https://www.matprat.no/incomplete-structured-only'

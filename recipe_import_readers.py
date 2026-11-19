@@ -420,6 +420,33 @@ class _WebpageText(HTMLParser):
     def ignored(self) -> bool:
         return bool(self.stack and self.stack[-1][1])
 
+    def _in_table_row(self) -> bool:
+        row = False
+        for tag, _ in reversed(self.stack):
+            if tag == "table":
+                return row
+            if tag == "tr":
+                row = True
+        return False
+
+    def _boundary(self, tag: str) -> None:
+        self._append("\t" if tag in {"td", "th"} and self._in_table_row() else "\n")
+
+    def lines(self):
+        from recipe_quantities import parse_measure
+        for line in "".join(self.parts).splitlines():
+            cells = [" ".join(cell.split()) for cell in line.split("\t")]
+            cells = [cell for cell in cells if cell]
+            # An amount and its adjacent food are one usable source excerpt.
+            # A layout table with independent recipes or headings keeps its cells.
+            whole_cells = line.strip(" ")
+            if (len(cells) == 2 and whole_cells.startswith("\t") and whole_cells.endswith("\t")
+                    and cells[1][0].isalpha() and len(cells[0]) <= 100
+                    and parse_measure(cells[0])[0] is not None):
+                yield " ".join(cells)
+            else:
+                yield from cells
+
     def _close(self, names: set[str], boundaries: set[str] | frozenset[str] = frozenset()) -> None:
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index][0] in names:
@@ -468,7 +495,7 @@ class _WebpageText(HTMLParser):
         if tag == "main" and not ignored:
             self.found_main = True
         if not ignored and tag in self._blocks:
-            self._append("\n")
+            self._boundary(tag)
         if tag not in self._void:
             if len(self.stack) >= 128:
                 raise RecipeImportReaderError("webpage nesting exceeds the supported text limit")
@@ -477,11 +504,16 @@ class _WebpageText(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         self._close({tag})
         if not self.ignored and tag in self._blocks:
-            self._append("\n")
+            self._boundary(tag)
 
     def handle_data(self, data: str) -> None:
         if not self.ignored:
-            self._append(data)
+            # HTML source indentation is not a rendered line break inside a cell.
+            # Reserve tabs for cell boundaries. Explicit <br> and block tags
+            # still emit newlines independently of the surrounding markup.
+            if self._in_table_row() and not any(tag == "pre" for tag, _ in self.stack):
+                data = re.sub(r"[ \t\r\n\f]+", " ", data)
+            self._append(data.replace("\t", " "))
 
 
 def _decoded_web_prose(value: str) -> str:
@@ -497,7 +529,7 @@ def _decoded_web_prose(value: str) -> str:
         parser.close()
         if any(tag in parser._ignored for tag, _ in parser.stack):
             raise RecipeImportReaderError("structured recipe prose has an unclosed non-text element")
-        value = "\n".join(line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split())))
+        value = "\n".join(parser.lines())
     return value
 
 
@@ -539,7 +571,7 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
         parser.close()
     if any(tag in parser._ignored for tag, _ in parser.stack):
         raise RecipeImportReaderError("webpage text has an unclosed non-text element")
-    visible_lines = [line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split()))]
+    visible_lines = list(parser.lines())
     def record_lines(record):
         extracted = record["extracted"]
         return [value for value in (
