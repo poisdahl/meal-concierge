@@ -85,9 +85,10 @@ class RecipePackTransferTests(unittest.TestCase):
 
     def test_failed_split_preserves_unrelated_files_in_new_directory(self):
         directory = self.root / 'interrupted'
-        marker = directory / 'household-note.txt'
+        marker = directory / 'part-000000'
 
         def fail_verification(*args):
+            directory.mkdir(exist_ok=True)
             marker.write_text('keep')
             raise ValueError('simulated mismatch')
 
@@ -96,6 +97,21 @@ class RecipePackTransferTests(unittest.TestCase):
                 split(self.source, directory, self.size, self.digest, 500)
         self.assertEqual(list(directory.iterdir()), [marker])
         self.assertEqual(marker.read_text(), 'keep')
+
+    def test_successful_verification_preserves_concurrent_destination(self):
+        directory = self.root / 'concurrent'
+        marker = directory / 'part-000000'
+
+        def publish_other_transfer(*args):
+            directory.mkdir()
+            marker.write_text('different archive')
+
+        with patch('recipe_pack_transfer.check_expected', side_effect=publish_other_transfer):
+            with self.assertRaises(FileExistsError):
+                split(self.source, directory, self.size, self.digest, 500)
+        self.assertEqual(list(directory.iterdir()), [marker])
+        self.assertEqual(marker.read_text(), 'different archive')
+        self.assertEqual(list(self.root.glob('.recipe-transfer-*')), [])
 
     def test_approved_digest_and_existing_output_are_required(self):
         with self.assertRaisesRegex(ValueError, 'differs from approved'):

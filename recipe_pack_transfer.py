@@ -5,7 +5,6 @@ not from the transferred manifest. This tool never imports a pack.
 """
 
 import argparse
-from contextlib import ExitStack
 import errno
 import hashlib
 import json
@@ -33,22 +32,37 @@ def check_expected(size, digest, expected_bytes, expected_sha256):
         raise ValueError('whole recipe pack differs from approved size/SHA-256')
 
 
-def _remove_empty_directory(path):
+def _publish_parts(staged, destination):
+    if os.name == 'nt':
+        # Windows rename already refuses to replace any existing destination.
+        staged.rename(destination)
+        return
+    # POSIX rename can replace an existing empty directory. Reserve this name
+    # exclusively first; rename also refuses a directory containing any files.
+    destination.mkdir(mode=0o700)
+    reserved = destination.stat()
     try:
-        path.rmdir()
-    except OSError as exc:
-        # An unrelated file added during transfer belongs to its creator.
-        if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
-            raise
+        staged.rename(destination)
+    except OSError:
+        try:
+            if os.path.samestat(reserved, destination.lstat()):
+                destination.rmdir()
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                raise
+        raise
 
 
 def split(source, parts_dir, expected_bytes, expected_sha256, max_part_bytes):
     regular_file(source)
     if not 1 <= max_part_bytes <= MAX_PART_BYTES:
         raise ValueError(f'max part bytes must be 1..{MAX_PART_BYTES}')
-    with ExitStack() as rollback:
-        parts_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
-        rollback.callback(_remove_empty_directory, parts_dir)
+    if parts_dir.exists() or parts_dir.is_symlink():
+        raise FileExistsError(f'parts directory already exists: {parts_dir}')
+    parts_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=parts_dir.parent, prefix='.recipe-transfer-') as temporary:
+        staged = Path(temporary) / 'parts'
+        staged.mkdir(mode=0o700)
         whole = hashlib.sha256()
         total = 0
         parts = []
@@ -63,9 +77,8 @@ def split(source, parts_dir, expected_bytes, expected_sha256, max_part_bytes):
                 size = 1
                 digest = hashlib.sha256(first)
                 whole.update(first)
-                part_path = parts_dir / name
+                part_path = staged / name
                 with part_path.open('xb') as outgoing:
-                    rollback.callback(part_path.unlink, missing_ok=True)
                     outgoing.write(first)
                     while size < max_part_bytes:
                         block = incoming.read(min(1024 * 1024, max_part_bytes - size))
@@ -80,11 +93,10 @@ def split(source, parts_dir, expected_bytes, expected_sha256, max_part_bytes):
         check_expected(total, whole.hexdigest(), expected_bytes, expected_sha256)
         manifest = {'format': 1, 'filename': source.name, 'bytes': total,
                     'sha256': expected_sha256, 'parts': parts}
-        manifest_path = parts_dir / 'pack-transfer.json'
+        manifest_path = staged / 'pack-transfer.json'
         with manifest_path.open('x') as outgoing:
-            rollback.callback(manifest_path.unlink, missing_ok=True)
             outgoing.write(json.dumps(manifest, indent=2) + '\n')
-        rollback.pop_all()
+        _publish_parts(staged, parts_dir)
         return {'parts': len(parts), 'bytes': total, 'sha256': expected_sha256}
 
 
