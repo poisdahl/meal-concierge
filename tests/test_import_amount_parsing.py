@@ -80,6 +80,17 @@ class UnresolvedLineTests(unittest.TestCase):
                 self.assertIsNone(row["quantity"])
                 self.assertFalse(row["scalable"])
 
+    def test_optional_marker_only_applies_to_its_named_component(self):
+        for text, optionality in (
+            ("200 g gulrot og 100 g løk (kan sløyfes)", [False, True]),
+            ("200 g gulrot (optional) + 100 g løk", [True, False]),
+            ("1 dl melk + 2 dl ukjent vare (optional)", [False]),
+            ("1 dl melk (optional) + 2 dl ukjent vare", [False]),
+        ):
+            with self.subTest(text=text):
+                rows = normalize_recipe(webpage(text))["ingredients"]
+                self.assertEqual([row["optional"] for row in rows], optionality)
+
     def test_a_structured_measure_still_reports_its_unsupported_unit(self):
         row = source_ingredient("2 ladles ris", item="ris", measure="2 ladles")
         self.assertEqual((row["quantity"], row["unit"], row["item"]), (None, "ladles", "ris"))

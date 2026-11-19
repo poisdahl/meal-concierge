@@ -502,7 +502,8 @@ def source_ingredient(
                     break
     source_item = item or text
     optional_marker = None if preserve_source_item else _SOURCE_OPTIONAL.fullmatch(source_item)
-    if optional_marker:
+    compound = _JOINED_SOURCE_AMOUNT.search(source_item) is not None
+    if optional_marker and not compound:
         source_item = optional_marker[1]
     normalized_item, identity_review_required = _source_ingredient_identity(
         source_item, language,
@@ -511,8 +512,9 @@ def source_ingredient(
     unit_evidence = deepcopy(evidence)
     if unit in {"tsp", "teaspoon", "teaspoons", "tbsp", "tablespoon", "tablespoons"}:
         unit_evidence = {"basis": "estimate", "input": text, "assumptions": "Use the metric culinary measure: teaspoon=5 ml and tablespoon=15 ml; source locale is unverified."}
-    return {**({"optional": True} if optional_marker else {}),
-            **({"notes": preparation_note} if preparation_note else {}),
+    # A marker on one component cannot allow the whole unresolved line to be omitted.
+    optional_flags = {"optional": False} if compound else {"optional": True} if optional_marker else {}
+    return {**optional_flags, **({"notes": preparation_note} if preparation_note else {}),
             "item": source_item if preserve_source_item else normalized_item,
             "raw": text, "original_text": text,
             "amount": measure,
