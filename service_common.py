@@ -273,7 +273,7 @@ def format_portions(value: Any) -> str:
 
 
 def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: Mapping[str, str] | None = None,
-                    show_estimate_labels: bool = True) -> str:
+                    show_estimate_labels: bool = True, omission_warnings: list[str] | None = None) -> str:
     from recipe_languages import display_recipe
     english = str(menu.get("output_language") or "").split("-")[0] == "en"
     def tr(no, en):
@@ -524,6 +524,17 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                     label = tr("Grunnoppskrift for {base} porsjoner. Planen krever {target} porsjoner {date}, men kildegrunnlaget kan ikke skaleres automatisk.", "Base recipe for {base} servings. The plan requires {target} servings on {date}, but source quantities cannot be scaled automatically.").format(base=format_portions(recipe.get("portions")), target=format_portions(batch["prepared_portions"]), date=display_date(cooking_date))
                 cooking_recipes.append((cooked, label, batch))
         for recipe, cooking_label, batch in cooking_recipes:
+            omissions = []
+            if omission_warnings is not None:
+                if (recipe.get("rights") or {}).get("storage") == "link_only":
+                    omissions.append(tr("Kilden tillater bare lenke; full oppskrift er ikke tilgjengelig her.",
+                                        "Only a link to the source is available for this recipe."))
+                else:
+                    if not recipe.get("ingredients"):
+                        omissions.append(tr("Ingredienser mangler i kilden.", "The source has no ingredient list."))
+                    if not recipe.get("steps"):
+                        omissions.append(tr("Fremgangsmåte mangler i kilden.", "The source has no instructions."))
+                omission_warnings.extend(omissions)
             if menu.get("output_language"):
                 recipe = display_recipe(recipe, menu["output_language"])
             batch_storage, batch_reheating = batch_guidance(batch) if batch else ('', '')
@@ -569,6 +580,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 steps(recipe.get("steps")) if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 "</ol>" if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 f"<p>{escape(recipe.get('notes')).replace(chr(10), '<br>')}</p>" if recipe.get("notes") else "",
+                *(f"<p>{escape(notice)}</p>" for notice in omissions),
                 f"<p><strong>{tr('Oppbevaring for denne ukens batch:', 'Storage for this batch:')}</strong> {escape(batch_storage)}</p>" if batch_storage else
                 f"<p><strong>{tr('Lagring:', 'Storage:')}</strong> {escape(recipe.get('storage'))}</p>" if recipe.get("storage") else "",
                 f"<p><strong>{tr('Oppvarming for denne ukens batch:', 'Reheating for this batch:')}</strong> {escape(batch_reheating)}</p>" if batch_reheating else

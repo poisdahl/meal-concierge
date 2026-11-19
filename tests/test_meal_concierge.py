@@ -6196,20 +6196,25 @@ process.stdout.write(JSON.stringify({snapshot:JSON.parse(eval(script)),marked}))
     @unittest.skipUnless(shutil.which("node"), "Node executes the signed-in MENY cart fixture")
     def test_empty_cart_recovery_checks_edit_mode_in_the_observed_cart(self):
         client = self.client()
+        client._invoke = mock.Mock(side_effect=AssertionError("unexpected browser click or reload"))
         def evaluate(script):
-            if "const ordinaryCart" not in script:
-                return {"ready": True, "open": True, "authenticated": True}
+            mode = modes.pop(0) if len(modes) > 1 else modes[0]
             fixture = r"""
 const {mode,script}=JSON.parse(require('fs').readFileSync(0,'utf8'));
 global.location=new URL(mode==='foreign'?'https://elsewhere.example/varer':'https://meny.no/varer');
 const node=(innerText,alt=null)=>({innerText,getAttribute:()=>alt,
  getBoundingClientRect:()=>({width:15,height:15}),querySelectorAll:()=>[]});
 const user=node('Brukermeny'),next=node('Til kassen'),abort=node('Avbryt endring');
+const opener=node('','Åpne handlevognen');
+opener.click=()=>{throw new Error('opener must not dismiss the active prompt')};
 const cart=node(mode==='edit'?'Du endrer bestilling ABC. Handlevognen din er tom':'Handlevognen din er tom');
 cart.querySelectorAll=s=>s==='button'?(mode==='abort'?[next,abort]:[next]):[];
-const dialog=node('Vil du legge til varer på eksisterende bestilling?');
-global.document={querySelectorAll:s=>s==='button'?[user]:s==='[aria-label="Handlevogn"]'?[cart]:
- s.includes('dialog[open]')&&mode==='route'?[dialog]:[]};
+const shell=node('Du endrer bestilling ABC');
+shell.querySelectorAll=s=>s==='button'?[abort]:[];
+const dialog=node(mode==='route'?'Vil du legge til varer på eksisterende bestilling?':'Bekreft endring');
+const dialogs=mode==='cart-dialog'?[cart]:['route','modal','before-open'].includes(mode)?[dialog]:[];
+global.document={querySelectorAll:s=>s==='button'?[user,opener]:s==='[aria-label="Handlevogn"]'?
+ (mode==='before-open'?[]:mode==='duplicate'?[cart,shell]:[cart]):s.includes('dialog[open]')?dialogs:[]};
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 process.stdout.write(eval(script));
 """
@@ -6218,11 +6223,19 @@ process.stdout.write(eval(script));
                                     text=True, capture_output=True, check=True)
             return json.loads(result.stdout)
         client._eval = evaluate
-        for mode in ("ordinary", "edit", "abort", "route", "foreign"):
+        for mode in ("ordinary", "cart-dialog", "edit", "abort"):
             with self.subTest(mode=mode):
+                modes = [mode]
                 cart = client._read_cart(observe_order_mode=True)
-                self.assertEqual(cart["ordinary_cart"], mode == "ordinary")
+                self.assertEqual(cart["ordinary_cart"], mode in {"ordinary", "cart-dialog"})
                 self.assertEqual(cart["items"], [])
+        for unsafe in ("route", "modal", "foreign", "duplicate", "before-open"):
+            for snapshots in ([unsafe], ["ordinary", unsafe]):
+                with self.subTest(snapshots=snapshots):
+                    modes = list(snapshots)
+                    with self.assertRaisesRegex(HouseholdError, "context changed"):
+                        client._read_cart(observe_order_mode=True)
+        client._invoke.assert_not_called()
 
     def test_confirm_retries_only_an_incomplete_cart_read_before_dispatch(self):
         from meny import _CartPanelNotReady
@@ -6244,6 +6257,104 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "after a second read"):
             client._read_confirmation_cart(None)
         self.assertEqual(client._read_cart.call_count, 2)
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the protected MENY cart entry")
+    def test_protected_cart_public_entry_preserves_prompts_and_returns_from_known_routes(self):
+        harness = r"""
+const {js,href,prompt,label,code,login,drawerCode,drawerModal,hydrate,firstRead,hiddenAccount,resized,promptAfterResize}=JSON.parse(require('fs').readFileSync(0,'utf8'));
+global.location=new URL(href);
+let assigned=null;
+location.assign=value=>{assigned=value};
+const el=text=>({innerText:text, getAttribute:()=>null, getBoundingClientRect:()=>({width:20,height:20})});
+const submit=el(label), main=el(code?'Du endrer bestilling '+code:'');
+main.querySelectorAll=selector=>selector==='button'&&!(hydrate==='submit'&&firstRead)?[submit]:[];
+const drawer=el(drawerCode?'Du endrer bestilling '+drawerCode:'Handlevognen din er tom');
+drawer.querySelectorAll=selector=>selector==='button'?[el('Til kassen'),...(drawerCode?[el('Avbryt endring')]:[])]:[];
+const user=el(login?'Logg inn':'Brukermeny');
+if(hiddenAccount&&!resized)user.getBoundingClientRect=()=>({width:0,height:20});
+global.document={querySelectorAll:selector=>selector==='button'?[user,submit]:
+ selector==='main'?(hydrate==='main'&&firstRead?[]:[main]):
+ selector==='[aria-label="Handlevogn"]'&&drawerCode!==undefined?[drawer]:
+ selector.includes('dialog[open]')?[...(drawerModal?[drawer]:[]),...(prompt||(promptAfterResize&&resized)?[el('Open prompt')]:[])]:[]};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),assigned}));
+"""
+        store = "https://meny.no/varer"
+        checkout = "https://meny.no/kassen"
+        search = "https://meny.no/sok?query=laks&expanded=products"
+        product = "https://meny.no" + MENY_PRODUCT
+        for args, href, view, outcome in [
+            ({"confirm_order_code": None}, store, {}, "same"),
+            ({"confirm_order_code": None}, checkout, {}, "navigate"),
+            ({"confirm_order_code": "ABC12"}, checkout, {"code":"ABC12","label":"Send oppdatering"}, "navigate"),
+            ({"confirm_order_code": "ABC12"}, checkout, {"code":"OTHER","label":"Send oppdatering"}, "blocked"),
+            ({"confirm_order_code": None}, checkout, {"code":"OTHER"}, "blocked"),
+            ({"confirm_order_code": None}, checkout, {"label":"Betalingsforespørsel sendt"}, "blocked"),
+            ({"confirm_order_code": None}, checkout, {"prompt":True}, "blocked"),
+            ({"confirm_order_code": None}, store, {"prompt":True}, "blocked"),
+            ({"confirm_order_code": None}, store, {"login":True}, "blocked"),
+            ({"confirm_order_code": None}, search, {}, "navigate"),
+            ({"confirm_order_code": None}, "https://other.example/varer", {}, "blocked"),
+            ({"observe_order_mode": True}, product, {}, "navigate"),
+            ({"observe_order_mode": True}, product, {"prompt":True}, "blocked"),
+            ({"observe_order_mode": True}, checkout, {}, "blocked"),
+            ({"confirm_order_code": None}, product, {"drawerCode":"OTHER"}, "blocked"),
+            ({"observe_order_mode": True}, product, {"drawerCode":"OTHER"}, "blocked"),
+            ({"observe_order_mode": True}, product, {"drawerCode":"","drawerModal":True}, "navigate"),
+            ({"confirm_order_code": None}, checkout, {"drawerCode":"OTHER"}, "blocked"),
+            ({"confirm_order_code": "ABC12"}, checkout, {"label":"Send oppdatering","code":"ABC12","drawerCode":"ABC12","drawerModal":True}, "navigate"),
+            ({"confirm_order_code": None}, checkout, {"hydrate":"main"}, "navigate"),
+            ({"confirm_order_code": None}, checkout, {"hydrate":"submit"}, "navigate"),
+            ({"confirm_order_code": None}, store, {"hiddenAccount":True}, "same"),
+            ({"confirm_order_code": "ABC12"}, checkout, {"hiddenAccount":True,"code":"ABC12","label":"Send oppdatering"}, "navigate"),
+            ({"observe_order_mode": True}, store, {"hiddenAccount":True}, "same"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"drawerCode":"OTHER"}, "blocked"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"prompt":True}, "blocked"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"promptAfterResize":True}, "blocked"),
+            ({"observe_order_mode": True}, product, {"hiddenAccount":True,"routeAfterResize":store}, "blocked"),
+            ({"observe_order_mode": True}, "https://meny.no/profil/nettbutikk", {"hiddenAccount":True}, "blocked"),
+        ]:
+            with self.subTest(args=args, href=href, view=view):
+                client = self.client()
+                client._sleep = mock.Mock()
+                client._invoke = mock.Mock()
+                client._read_cart = mock.Mock(return_value={"cart":True})
+                client._read_confirmation_cart = mock.Mock(return_value={"cart":True})
+                location = href
+                navigations = []
+                reads = 0
+
+                def evaluate(js):
+                    nonlocal location, reads
+                    reads += 1
+                    self.assertFalse(client.recovery_allowed)
+                    run = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps({
+                        "js":js, "href":view.get("routeAfterResize", location) if client._invoke.called else location,
+                        "label":"Til betaling", "firstRead":reads == 1, "resized":client._invoke.called, **view,
+                    }), text=True, capture_output=True, check=True, timeout=10)
+                    observed = json.loads(run.stdout)
+                    if observed["assigned"]:
+                        navigations.append(observed["assigned"])
+                        location = observed["assigned"]
+                    return observed["result"]
+
+                client._eval = evaluate
+                if outcome == "blocked":
+                    with self.assertRaises(HouseholdError):
+                        client.call("get_cart", args, allow_recovery=True)
+                    client._read_confirmation_cart.assert_not_called()
+                    client._read_cart.assert_not_called()
+                else:
+                    self.assertEqual(client.call("get_cart", args, allow_recovery=True), {"cart":True})
+                    if "confirm_order_code" in args:
+                        client._read_confirmation_cart.assert_called_once_with(args["confirm_order_code"])
+                    else:
+                        client._read_cart.assert_called_once_with(allow_reload=False, observe_order_mode=True)
+                self.assertEqual(navigations, [store] if outcome == "navigate" else [])
+                if view.get("hiddenAccount") and (outcome != "blocked" or view.get("promptAfterResize") or view.get("routeAfterResize")):
+                    client._invoke.assert_called_once_with("set", "viewport", "1280", "900")
+                else:
+                    client._invoke.assert_not_called()
 
     @unittest.skipUnless(shutil.which("node"), "Node executes the MENY checkout cart read guard")
     def test_confirmation_cart_read_preserves_exact_mode_and_visible_prompts(self):
@@ -6441,6 +6552,20 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),opened}));
         self.assertEqual(client._sleep.call_args_list, [mock.call(0.5), mock.call(0.5)])
         self.assertIn("linePrices.length === 1", client._eval.call_args_list[1].args[0])
         self.assertIn("filter(visible)", client._eval.call_args_list[1].args[0])
+
+        # A recovery read can wait for the same drawer without navigating
+        # away from the order context that the household must review.
+        client._invoke.reset_mock()
+        client._sleep.reset_mock()
+        client._eval = mock.Mock(side_effect=[
+            {"open": True, "ready": True, "authenticated": True, "root_count": 1},
+            zero, {**valid, "ordinaryCart": True},
+        ])
+        observed = client._read_cart(observe_order_mode=True)
+        self.assertTrue(observed["ordinary_cart"])
+        self.assertEqual(observed["total"], 19.9)
+        client._sleep.assert_called_once_with(0.25)
+        client._invoke.assert_not_called()
 
     def test_search_uses_encoded_bound_results_route_and_one_scoped_root(self):
         client = self.client()
@@ -9811,6 +9936,22 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(result["authorized_summary"]["total"], 40.0)
             self.assertEqual(provider.checkout_clicks, 1)
             self.assertEqual(store.read()["pending_checkout"]["status"], "awaiting_user_payment")
+
+    def test_meny_cart_context_is_checked_before_any_delivery_picker_at_confirm(self):
+        for origin in ("cheapest", "external"):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as temp:
+                store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+                provider = FakeMeny()
+                app = Application(store, provider, self.browser)
+                token = app.handle({"operation": "checkout", "action": "prepare"})["confirmation_id"]
+                with store.locked() as state:
+                    state["pending_checkout"]["summary"]["delivery"]["selection_origin"] = origin
+                provider.call = mock.Mock(side_effect=HouseholdError("cart prompt needs attention"))
+                with self.assertRaisesRegex(HouseholdError, "cart prompt"):
+                    app.handle({"operation":"checkout", "action":"confirm", "confirmation_id":token})
+                provider.call.assert_called_once_with("get_cart", {"confirm_order_code": None}, deadline=mock.ANY)
+                self.assertEqual(store.read()["pending_checkout"]["status"], "awaiting_confirmation")
+                self.assertEqual(provider.checkout_clicks, 0)
 
     def test_meny_prepare_stores_the_cart_after_delivery_reservation_side_effects(self):
         with tempfile.TemporaryDirectory() as temp:

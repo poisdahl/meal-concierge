@@ -5,6 +5,7 @@ not from the transferred manifest. This tool never imports a pack.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -31,42 +32,71 @@ def check_expected(size, digest, expected_bytes, expected_sha256):
         raise ValueError('whole recipe pack differs from approved size/SHA-256')
 
 
+def _publish_parts(staged, destination):
+    if os.name == 'nt':
+        # Windows rename already refuses to replace any existing destination.
+        staged.rename(destination)
+        return
+    # POSIX rename can replace an existing empty directory. Reserve this name
+    # exclusively first; rename also refuses a directory containing any files.
+    destination.mkdir(mode=0o700)
+    reserved = destination.stat()
+    try:
+        staged.rename(destination)
+    finally:
+        try:
+            if os.path.samestat(reserved, destination.lstat()):
+                destination.rmdir()
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                raise
+
+
 def split(source, parts_dir, expected_bytes, expected_sha256, max_part_bytes):
     regular_file(source)
     if not 1 <= max_part_bytes <= MAX_PART_BYTES:
         raise ValueError(f'max part bytes must be 1..{MAX_PART_BYTES}')
-    parts_dir.mkdir(parents=True, exist_ok=False)
-    whole = hashlib.sha256()
-    total = 0
-    parts = []
-    with source.open('rb') as incoming:
-        while True:
-            first = incoming.read(1)
-            if not first:
-                break
-            name = f'part-{len(parts):06d}'
-            if len(parts) >= MAX_PARTS:
-                raise ValueError('too many parts')
-            size = 1
-            digest = hashlib.sha256(first)
-            whole.update(first)
-            with (parts_dir / name).open('xb') as outgoing:
-                outgoing.write(first)
-                while size < max_part_bytes:
-                    block = incoming.read(min(1024 * 1024, max_part_bytes - size))
-                    if not block:
-                        break
-                    outgoing.write(block)
-                    digest.update(block)
-                    whole.update(block)
-                    size += len(block)
-            total += size
-            parts.append({'name': name, 'bytes': size, 'sha256': digest.hexdigest()})
-    check_expected(total, whole.hexdigest(), expected_bytes, expected_sha256)
-    manifest = {'format': 1, 'filename': source.name, 'bytes': total,
-                'sha256': expected_sha256, 'parts': parts}
-    (parts_dir / 'pack-transfer.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    return {'parts': len(parts), 'bytes': total, 'sha256': expected_sha256}
+    if parts_dir.exists() or parts_dir.is_symlink():
+        raise FileExistsError(f'parts directory already exists: {parts_dir}')
+    parts_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=parts_dir.parent, prefix='.recipe-transfer-') as temporary:
+        staged = Path(temporary) / 'parts'
+        staged.mkdir(mode=0o700)
+        whole = hashlib.sha256()
+        total = 0
+        parts = []
+        with source.open('rb') as incoming:
+            while True:
+                first = incoming.read(1)
+                if not first:
+                    break
+                name = f'part-{len(parts):06d}'
+                if len(parts) >= MAX_PARTS:
+                    raise ValueError('too many parts')
+                size = 1
+                digest = hashlib.sha256(first)
+                whole.update(first)
+                part_path = staged / name
+                with part_path.open('xb') as outgoing:
+                    outgoing.write(first)
+                    while size < max_part_bytes:
+                        block = incoming.read(min(1024 * 1024, max_part_bytes - size))
+                        if not block:
+                            break
+                        outgoing.write(block)
+                        digest.update(block)
+                        whole.update(block)
+                        size += len(block)
+                total += size
+                parts.append({'name': name, 'bytes': size, 'sha256': digest.hexdigest()})
+        check_expected(total, whole.hexdigest(), expected_bytes, expected_sha256)
+        manifest = {'format': 1, 'filename': source.name, 'bytes': total,
+                    'sha256': expected_sha256, 'parts': parts}
+        manifest_path = staged / 'pack-transfer.json'
+        with manifest_path.open('x') as outgoing:
+            outgoing.write(json.dumps(manifest, indent=2) + '\n')
+        _publish_parts(staged, parts_dir)
+        return {'parts': len(parts), 'bytes': total, 'sha256': expected_sha256}
 
 
 def assemble(manifest_path, output, expected_bytes, expected_sha256):

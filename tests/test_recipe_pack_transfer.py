@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from recipe_pack_transfer import assemble, split
 
@@ -71,6 +72,56 @@ class RecipePackTransferTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'differs from approved'):
             assemble(manifest_path, self.output, self.size, self.digest)
         self.assertFalse(self.output.exists())
+
+    def test_failed_split_can_retry_at_the_same_destination(self):
+        directory = self.root / 'retry'
+        with self.assertRaisesRegex(ValueError, 'differs from approved'):
+            split(self.source, directory, self.size, '0' * 64, 500)
+        self.assertFalse(directory.exists())
+        split(self.source, directory, self.size, self.digest, 500)
+        self.assertEqual(directory.stat().st_mode & 0o077, 0)
+        assemble(directory / 'pack-transfer.json', self.output, self.size, self.digest)
+        self.assertEqual(self.output.read_bytes(), self.content)
+
+    def test_interrupted_publication_can_retry(self):
+        directory = self.root / 'cancelled-split'
+        with patch.object(Path, 'rename', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                split(self.source, directory, self.size, self.digest, 500)
+        self.assertFalse(directory.exists())
+        split(self.source, directory, self.size, self.digest, 500)
+        assemble(directory / 'pack-transfer.json', self.output, self.size, self.digest)
+        self.assertEqual(self.output.read_bytes(), self.content)
+
+    def test_failed_split_preserves_unrelated_files_in_new_directory(self):
+        directory = self.root / 'interrupted'
+        marker = directory / 'part-000000'
+
+        def fail_verification(*args):
+            directory.mkdir(exist_ok=True)
+            marker.write_text('keep')
+            raise ValueError('simulated mismatch')
+
+        with patch('recipe_pack_transfer.check_expected', side_effect=fail_verification):
+            with self.assertRaisesRegex(ValueError, 'simulated mismatch'):
+                split(self.source, directory, self.size, self.digest, 500)
+        self.assertEqual(list(directory.iterdir()), [marker])
+        self.assertEqual(marker.read_text(), 'keep')
+
+    def test_successful_verification_preserves_concurrent_destination(self):
+        directory = self.root / 'concurrent'
+        marker = directory / 'part-000000'
+
+        def publish_other_transfer(*args):
+            directory.mkdir()
+            marker.write_text('different archive')
+
+        with patch('recipe_pack_transfer.check_expected', side_effect=publish_other_transfer):
+            with self.assertRaises(FileExistsError):
+                split(self.source, directory, self.size, self.digest, 500)
+        self.assertEqual(list(directory.iterdir()), [marker])
+        self.assertEqual(marker.read_text(), 'different archive')
+        self.assertEqual(list(self.root.glob('.recipe-transfer-*')), [])
 
     def test_approved_digest_and_existing_output_are_required(self):
         with self.assertRaisesRegex(ValueError, 'differs from approved'):
