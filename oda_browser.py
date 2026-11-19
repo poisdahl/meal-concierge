@@ -610,6 +610,34 @@ def _receipt_address_script(order_id: str, address: str, *, provider: str) -> st
     return re.sub(r"\b(?:URL|ORDER|ADDRESS|TOTAL_LABEL)\b", lambda match: values[match[0]], script)
 
 
+def _oda_incomplete_receipt_script(order_id: str, url: str) -> str:
+    """Check whether the exact receipt is still loading without returning its contents."""
+    script = r"""
+(() => {
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+ if(location.href!==EXPECTED_URL||document.querySelector('input[type="password"], form[action*="login"]'))
+   return JSON.stringify({incomplete:false});
+ const roots=[...document.querySelectorAll('main')].filter(visible);
+ if(roots.length>1||[...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].some(visible))
+   return JSON.stringify({incomplete:false});
+ const root=roots[0]||document.body;
+ if(!root)return JSON.stringify({incomplete:true});
+ const lines=(root.innerText||'').split(/\n+/).map(norm).filter(Boolean);
+ const receiptIds=lines.map(line=>/^(?:Bestilling|Order) #?([a-zA-Z0-9._:-]+)$/i.exec(line)?.[1]).filter(Boolean);
+ if(receiptIds.some(id=>id!==EXPECTED_ID)||lines.some(line=>/^(?:Logg inn|Log in|Ingen tilgang|Access denied|Ordren ble ikke funnet|Order not found)$/i.test(line)))
+   return JSON.stringify({incomplete:false});
+ // A rendered receipt total with no matching address is
+ // conflicting evidence. A shell that has not yet rendered the total
+ // can recover on a fresh, read-only navigation.
+ return JSON.stringify({incomplete:!lines.some(line=>line.includes(TOTAL_LABEL))});
+})()
+"""
+    values = {"EXPECTED_URL": json.dumps(url), "EXPECTED_ID": json.dumps(order_id),
+              "TOTAL_LABEL": json.dumps(ODA_CHECKOUT_AMOUNT_LABELS["provider_total"])}
+    return re.sub(r"\b(?:EXPECTED_URL|EXPECTED_ID|TOTAL_LABEL)\b", lambda match: values[match[0]], script)
+
+
 def _mathem_receipt_address_script(order_id: str, address: str) -> str:
     return _receipt_address_script(order_id, address, provider="mathem")
 
@@ -1230,7 +1258,7 @@ class OdaBrowser:
                 self._settle(0.25)
         return False
 
-    def _read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
+    def _read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None, retry_incomplete_receipt=False):
         """Bind the exact receipt to an OAuth address without selecting that address.
 
         The caller owns the browser operation. Recovery retains the original
@@ -1244,7 +1272,7 @@ class OdaBrowser:
             raise HouseholdError("Retail order currency does not match the provider")
         if str(order.get("orderNumber") or order.get("order_number") or order.get("id") or "") != order_id:
             raise HouseholdError("Retail order identity changed")
-        self._order_url(order_id)
+        receipt_url = self._order_url(order_id)
         response = self._binding_client().call("get_delivery_addresses", {}, deadline=deadline)
         rows = response.get("result") if isinstance(response, Mapping) else None
         if not isinstance(rows, list) or not rows:
@@ -1262,17 +1290,23 @@ class OdaBrowser:
         if not candidates or expected_binding is not None and len(candidates) != 1:
             raise HouseholdError("Retail original order account binding is unavailable")
         scripts = [_receipt_address_script(order_id, binding["receipt_address"], provider=self.checkout_provider) for binding, _ in candidates]
-        self._open(self._order_url(order_id))
-        for _ in range(20):
-            matched = [candidate for candidate, script in zip(candidates, scripts, strict=True)
-                       if self._eval(script) == {"address_verified": True}]
-            if len(matched) > 1:
-                raise HouseholdError("Retail order receipt address is ambiguous")
+        retry = retry_incomplete_receipt and self.checkout_provider == "oda"
+        for attempt in range(2 if retry else 1):
+            self._open(receipt_url)
+            for _ in range(20):
+                matched = [candidate for candidate, script in zip(candidates, scripts, strict=True)
+                           if self._eval(script) == {"address_verified": True}]
+                if len(matched) > 1:
+                    raise HouseholdError("Retail order receipt address is ambiguous")
+                if matched:
+                    break
+                self._settle(0.25)
             if matched:
                 break
-            self._settle(0.25)
-        else:
-            raise HouseholdError("Retail order receipt address cannot be verified")
+            if not retry or attempt or self._eval(_oda_incomplete_receipt_script(order_id, receipt_url)) != {"incomplete": True}:
+                raise HouseholdError("Retail order receipt address cannot be verified")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise HouseholdError("Retail order binding deadline reached")
         binding, account_script = matched[0]
         self._open(_retail_store_url(self.checkout_provider) + "account/delivery/")
         for _ in range(20):
@@ -3393,7 +3427,10 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             return self._review_cancellation(order_id, order)
 
     def _review_cancellation(self, order_id: str, order: Mapping[str, Any], *, expected_binding=None) -> dict[str, Any]:
-        binding = self._read_order_binding(order_id, order, deadline=self._cancellation_deadline, expected_binding=expected_binding)
+        binding = self._read_order_binding(
+            order_id, order, deadline=self._cancellation_deadline, expected_binding=expected_binding,
+            retry_incomplete_receipt=expected_binding is None,
+        )
         url = self._order_url(order_id)
         self._open_order(order_id)
         expected = self._order_expectation(order_id, order)
