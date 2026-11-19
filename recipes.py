@@ -436,6 +436,9 @@ def source_ingredient_identity(
     return _source_ingredient_identity(value, language, require_reviewed=require_reviewed)
 
 
+# A publisher's standalone trailing annotation describes the ingredient row.
+# Keep it in the source evidence while shopping for the food name itself.
+_SOURCE_OPTIONAL = re.compile(r"(.+?\S|\S)\s*\(\s*(?:kan sløyfes|valgfri(?:tt)?|optional)\s*\)\s*", re.IGNORECASE)
 _ATTACHED_METRIC_UNIT = re.compile(r"^(\s*\d+(?:[.,]\d+)?)(kg|mg|g|ml|cl|dl|l)(?=\s)", re.IGNORECASE)
 # What follows a first amount is another amount of the same line: a joiner or
 # range mark and a number ("+ 2 ss", "og 1 ts", "til 300 g", "- 300g"), or a
@@ -479,6 +482,9 @@ def source_ingredient(
                     quantity, unit, item = amount, measured_unit, matched[2]
                     break
     source_item = item or text
+    optional_marker = None if preserve_source_item else _SOURCE_OPTIONAL.fullmatch(source_item)
+    if optional_marker:
+        source_item = optional_marker[1]
     normalized_item, identity_review_required = _source_ingredient_identity(
         source_item, language,
     )
@@ -486,7 +492,8 @@ def source_ingredient(
     unit_evidence = deepcopy(evidence)
     if unit in {"tsp", "teaspoon", "teaspoons", "tbsp", "tablespoon", "tablespoons"}:
         unit_evidence = {"basis": "estimate", "input": text, "assumptions": "Use the metric culinary measure: teaspoon=5 ml and tablespoon=15 ml; source locale is unverified."}
-    return {"item": source_item if preserve_source_item else normalized_item,
+    return {**({"optional": True} if optional_marker else {}),
+            "item": source_item if preserve_source_item else normalized_item,
             "raw": text, "original_text": text,
             "amount": measure,
             "quantity": quantity, "unit": unit,

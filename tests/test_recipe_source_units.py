@@ -44,6 +44,26 @@ def fixture(*ingredients):
 
 
 class SourceUnitTests(unittest.TestCase):
+    def test_source_optional_annotation_is_not_a_required_product_or_search_term(self):
+        for marker in ("kan sløyfes", "valgfritt", "optional"):
+            with self.subTest(marker=marker):
+                line = f"50 g revet sjokolade ({marker})"
+                row = source_ingredient(line, language="nb", attached_metric_units=True)
+                menu = {"dishes": [scale_recipe(fixture(row), 2)], "salads": []}
+                reqs, unresolved = menu_requirements(menu)
+                self.assertEqual(unresolved, [])
+                self.assertEqual(reqs[0]["search"], "revet sjokolade")
+                self.assertTrue(row["optional"])
+                self.assertEqual(row["original_text"], line)
+                self.assertEqual(row["evidence"]["quantity"]["input"], line)
+                self.assertEqual(menu_requirements(menu, ingredient_decisions=[{
+                    "source": {"collection": "dishes", "recipe_index": 0, "ingredient_index": 0},
+                    "action": "omit",
+                }]), ([], []))
+        label = source_ingredient("10 g sjokolade (uten melk)", language="nb")
+        self.assertEqual(label["item"], "sjokolade (uten melk)")
+        self.assertNotIn("optional", label)
+
     def test_source_aliases_scale_exact_ratios_and_preserve_evidence(self):
         for dimension, aliases in ALIASES.items():
             for alias in aliases:
