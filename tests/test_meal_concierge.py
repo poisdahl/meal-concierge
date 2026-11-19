@@ -6193,6 +6193,37 @@ process.stdout.write(JSON.stringify({snapshot:JSON.parse(eval(script)),marked}))
             "delivery": None,
         })
 
+    @unittest.skipUnless(shutil.which("node"), "Node executes the signed-in MENY cart fixture")
+    def test_empty_cart_recovery_checks_edit_mode_in_the_observed_cart(self):
+        client = self.client()
+        def evaluate(script):
+            if "const ordinaryCart" not in script:
+                return {"ready": True, "open": True, "authenticated": True}
+            fixture = r"""
+const {mode,script}=JSON.parse(require('fs').readFileSync(0,'utf8'));
+global.location=new URL(mode==='foreign'?'https://elsewhere.example/varer':'https://meny.no/varer');
+const node=(innerText,alt=null)=>({innerText,getAttribute:()=>alt,
+ getBoundingClientRect:()=>({width:15,height:15}),querySelectorAll:()=>[]});
+const user=node('Brukermeny'),next=node('Til kassen'),abort=node('Avbryt endring');
+const cart=node(mode==='edit'?'Du endrer bestilling ABC. Handlevognen din er tom':'Handlevognen din er tom');
+cart.querySelectorAll=s=>s==='button'?(mode==='abort'?[next,abort]:[next]):[];
+const dialog=node('Vil du legge til varer på eksisterende bestilling?');
+global.document={querySelectorAll:s=>s==='button'?[user]:s==='[aria-label="Handlevogn"]'?[cart]:
+ s.includes('dialog[open]')&&mode==='route'?[dialog]:[]};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+process.stdout.write(eval(script));
+"""
+            result = subprocess.run([shutil.which("node"), "-e", fixture],
+                                    input=json.dumps({"mode": mode, "script": script}),
+                                    text=True, capture_output=True, check=True)
+            return json.loads(result.stdout)
+        client._eval = evaluate
+        for mode in ("ordinary", "edit", "abort", "route", "foreign"):
+            with self.subTest(mode=mode):
+                cart = client._read_cart(observe_order_mode=True)
+                self.assertEqual(cart["ordinary_cart"], mode == "ordinary")
+                self.assertEqual(cart["items"], [])
+
     def test_cart_snapshot_accepts_one_explicit_empty_cart_without_a_total_row(self):
         self.assertEqual(normalize_cart_snapshot({
             "ready": True,

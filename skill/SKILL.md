@@ -607,7 +607,11 @@ first. A lost cart-write result uses `reconcile_change`; never resend the delta.
 For an ordinary Oda or Mathem cart, continue automatically when the requested
 contents are observed. If they differ, show the current cart. When the user
 says to use it, call `cart accept_current` with the operation ID and digest
-from that cart read, then continue the requested workflow.
+from that cart read, then continue the requested workflow. For an uncertain ordinary
+MENY cart, show the quantities returned by reconcile_change or get, including an
+empty cart. If the household chooses to use them, call accept_current with those
+references. The earlier change may still arrive. Read the cart before planning
+another change.
 
 Show material substitutions, exact variants, package sizes and counts. Separate
 merchandise estimates from final totals, pant and delivery fees. Unknown prices

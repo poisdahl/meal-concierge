@@ -569,6 +569,77 @@ class GroceryTopupTests(unittest.TestCase):
         self.assertFalse(final.get("pending_cart_change"))
         self.assertEqual(final["cart_change_receipts"][journal["operation_id"]]["original_operation"], journal)
 
+    def test_meny_empty_cart_after_uncertain_batch_can_be_accepted_without_replay(self):
+        store, provider, browser, app, product = self.household("meny")
+        provider.cart.update(items=[], count=0, subtotal=0.0, total=0.0)
+        other = "/varer/middagstilbehor/pasta/pasta-1234567891234"
+        original_call = provider.call
+        attempts = []
+        ordinary = True
+        def interrupted(tool, arguments, **kwargs):
+            if tool == "manipulate_cart":
+                attempts.append(deepcopy(arguments))
+                raise HouseholdError("MENY cart change is uncertain")
+            cart = original_call(tool, arguments, **kwargs)
+            return {**cart, "ordinary_cart": ordinary} if tool == "get_cart" and arguments.get("observe_order_mode") else cart
+        provider.call = interrupted
+        with self.assertRaisesRegex(HouseholdError, "uncertain"):
+            app.handle({"operation": "cart", "action": "change", "operations": [
+                {"product_id": product, "quantity": 1}, {"product_id": other, "quantity": 1}]})
+        journal = store.read()["pending_cart_change"]
+        app = Application(StateStore(store.directory, store.config), provider, browser)
+        with self.assertRaisesRegex(HouseholdError, "does not match the pending operation"):
+            app.handle({"operation": "cart", "action": "reconcile_change", "operation_id": "old-operation"})
+        shown = app.handle({"operation": "cart", "action": "reconcile_change", "response_view": "agent"})
+        self.assertTrue(shown["accept_current_available"])
+        self.assertTrue(shown["outcome_unknown"])
+        self.assertEqual(shown["count"], 0)
+        self.assertEqual(shown["operation_id"], journal["operation_id"])
+        accept = {"operation": "cart", "action": "accept_current", "operation_id": shown["operation_id"],
+                  "cart_digest": shown["cart_digest"]}
+        with self.assertRaisesRegex(HouseholdError, "read the current pending"):
+            app.handle({**accept, "operation_id": "different"})
+        for field, value in [("order_change", {"order_id": "123"}), ("pending_checkout", {"status": "awaiting_confirmation"}),
+                             ("pending_cancellation", {"status": "awaiting_confirmation"})]:
+            with self.subTest(field=field):
+                with store.locked() as state:
+                    state[field] = value
+                with self.assertRaises(HouseholdError):
+                    app.handle(accept)
+                with store.locked() as state:
+                    state.pop(field)
+        for field, value in [("managed_menu", {"revision": 1}), ("native_cart_binding", {"ref": "bound"}),
+                             ("order_change", {"order_id": "123"})]:
+            with self.subTest(journal_field=field):
+                with store.locked() as state:
+                    state["pending_cart_change"] = {**journal, field: value}
+                with self.assertRaises(HouseholdError):
+                    app.handle(accept)
+        with store.locked() as state:
+            state["pending_cart_change"] = deepcopy(journal)
+        ordinary = False
+        with self.assertRaisesRegex(HouseholdError, "ordinary signed-in cart"):
+            app.handle(accept)
+        self.assertNotIn("accept_current_available", app.handle({"operation": "cart", "action": "get"}))
+        ordinary = True
+        provider._mutate_cart({"operations": [{"productId": product, "quantity": 1}]})
+        with self.assertRaisesRegex(HouseholdError, "cart changed since"):
+            app.handle(accept)
+        provider._mutate_cart({"operations": [{"productId": product, "quantity": -1}]})
+        self.assertEqual(app.handle({"operation": "cart", "action": "get"})["cart_digest"], shown["cart_digest"])
+        self.assertEqual(store.read()["pending_cart_change"], journal)
+        accepted = app.handle(accept)
+        self.assertEqual(accepted["status"], "owner_accepted_cart")
+        self.assertEqual(app.handle(accept)["status"], "previously_accepted")
+        receipt = store.read()["cart_change_receipts"][shown["operation_id"]]
+        self.assertEqual(receipt["original_operation"], journal)
+        self.assertEqual(receipt["dispatch_outcome"], "unknown")
+        self.assertEqual(len(attempts), 1)
+        provider.call = original_call
+        result = self.ensure(app, other, 1)
+        self.assertTrue(result["ensured"])
+        self.assertEqual(self.quantities(app, provider), {other: 1})
+
     def test_accept_current_ordinary_cart_with_legacy_journal_and_stale_review(self):
         store, provider, _, app, product = self.household()
         before = self.quantities(app, provider)

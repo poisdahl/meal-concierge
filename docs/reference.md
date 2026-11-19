@@ -2134,6 +2134,13 @@ shows the bounded quantities the owner may choose to assign to the menu.
 Use `cart reconcile` with the exact digest, `keep_current` and approved
 `adopt_quantities`; all other unattributed quantities retain household ownership.
 
+For an ordinary MENY cart change with an uncertain outcome, reconcile_change or
+get can offer the observed cart for acceptance, including an explicitly empty
+cart. On the household's choice, accept_current rereads the signed-in ordinary
+cart and archives the original journal with its dispatch outcome. A later
+shopping plan starts from a fresh cart read. MENY order edits, managed product
+operations and payments retain their own reconciliation paths.
+
 An unsubmitted checkout review can be discarded with `checkout discard_review`
 and its exact confirmation ID. Discarding an unsubmitted recovery review restores
 the original pending attempt and its evidence. A dispatched payment, cancellation

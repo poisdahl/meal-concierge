@@ -971,6 +971,8 @@ class MenyClient:
                     "message": "MENY's personalised often-bought list is not available through the browser flow.",
                 }
             if tool == "get_cart":
+                if arguments.get("observe_order_mode") is True:
+                    return self._read_cart(observe_order_mode=True)
                 return self._read_cart()
             if tool == "manipulate_cart":
                 return self._change_cart(arguments)
@@ -2060,7 +2062,7 @@ __DELIVERY_BINDING__
                 break
         return observed
 
-    def _read_cart(self, *, allow_reload: bool = True) -> dict[str, Any]:
+    def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False) -> dict[str, Any]:
         state: dict[str, Any] = {}
         for _ in range(20):
             state = self._eval(r"""
@@ -2096,6 +2098,11 @@ __DELIVERY_BINDING__
   const carts = [...document.querySelectorAll('[aria-label="Handlevogn"]')].filter(visible).filter(x => [...x.querySelectorAll('button')].filter(visible).some(button => ['Til kassen','Fortsett'].includes(norm(button.innerText))));
   if (carts.length !== 1) return JSON.stringify({ready:false, authenticated:authenticated.length === 1, root_count:carts.length});
   const cart = carts[0];
+  const ordinaryCart = location.href === 'https://meny.no/varer' &&
+    !/Du endrer bestilling/i.test(norm(cart.innerText)) &&
+    ![...cart.querySelectorAll('button')].some(b => visible(b) && norm(b.innerText) === 'Avbryt endring') &&
+    ![...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]')]
+      .some(d => visible(d) && /Vil du legge til varer på eksisterende bestilling/i.test(norm(d.innerText)));
   const productPattern = /^\/varer\/(?!kampanjer\/)[A-Za-z0-9._~%/-]+-\d{4,14}$/;
   const itemRoots = [];
   for (const anchor of cart.querySelectorAll('a[href]')) {
@@ -2152,7 +2159,7 @@ __DELIVERY_BINDING__
     }
   }
   const ready = authenticated.length === 1 && itemRoots.length === controls.length && items.length === itemRoots.length && (items.length > 0 || empty) && totalReady && subtotalReady && deliveryReady;
-  return JSON.stringify({ready, authenticated:authenticated.length === 1, root_count:1, item_root_count:itemRoots.length, control_count:controls.length, empty, total_count:totals.length, subtotal_count:subtotalRows.length, subtotal, delivery_count:deliveryCount, delivery, items, count:items.reduce((sum,item) => sum + item.quantity, 0), total});
+  return JSON.stringify({ready, ordinaryCart, authenticated:authenticated.length === 1, root_count:1, item_root_count:itemRoots.length, control_count:controls.length, empty, total_count:totals.length, subtotal_count:subtotalRows.length, subtotal, delivery_count:deliveryCount, delivery, items, count:items.reduce((sum,item) => sum + item.quantity, 0), total});
 })()
 """)
             if result.get("ready") is True:
@@ -2178,10 +2185,11 @@ __DELIVERY_BINDING__
         ):
             self._invoke("reload")
             self._sleep(0.5)
-            return self._read_cart(allow_reload=False)
+            return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
         snapshot = normalize_cart_snapshot(result)
         return {
             "provider": "meny",
+            **({"ordinary_cart": result.get("ordinaryCart") is True} if observe_order_mode else {}),
             "items": snapshot["items"],
             "count": snapshot["count"],
             "subtotal": snapshot["product_subtotal"],
