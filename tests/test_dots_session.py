@@ -20,8 +20,9 @@ class DotsSessionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="mc-dots-session-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / "core"
-        self.home = Path(self.temp.name) / "home"
+        temp_root = Path(self.temp.name).resolve()
+        self.root = temp_root / "core"
+        self.home = temp_root / "home"
         self.home.mkdir(mode=0o700)
         self.binding = {"origin": "https://meny.no", "browser_id": "synthetic-cloud-browser",
                         "tab_id": "synthetic-owned-tab", "account_sha256": "a" * 64,
