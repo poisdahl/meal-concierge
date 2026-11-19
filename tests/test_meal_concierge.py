@@ -6227,65 +6227,76 @@ process.stdout.write(eval(script));
     def test_confirm_retries_only_an_incomplete_cart_read_before_dispatch(self):
         from meny import _CartPanelNotReady
         client = self.client()
+        client._sleep = mock.Mock()
         cart = {"items": [], "count": 0}
-        for mode in ("matched", "missing"):
-            client._read_cart = mock.Mock(side_effect=[_CartPanelNotReady("incomplete"), cart])
-            client._eval = mock.Mock(side_effect=[{"mode": mode}, {"mode": "matched"}])
-            client._sleep = mock.Mock()
-            self.assertEqual(client._read_confirmation_cart(None), cart)
-            self.assertEqual(client._read_cart.call_args_list, [mock.call(), mock.call(allow_reload=False)])
+        client._read_cart = mock.Mock(side_effect=[_CartPanelNotReady("incomplete"), cart])
+        self.assertEqual(client._read_confirmation_cart(None), cart)
+        self.assertEqual(client._read_cart.call_count, 2)
+        for call in client._read_cart.call_args_list:
+            self.assertFalse(call.kwargs["allow_reload"])
+            self.assertIn("location.href===", call.kwargs["confirmation_context"])
         for reason in ("MENY login is required", "cart quantity changed"):
             client._read_cart = mock.Mock(side_effect=HouseholdError(reason))
             with self.assertRaisesRegex(HouseholdError, reason):
                 client._read_confirmation_cart(None)
             client._read_cart.assert_called_once()
-        for stages, read_count in [(["unverified"], 1), (["matched", "unverified"], 2)]:
-            client._read_cart = mock.Mock(side_effect=[_CartPanelNotReady("incomplete"), cart])
-            client._eval = mock.Mock(side_effect=[{"mode": mode} for mode in stages])
-            with self.assertRaisesRegex(HouseholdError, "context changed"):
-                client._read_confirmation_cart("EXACT-EDIT")
-            self.assertEqual(client._read_cart.call_count, read_count)
         client._read_cart = mock.Mock(side_effect=_CartPanelNotReady("incomplete"))
-        client._eval = mock.Mock(return_value={"mode": "matched"})
         with self.assertRaisesRegex(HouseholdError, "after a second read"):
             client._read_confirmation_cart(None)
         self.assertEqual(client._read_cart.call_count, 2)
 
     @unittest.skipUnless(shutil.which("node"), "Node executes the MENY checkout cart read guard")
     def test_confirmation_cart_read_preserves_exact_mode_and_visible_prompts(self):
-        from meny import _CartPanelNotReady
         client = self.client()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock(side_effect=AssertionError("unexpected click or reload"))
         harness = r"""
-const {view,script}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
-global.location=new URL(view.foreign?'https://example.test/varer':'https://meny.no/varer');
-const node=text=>({innerText:text,getBoundingClientRect:()=>({width:20,height:20}),getAttribute:()=>null});
-const cart=node(view.code?'Du endrer bestilling '+view.code:'Din handlevogn');
-cart.querySelectorAll=s=>s==='button'&&view.abort?[node('Avbryt endring')]:[];
-global.document={querySelectorAll:s=>s==='button'&&!view.login?[node('Brukermeny')]:
- s==='[aria-label="Handlevogn"]'&&!view.missing?[cart]:s.includes('dialog[open]')&&view.prompt?[node('Prompt')]:[]};
+const {v,js}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.location=new URL(v.foreign?'https://example.test/varer':'https://meny.no/varer');
+let opened=0;
+const node=(s,label=null)=>({innerText:s,getBoundingClientRect:()=>({width:20,height:20}),
+ getAttribute:()=>label,querySelectorAll:()=>[]});
+const user=node('Brukermeny'), next=node('Til kassen'), opener=node('','Åpne handlevognen');
+opener.click=()=>{opened++};
+const cart=node((v.code?'Du endrer bestilling '+v.code+' ':'')+'Handlevognen din er tom');
+cart.querySelectorAll=s=>s==='button'?(v.shell?[]:v.abort?[next,node('Avbryt endring')]:[next]):
+ s==='strong'&&v.zero?[node('Totalsum 0,00 kr')]:[];
+global.document={querySelectorAll:s=>s==='button'?(v.login?[opener]:[user,opener]):
+ s==='[aria-label="Handlevogn"]'?(v.missing?[]:[cart]):s.includes('dialog[open]')&&v.prompt?[node('Prompt')]:[]};
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
-process.stdout.write(eval(script));
+process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),opened}));
 """
-        for expected, view, allowed in [
-            (None, {}, True), ("EXACT", {"code": "EXACT", "abort": True}, True),
-            ("EXACT", {"code": "OTHER", "abort": True}, False),
-            ("EXACT", {"code": "EXACT"}, False), (None, {"abort": True}, False),
-            (None, {"foreign": True}, False), (None, {"login": True}, False), (None, {"prompt": True}, False),
+        for expected, views, allowed, opens in [
+            (None, [{}], True, 0), ("EXACT", [{"code": "EXACT", "abort": True}], True, 0),
+            (None, [{"missing": True}, {}], True, 1),
+            ("EXACT", [{"shell": True}, {"code": "EXACT", "abort": True}], True, 0),
+            ("EXACT", [{"missing": True}, {"code": "EXACT", "abort": True}], True, 1),
+            ("EXACT", [{"code": "OTHER", "abort": True}], False, 0),
+            (None, [{}, {"code": "OTHER", "abort": True}], False, 0),
+            ("EXACT", [{"code": "EXACT"}], False, 0), (None, [{"abort": True}], False, 0),
+            (None, [{"foreign": True}], False, 0), (None, [{"login": True}], False, 0),
+            (None, [{"missing": True, "prompt": True}], False, 0),
+            (None, [{"zero": True, "prompt": True}], False, 0),
+            (None, [{}, {"zero": True, "prompt": True}], False, 0),
         ]:
-            with self.subTest(expected=expected, view=view):
-                client._read_cart = mock.Mock(side_effect=[_CartPanelNotReady("incomplete"), {}])
-                client._sleep = mock.Mock()
-                def evaluate(script):
-                    run = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps({"view": view, "script": script}),
+            with self.subTest(expected=expected, views=views):
+                reads, clicks = [], []
+                def evaluate(js):
+                    view = views[min(len(reads), len(views)-1)]
+                    reads.append(view)
+                    run = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps({"v":view,"js":js}),
                                          text=True, capture_output=True, check=True)
-                    return json.loads(run.stdout)
+                    value = json.loads(run.stdout)
+                    clicks.append(value["opened"])
+                    return value["result"]
                 client._eval = evaluate
                 if allowed:
-                    self.assertEqual(client._read_confirmation_cart(expected), {})
+                    self.assertEqual(client._read_confirmation_cart(expected)["items"], [])
                 else:
                     with self.assertRaisesRegex(HouseholdError, "context changed"):
                         client._read_confirmation_cart(expected)
-                    client._read_cart.assert_called_once()
+                self.assertEqual(sum(clicks), opens)
+        client._invoke.assert_not_called()
 
     def test_cart_snapshot_accepts_one_explicit_empty_cart_without_a_total_row(self):
         self.assertEqual(normalize_cart_snapshot({

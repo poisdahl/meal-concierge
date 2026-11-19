@@ -2091,32 +2091,36 @@ __DELIVERY_BINDING__
   const cart=drawers[0], text=norm(cart.innerText);
   const codes=[...text.matchAll(/Du endrer bestilling\s+([A-Za-z0-9-]+)/gi)].map(m=>m[1]);
   const editing=/Du endrer bestilling/i.test(text);
-  const aborts=[...cart.querySelectorAll('button')].filter(visible).filter(b=>norm(b.innerText)==='Avbryt endring');
+  const cartButtons=[...cart.querySelectorAll('button')].filter(visible);
+  const aborts=cartButtons.filter(b=>norm(b.innerText)==='Avbryt endring');
+  if(!editing&&!aborts.length&&!cartButtons.some(b=>['Til kassen','Fortsett'].includes(norm(b.innerText))))
+    return JSON.stringify({mode:'hydrating'});
   const matches=expected===null ? !editing&&!aborts.length : codes.length===1&&codes[0]===expected&&aborts.length===1;
   return JSON.stringify({mode:matches?'matched':'unverified'});
 })()
 """.replace("__CODE__", json.dumps(order_code))
-        try:
-            return self._read_cart()
-        except _CartPanelNotReady:
-            mode = self._eval(context).get("mode")
-            if mode not in {"matched", "missing"}:
-                raise HouseholdError("MENY checkout cart context changed; inspect the cart and any open prompt before confirming")
-            self._sleep(0.25)
-        try:
-            cart = self._read_cart(allow_reload=False)
-        except _CartPanelNotReady as exc:
-            raise HouseholdError(f"{exc} after a second read; open the cart on the store page and "
-                                 "check its contents before confirming again") from exc
-        if self._eval(context) != {"mode": "matched"}:
-            raise HouseholdError("MENY checkout cart context changed; inspect the cart and any open prompt before confirming")
-        return cart
+        for attempt in range(2):
+            try:
+                return self._read_cart(allow_reload=False, confirmation_context=context)
+            except _CartPanelNotReady as exc:
+                if attempt:
+                    raise HouseholdError(f"{exc} after a second read; open the cart on the store page and "
+                                         "check its contents before confirming again") from exc
+                self._sleep(0.25)
 
-    def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False) -> dict[str, Any]:
+    def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False,
+                   confirmation_context: str | None = None) -> dict[str, Any]:
+        # Check mode in the same DOM evaluation as the drawer opener and the
+        # extracted quantities. A missing drawer can hydrate or be opened once.
+        mode_expression = f"JSON.parse({confirmation_context}).mode" if confirmation_context else "null"
+        changed = "MENY checkout cart context changed; inspect the cart and any open prompt before confirming"
         state: dict[str, Any] = {}
         for _ in range(20):
             state = self._eval(r"""
 (() => {
+  const mode = __CONFIRM_MODE__;
+  if (mode === 'unverified') return JSON.stringify({context_changed:true});
+  if (mode === 'hydrating') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
@@ -2124,17 +2128,26 @@ __DELIVERY_BINDING__
   if (carts.length === 1) return JSON.stringify({open:true, ready:true, authenticated:authenticated.length === 1, root_count:1});
   const open = [...document.querySelectorAll('button')].filter(visible).filter(button => !button.disabled && norm(button.getAttribute('aria-label')) === 'Åpne handlevognen');
   if (carts.length !== 0 || open.length !== 1) return JSON.stringify({open:false, ready:false, authenticated:authenticated.length === 1, root_count:carts.length, open_count:open.length});
+  if (mode === 'matched') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
+  if (mode === 'missing') {
+    if (open[0].getAttribute('aria-disabled') === 'true') return JSON.stringify({ready:false, authenticated:true, root_count:0, open_count:1});
+    open[0].click();
+    return JSON.stringify({open:true, ready:true, authenticated:true, root_count:0});
+  }
   open[0].setAttribute('data-meal-concierge-action', 'open-cart');
   return JSON.stringify({open:false, ready:true, authenticated:authenticated.length === 1, root_count:0, open_count:1});
 })()
-""")
+""".replace("__CONFIRM_MODE__", mode_expression))
+            if state.get("context_changed") is True:
+                raise HouseholdError(changed)
             if state.get("ready") is True:
                 break
             self._sleep(0.25)
         if state.get("authenticated") is not True:
             raise HouseholdError("MENY login is required in the configured browser profile")
         if state.get("ready") is not True:
-            if state.get("root_count") == 0 and state.get("open_count") in {0, 1}:
+            if (state.get("open") is True and state.get("root_count") == 1
+                    or state.get("root_count") == 0 and state.get("open_count") in {0, 1}):
                 raise _CartPanelNotReady("MENY cart is unavailable")
             raise HouseholdError("MENY cart is unavailable")
         if state.get("open") is not True:
@@ -2144,11 +2157,15 @@ __DELIVERY_BINDING__
         for _ in range(60):
             result = self._eval(r"""
 (() => {
+  const mode = __CONFIRM_MODE__;
+  if (mode === 'unverified') return JSON.stringify({context_changed:true});
+  if (mode === 'hydrating') return JSON.stringify({open:true, ready:false, authenticated:true, root_count:1});
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const carts = [...document.querySelectorAll('[aria-label="Handlevogn"]')].filter(visible).filter(x => [...x.querySelectorAll('button')].filter(visible).some(button => ['Til kassen','Fortsett'].includes(norm(button.innerText))));
   if (carts.length !== 1) return JSON.stringify({ready:false, authenticated:authenticated.length === 1, root_count:carts.length});
+  if (mode === 'missing') return JSON.stringify({ready:false, authenticated:true, root_count:0});
   const cart = carts[0];
   const ordinaryCart = location.href === 'https://meny.no/varer' &&
     !/Du endrer bestilling/i.test(norm(cart.innerText)) &&
@@ -2213,7 +2230,9 @@ __DELIVERY_BINDING__
   const ready = authenticated.length === 1 && itemRoots.length === controls.length && items.length === itemRoots.length && (items.length > 0 || empty) && totalReady && subtotalReady && deliveryReady;
   return JSON.stringify({ready, ordinaryCart, authenticated:authenticated.length === 1, root_count:1, item_root_count:itemRoots.length, control_count:controls.length, empty, total_count:totals.length, subtotal_count:subtotalRows.length, subtotal, delivery_count:deliveryCount, delivery, items, count:items.reduce((sum,item) => sum + item.quantity, 0), total});
 })()
-""")
+""".replace("__CONFIRM_MODE__", mode_expression))
+            if result.get("context_changed") is True:
+                raise HouseholdError(changed)
             if result.get("ready") is True:
                 break
             if (
