@@ -640,6 +640,70 @@ class GroceryTopupTests(unittest.TestCase):
         self.assertTrue(result["ensured"])
         self.assertEqual(self.quantities(app, provider), {other: 1})
 
+    def test_accept_current_after_partial_meny_clear_preserves_the_correct_shopping_scope(self):
+        cases = [
+            # saved menu, observed remaining units, original fence
+            (False, 0, None), (False, 2, None), (True, 0, None), (True, 2, None),
+            (True, 0, "unrelated"), (False, 0, "legacy"), (False, 2, "legacy"),
+        ]
+        for saved_menu, remaining, fence_kind in cases:
+            with self.subTest(saved_menu=saved_menu, remaining=remaining, fence=fence_kind):
+                store, provider, browser, app, product = self.household("meny")
+                if not saved_menu:
+                    with store.locked() as state:
+                        state.pop("menu")
+                self.ensure(app, product, 4)
+                prior = {"menu_ref": app._cart_menu_ref(store.read().get("menu")), "started_at": "earlier"}
+                if fence_kind == "unrelated":
+                    with store.locked() as state:
+                        state["managed_product_apply_fence"] = deepcopy(prior)
+                original = provider.call
+                removals = []
+                def lose_last_batch(tool, arguments, **kwargs):
+                    if tool == "manipulate_cart":
+                        removals.append(deepcopy(arguments))
+                        if len(removals) == 2:
+                            if remaining == 0:
+                                original(tool, arguments, **kwargs)
+                            raise HouseholdError("lost final cart reply")
+                    cart = original(tool, arguments, **kwargs)
+                    if tool == "get_cart" and arguments.get("observe_order_mode"):
+                        return {**cart, "ordinary_cart": True}
+                    return cart
+                provider.call = lose_last_batch
+                digest = app.handle({"operation": "cart", "action": "get"})["cart_digest"]
+                with self.assertRaisesRegex(HouseholdError, "lost final cart reply"):
+                    app.handle({"operation": "cart", "action": "clear", "cart_digest": digest})
+                if fence_kind == "legacy":
+                    with store.locked() as state:
+                        state["pending_cart_change"].pop("clear_id")
+                        state["managed_product_apply_fence"] = prior
+                journal = store.read()["pending_cart_change"]
+                app = Application(StateStore(store.directory, store.config), provider, browser)
+                shown = app.handle({"operation": "cart", "action": "reconcile_change"})
+                self.assertEqual(shown["cart"]["count"], remaining)
+                result = app.handle({"operation": "cart", "action": "accept_current",
+                                     "operation_id": shown["operation_id"], "cart_digest": shown["cart_digest"]})
+                self.assertEqual(result["status"], "owner_accepted_cart")
+                state = store.read()
+                receipt = state["cart_change_receipts"][shown["operation_id"]]
+                self.assertEqual(receipt["original_operation"], journal)
+                self.assertEqual(receipt["dispatch_outcome"], "unknown")
+                self.assertEqual(len(removals), 2)
+                self.assertNotIn("product_plan_completion", state)
+                if not remaining:
+                    self.assertNotIn("cart_plan", state)
+                if fence_kind == "unrelated":
+                    self.assertEqual(state["managed_product_apply_fence"], prior)
+                elif saved_menu and remaining:
+                    self.assertEqual(state["managed_product_apply_fence"]["clear_id"], journal["clear_id"])
+                    self.assertIsNone(state["cart_plan"]["approved_cart_digest"])
+                    self.assertIn("fresh saved-menu product review", result["next"])
+                else:
+                    self.assertNotIn("managed_product_apply_fence", state)
+                    provider.call = original
+                    self.assertTrue(self.ensure(app, product, remaining + 1)["ensured"])
+
     def test_accept_current_ordinary_cart_with_legacy_journal_and_stale_review(self):
         store, provider, _, app, product = self.household()
         before = self.quantities(app, provider)

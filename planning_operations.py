@@ -5216,6 +5216,42 @@ class PlanningOperations:
         return {"operation_id": self._cart_operation_ref(pending), "cart_digest": self._cart_digest(live),
                 "accept_current_available": True, "next": next_step}
 
+    def _finish_cart_clear(self, state, pending, live, names, *, owner_accepted=False):
+        plan = state.get("cart_plan")
+        self._clear_persisted_product_plan(plan)
+        state.pop("product_plan_completion", None)
+        menu_ref = self._cart_menu_ref(state.get("menu"))
+        clear_id = pending.get("clear_id")
+        if live and (self.provider != "meny" or menu_ref is not None):
+            # A partial clear of a saved menu still needs a fresh product apply.
+            # Keep an earlier, independent managed operation's fence intact.
+            state.setdefault("managed_product_apply_fence", {
+                "menu_ref": deepcopy(menu_ref), "started_at": self._now().isoformat(),
+                **({"clear_id": clear_id} if clear_id else {}),
+            })
+        else:
+            fence = state.get("managed_product_apply_fence") or {}
+            owns_fence = clear_id is not None and fence.get("clear_id") == clear_id
+            # Old multi-batch clears used untagged fences. With no menu to
+            # manage, the preceding clear receipt identifies the blocked batch.
+            if (owner_accepted and not clear_id and menu_ref is None
+                    and set(fence) == {"menu_ref", "started_at"} and fence["menu_ref"] is None
+                    and pending.get("request_digest")):
+                before_digest = self._cart_digest(pending["before"])
+                owns_fence = any(
+                    receipt.get("status") == "read_back" and receipt.get("provider") == "meny"
+                    and receipt.get("request_digest") == pending["request_digest"]
+                    and receipt.get("observed_digest") == before_digest
+                    for receipt in state.get("cart_change_receipts", {}).values())
+            if (not live and not owner_accepted) or owns_fence:
+                state.pop("managed_product_apply_fence", None)
+        if not live:
+            state.pop("cart_plan", None)
+        elif isinstance(plan, dict):
+            if owner_accepted:
+                self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
+            self._set_cart_needs_input(plan, live, names)
+
     def _accept_current_cart(self, request, pending, deadline):
         token = request.get("operation_id")
         digest = request.get("cart_digest")
@@ -5237,18 +5273,24 @@ class PlanningOperations:
         with self.store.locked() as state:
             self._archive_observed_cart_target(state, pending, live, owner_accepted=True)
             plan = state.get("cart_plan")
-            if pending.get("clear_requested"):
+            accepted_meny_clear = self.provider == "meny" and pending.get("clear_requested")
+            if accepted_meny_clear:
+                self._finish_cart_clear(state, pending, live, names, owner_accepted=True)
+            elif pending.get("clear_requested"):
                 state.pop("product_plan_completion", None)
                 self._clear_persisted_product_plan(plan)
-            if (isinstance(plan, dict) and plan.get("provider") == self.provider
+            if (not accepted_meny_clear and isinstance(plan, dict) and plan.get("provider") == self.provider
                     and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
                     and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu"))):
                 self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
                 self._set_cart_needs_input(plan, live, names)
                 plan.update(status="active", approved_cart_digest=digest, pending_cart_digest=None)
                 plan.pop("ownership_review", None)
-        return {"reconciled": True, "cart_write_pending": False, "status": "owner_accepted_cart",
-                "operation_id": token, "cart_digest": digest, "cart": cart}
+        result = {"reconciled": True, "cart_write_pending": False, "status": "owner_accepted_cart",
+                  "operation_id": token, "cart_digest": digest, "cart": cart}
+        if accepted_meny_clear and state.get("managed_product_apply_fence"):
+            result["next"] = "Read the cart and complete a fresh saved-menu product review before making further changes."
+        return result
 
     def _observed_managed_target(self, mutation_error, cart, expected, menu_ref, operations):
         if mutation_error is None or not self._can_reread_ordinary_cart():
@@ -6137,19 +6179,7 @@ class PlanningOperations:
                 if quantities != pending["expected"] and isinstance(state.get("cart_plan"), dict):
                     self._set_cart_needs_input(state["cart_plan"], quantities, names)
             if pending.get("clear_requested"):
-                self._clear_persisted_product_plan(state.get("cart_plan"))
-                state.pop("product_plan_completion", None)
-                # A partial MENY clear still requires a fresh product apply.
-                if quantities:
-                    state["managed_product_apply_fence"] = {
-                        "menu_ref": deepcopy(self._cart_menu_ref(state.get("menu"))),
-                        "started_at": self._now().isoformat(),
-                    }
-                    if isinstance(state.get("cart_plan"), dict):
-                        self._set_cart_needs_input(state["cart_plan"], quantities, names)
-                else:
-                    state.pop("cart_plan", None)
-                    state.pop("managed_product_apply_fence", None)
+                self._finish_cart_clear(state, pending, quantities, names)
             operation_id = pending.get("operation_id")
             if operation_id:
                 state.setdefault("cart_change_receipts", {})[operation_id] = {
@@ -6325,6 +6355,7 @@ class PlanningOperations:
                 normalized.append({"productId": int(key) if self.provider in {"oda", "mathem"} else key, "quantity": quantity})
             # All deltas are journalled before dispatch, including each small MENY batch.
             batches = self._meny_cart_batches(normalized) if self.provider == "meny" else ([normalized] if normalized else [])
+            clear_id = secrets.token_hex(16) if self.provider == "meny" and action == "clear" else None
             for batch in batches:
                 expected = dict(before)
                 for item in batch:
@@ -6349,7 +6380,8 @@ class PlanningOperations:
                                "request_digest": mp.digest({k:v for k,v in request.items() if not k.startswith("_")}),
                                "before": before, "expected": expected,
                                "order_change": deepcopy(change), "operations": batch,
-                               **({"clear_requested": True} if action == "clear" else {})}
+                               **({"clear_requested": True} if action == "clear" else {}),
+                               **({"clear_id": clear_id} if clear_id else {})}
                     if request.get("_native_cart_binding") is not None:
                         pending["native_cart_binding"] = request["_native_cart_binding"]
                     if action == "clear":
