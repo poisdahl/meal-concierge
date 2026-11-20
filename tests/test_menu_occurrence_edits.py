@@ -9,6 +9,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
 
 from core import HouseholdError
+from recipes import RecipeError
 import batch_planning as bp
 import menu_planning as mp
 from planner import saved_menu_minimum_evaluation
@@ -49,6 +50,56 @@ class MenuOccurrenceEditsTests(unittest.TestCase):
         request = {"operation": "menu", "action": "edit_slots", "menu_ref": mp.menu_ref(menu),
                    "idempotency_key": key, "edits": edits}
         return self.app.handle(request), request
+
+    def test_add_move_resize_and_remove_an_original_batch_preserves_planned_occurrences(self):
+        from test_recipe_convert_changes import transcript, DECISION
+
+        imported = self.app.handle({"operation": "recipes", "action": "import", "source_kind": "transcript",
+            "storage_decision": DECISION, "transcript": transcript(
+                "Bread\n2 loaves\n700 g mel\nBake.", ["700 g mel"], ["Bake."], language="en", yield_quote="2 loaves")})
+        saved = self.app.handle({"operation": "recipes", "action": "save", "status": "draft",
+            "discovery_ref": imported["discovery_ref"], "idempotency_key": "save-loaves"})["recipe"]
+        reference = {"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}}
+        request = {"operation": "menu", "action": "add_slot", "menu_ref": mp.menu_ref(self.menu),
+                   "slot_input": {"date": "2026-09-10", "meal_type": "lunch", "reference": reference,
+                                  "original_batch": True}, "idempotency_key": "add-loaves"}
+        result = self.app.handle(request)
+        slot = result["added_slot"]
+        self.assertTrue(slot["original_batch"])
+        self.assertIsNone(slot["portions"])
+        self.assertTrue(self.app.handle(request)["idempotent"])
+        self.assertEqual(result["menu"]["slots"][:-1], self.menu["slots"])
+        self.assertEqual(self.amounts(result["menu"])[0].get("mel"), self.amounts(self.menu)[0].get("mel", 0) + 700)
+        with self.assertRaisesRegex(RecipeError, "unknown portions"):
+            self.edit(result["menu"], [{"action": "move", "slot_id": slot["slot_id"], "portions": 4}], "resize-unknown")
+        with self.assertRaisesRegex(HouseholdError, "known person portions"):
+            self.edit(result["menu"], [{"action": "add", "date": "2026-09-11", "portions": 1,
+                       "source_slot_id": slot["slot_id"]}], "allocate-unknown")
+        self.assertEqual(mp.menu_ref(self.store.read()["menu"]), mp.menu_ref(result["menu"]))
+        moved, _ = self.edit(result["menu"], [{"action": "move", "slot_id": slot["slot_id"],
+                              "date": "2026-09-11"}], "move-bread")
+        moved_menu = moved["menu"]
+        moved_slot = moved_menu["slots"][-1]
+        self.assertTrue(moved_slot["original_batch"])
+        self.assertIsNone(moved_slot["portions"])
+        self.assertEqual(self.amounts(result["menu"]), self.amounts(moved_menu))
+        removed, _ = self.edit(moved_menu, [{"action": "remove", "slot_id": moved_slot["slot_id"]}], "remove-bread")
+        self.assertEqual(removed["menu"]["slots"], self.menu["slots"])
+        self.assertEqual(self.amounts(removed["menu"]), self.amounts(self.menu))
+
+    def test_known_original_batch_added_via_edits_can_switch_to_person_portions(self):
+        changed, _ = self.edit(self.menu, [{"action": "add", "date": "2026-09-10", "meal_type": "lunch",
+                               "reference": self.salad, "original_batch": True}], "add-salad-batch")
+        menu = changed["menu"]
+        slot = menu["slots"][-1]
+        self.assertTrue(slot["original_batch"])
+        self.assertIsInstance(slot["portions"], int)
+        resized, _ = self.edit(menu, [{"action": "move", "slot_id": slot["slot_id"], "portions": slot["portions"]}],
+                               "switch-to-person-portions")
+        resized_slot = resized["menu"]["slots"][-1]
+        self.assertNotIn("original_batch", resized_slot)
+        self.assertNotIn("original_batch", mp.recipe_for_slot(resized["menu"], resized_slot))
+        self.assertEqual(self.amounts(resized["menu"]), self.amounts(menu))
 
     def amounts(self, menu):
         requirements, unresolved = menu_requirements(mp.shopping_menu(menu))

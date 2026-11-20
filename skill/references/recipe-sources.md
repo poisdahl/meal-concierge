@@ -88,8 +88,11 @@ Check every ingredient and component, including alternatives, optional garnishes
 and measured ingredients mentioned only in the method. Match units, fractions,
 food form and preparation notes. Distinguish person portions from the physical
 yield, such as twelve pancakes. If the user asks for one original batch, use
-an exact dish reference with `original_batch: true` and omit `portions` when
-saving their requested menu. Preserve an existing menu. To show quantities only,
+`original_batch: true` and omit `portions`. For a new menu, put it on the
+exact dish reference. To add to an existing plan, use `menu add_slot` with its
+current `menu_ref`, a stable idempotency key, and `slot_input` containing the
+date or relative day, meal type, size choice and exact `reference`. A fresh
+`edit_slots` addition or replacement also accepts the size choice. To show quantities only,
 read the recipe without saving a menu. For a requested number of people,
 use a supported serving basis or a clearly labelled estimate. Compare amounts in the method with the intended
 portion count. Preserve temperatures, cooking times and individual piece sizes.

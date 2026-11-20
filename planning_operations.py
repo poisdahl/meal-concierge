@@ -57,6 +57,31 @@ PRODUCT_PLAN_REF_PATTERN = re.compile(r"productplan_[A-Za-z0-9_-]{16,32}\Z")
 MAX_PREPARED_REPLANS = 32
 
 
+def _slot_recipe_size(value, previous=None):
+    """Retain the chosen recipe size across occurrence edits unless the edit sets one."""
+    if "original_batch" in value:
+        if value["original_batch"] is not True or "portions" in value:
+            raise HouseholdError("choose either original_batch=true or target person portions")
+        return {"original_batch": True}
+    previous = previous or {}
+    if "portions" not in value and previous.get("original_batch"):
+        return {"original_batch": True}
+    portions = value.get("portions", previous.get("portions"))
+    if type(portions) is not int or not 1 <= portions <= 100:
+        raise HouseholdError("slot portions must be an integer from one to 100")
+    return {"portions": portions}
+
+
+def _meal_slot_size(size, recipe):
+    if not size.get("original_batch"):
+        return size
+    portions = recipe.get("portions")
+    if portions is not None:
+        quantity = Fraction(str(portions))
+        portions = quantity.numerator if quantity.denominator == 1 else str(portions)
+    return {"original_batch": True, "portions": portions}
+
+
 class _ManagedCartReadUnavailable(RetailPreDispatchError):
     """The first managed batch stopped on its own read, before journal or dispatch."""
 
@@ -818,15 +843,15 @@ class PlanningOperations:
     def _add_slot(self, request):
         """Append one explicitly requested meal, retaining the exact current plan."""
         raw = request.get("slot_input")
-        if not isinstance(raw, Mapping) or set(raw) not in ({"date", "meal_type", "portions", "reference"}, {"day", "meal_type", "portions", "reference"}):
-            raise HouseholdError("add_slot needs slot_input={date,meal_type,portions,reference}")
+        if (not isinstance(raw, Mapping) or ("date" in raw) == ("day" in raw)
+                or not {"meal_type", "reference"}.issubset(raw)
+                or set(raw).difference({"date", "day", "meal_type", "reference", "portions", "original_batch"})):
+            raise HouseholdError("add_slot needs day or date, meal_type, reference and portions or original_batch")
         relative = "day" in raw
         day_value = mp.checked_day(raw.get("day", raw.get("date")), relative=relative)
         if not isinstance(raw["meal_type"], str) or raw["meal_type"] not in RECIPE_CATEGORIES:
             raise HouseholdError("meal_type must be one of: " + ", ".join(RECIPE_CATEGORIES))
-        portions = raw["portions"]
-        if type(portions) is not int or not 1 <= portions <= 100:
-            raise HouseholdError("slot portions must be an integer from one to 100")
+        size = _slot_recipe_size(raw)
         reference, _ = self._planner_reference(raw["reference"])
         key = request.get("idempotency_key")
         if not isinstance(key, str) or not 1 <= len(key) <= 200:
@@ -863,17 +888,13 @@ class PlanningOperations:
             mp.slot_day(slot) == day_value and slot["meal_type"] == "dinner" for slot in current["slots"]
         ):
             raise HouseholdError("that date already has a dinner; use replan to replace it, or add a side or another course")
-        candidate = self._resolve_planner_candidates(
-            {"week": week, "portions": portions, "candidates": [reference]}, snapshot)[0]
-        if candidate["materialization_error"]:
-            raise HouseholdError(candidate["materialization_error"])
+        recipe = self._materialize_menu({"week": week, "dishes": [{**reference, **size}]})["dishes"][0]
         from dietary_assessment import assess
-        conflicts = [finding for finding in assess(snapshot["profile"], candidate["recipe"], recipe=True) if finding["blocked"]]
+        conflicts = [finding for finding in assess(snapshot["profile"], recipe, recipe=True) if finding["blocked"]]
         if conflicts:
             raise HouseholdError("household ingredient rules block this addition: " + canonical(conflicts))
-        recipe = self._materialize_menu({"week": week, "dishes": [{**reference, "portions": portions}]})["dishes"][0]
         slot = {"slot_id": "slot_" + mp.digest({"addition": signature, "key": key})[:32],
-                **mp.day_fields(day_value), "meal_type": raw["meal_type"], "portions": portions,
+                **mp.day_fields(day_value), "meal_type": raw["meal_type"], **_meal_slot_size(size, recipe),
                 "recipe_key": recipe["recipe_key"], "reference": reference, "snapshot_digest": mp.digest(recipe)}
         recipe["preparation_slot_id"] = slot["slot_id"]
         successor = {"week": week, "dishes": [*deepcopy(current["dishes"] if current else []), recipe],
@@ -893,7 +914,7 @@ class PlanningOperations:
                 successor["replan_selection"] = deepcopy(handoff)
         scope = (current.get("planning_scope") or (current.get("planner_selection") or {}).get("request")) if current else None
         dinner_dates = sorted({mp.slot_day(s) for s in successor["slots"] if s["meal_type"] == "dinner"})
-        successor["planning_scope"] = deepcopy(scope) if scope is not None else {"planning_mode": "ad_hoc", "dates": dinner_dates, "portions": portions}
+        successor["planning_scope"] = deepcopy(scope) if scope is not None else {"planning_mode": "ad_hoc", "dates": dinner_dates, "portions": size.get("portions", snapshot["profile"]["meals"]["portions"])}
         if raw["meal_type"] == "dinner":
             successor["planning_scope"]["days" if relative else "dates"] = sorted(set(planner_request_days(successor["planning_scope"])) | {day_value})
         successor["schedule"] = mp.schedule(successor)
@@ -986,9 +1007,9 @@ class PlanningOperations:
                 raise HouseholdError("slot portions must be an integer from one to 100")
             return value
 
-        def resolved_recipe(reference, portions):
+        def resolved_recipe(reference, size):
             checked, _ = self._planner_reference(reference)
-            recipe = self._materialize_menu({"week": current["week"], "dishes": [{**checked, "portions": portions}]})["dishes"][0]
+            recipe = self._materialize_menu({"week": current["week"], "dishes": [{**checked, **size}]})["dishes"][0]
             from dietary_assessment import assess
             conflicts = [finding for finding in assess(snapshot["profile"], recipe, recipe=True) if finding["blocked"]]
             if conflicts:
@@ -1018,21 +1039,21 @@ class PlanningOperations:
         def fresh_slot(edit, index, *, old=None, frozen_recipe=None):
             day = checked_day(edit.get("day", edit.get("date", mp.slot_day(old) if old else None)))
             meal_type = checked_type(edit.get("meal_type", old["meal_type"] if old else None))
-            portions = checked_portions(edit.get("portions", old["portions"] if old else None))
+            size = _slot_recipe_size(edit, old)
             if frozen_recipe is None:
-                reference, recipe = resolved_recipe(edit.get("reference", old["reference"] if old else None), portions)
+                reference, recipe = resolved_recipe(edit.get("reference", old["reference"] if old else None), size)
             else:
                 reference = deepcopy(old["reference"])
                 recipe = deepcopy(frozen_recipe)
                 recipe.pop("preparation_slot_id", None)
-                if portions != old["portions"]:
-                    recipe = scale_recipe(recipe, portions)
+                if "portions" in size and (old.get("original_batch") or size["portions"] != old["portions"]):
+                    recipe = scale_recipe(recipe, size["portions"])
                 self._require_recipe_provider(recipe)
                 from dietary_assessment import assess
                 if conflicts := [finding for finding in assess(snapshot["profile"], recipe, recipe=True) if finding["blocked"]]:
                     raise HouseholdError("household ingredient rules block this meal: " + canonical(conflicts))
             slot_id = "slot_" + mp.digest({"edit": signature, "index": index})[:32]
-            slot = {"slot_id": slot_id, **mp.day_fields(day), "meal_type": meal_type, "portions": portions,
+            slot = {"slot_id": slot_id, **mp.day_fields(day), "meal_type": meal_type, **_meal_slot_size(size, recipe),
                     "recipe_key": recipe["recipe_key"], "reference": reference, "snapshot_digest": mp.digest(recipe)}
             served_with = checked_served_with(edit.get("served_with", old.get("served_with") if old else None), meal_type)
             if served_with is not None:
@@ -1085,7 +1106,7 @@ class PlanningOperations:
                 continue
             if action == "add":
                 if "reference" in edit:
-                    if set(edit).difference({"action", "day", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"}):
+                    if set(edit).difference({"action", "day", "date", "meal_type", "portions", "original_batch", "reference", "leafy_green", "dietary_facets", "served_with"}):
                         raise HouseholdError("fresh add has unknown fields")
                     fresh_slot(edit, index)
                 else:
@@ -1106,6 +1127,8 @@ class PlanningOperations:
                         raise HouseholdError("linked source must be an unrecorded future preparation")
                     day = checked_day(edit.get("day", edit.get("date")))
                     meal_type = checked_type(edit.get("meal_type", source["meal_type"]))
+                    if source.get("portions") is None:
+                        raise HouseholdError("linked servings require known person portions for their preparation")
                     portions = checked_portions(edit.get("portions"))
                     if day <= mp.slot_day(source) or meal_type != source["meal_type"]:
                         raise HouseholdError("linked serving must follow its preparation and have the same meal type")
@@ -1125,7 +1148,7 @@ class PlanningOperations:
                     added.append(slot)
             elif action in {"remove", "replace", "move"}:
                 allowed = {"action", "slot_id"} if action == "remove" else (
-                    {"action", "slot_id", "day", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"} if action == "replace" else
+                    {"action", "slot_id", "day", "date", "meal_type", "portions", "original_batch", "reference", "leafy_green", "dietary_facets", "served_with"} if action == "replace" else
                     {"action", "slot_id", "day", "date", "meal_type", "portions", "leafy_green", "dietary_facets", "served_with"})
                 if set(edit).difference(allowed):
                     raise HouseholdError("slot edit has unknown fields")
