@@ -97,7 +97,14 @@ conversion, use recipe discovery `resolve` on the final reference with
 check uses recipe quantities and requires no product search or retailer cart.
 
 Apply consequential corrections that the source supports. For an extraction
-error, correct the interpretation from the original evidence where supported.
+error in a paste or a URL requiring interpretation, repeat that import with
+the missing exact quote. Keep the original pages, selected record and source
+context. A structured URL uses its publisher record directly. If its method
+names a measured ingredient missing from the list, indexed `convert.changes`
+can only edit existing rows. Use full schema-2 `convert` on the exact discovery
+to append the missing row. Keep attribution, existing rows and evidence. Record
+the new quantity and unit as host estimates with the original step and the
+reason for the correction. Only a trusted import can assert new source evidence.
 For a source-faithful translation or amount correction use `convert`; use
 `adapt` for an authorized substitution or other change to the dish. Recheck
 the affected rows and steps on the corrected candidate. When evidence leaves

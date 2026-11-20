@@ -1,8 +1,11 @@
 """Bounded conversion of an imported recipe: translation and structured amounts."""
+from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -56,6 +59,59 @@ class BoundedConversionTests(unittest.TestCase):
         return self.app.handle({"operation": "recipes", "action": "convert",
                                 "discovery_ref": preview["discovery_ref"], "recipe_digest": preview["recipe_digest"],
                                 "source_schema_version": 2, "changes": changes, **extra})
+
+    def test_review_repairs_method_only_ingredient_in_shopping_ready_structured_url(self):
+        from product_planner import menu_requirements
+        from recipes import source_ingredient
+
+        step = "Bland i 50 ml melk."
+        publisher = {"@type": "Recipe", "name": "Suppe", "inLanguage": "nb",
+                     "recipeYield": "2 personer", "recipeIngredient": ["200 g tomat"],
+                     "recipeInstructions": [step]}
+        page = ('<script type="application/ld+json">' + json.dumps(publisher) + '</script>').encode()
+        with patch("recipe_import_sources._get_bytes", return_value=(page, "text/html")):
+            preview = self.app.handle({"operation": "recipes", "action": "import", "source_kind": "url",
+                                       "url": "https://www.matprat.no/recipe/soup", "storage_decision": DECISION})
+        self.assertEqual(preview["suggested_status"], "active")
+        corrected = deepcopy(preview["recipe"])
+        milk = source_ingredient("50 ml melk", language="nb", attached_metric_units=True)
+        corrected["ingredients"].append(milk)
+        request = {"operation": "recipes", "action": "convert", "recipe": corrected,
+                   "discovery_ref": preview["discovery_ref"], "recipe_digest": preview["recipe_digest"],
+                   "source_schema_version": 2}
+        with self.assertRaisesRegex(RecipeError, "source evidence"):
+            self.app.handle(request)
+        milk["evidence"] = {field: {"basis": "estimate", "input": step,
+                                     "assumptions": "Measured milk in the method is missing from the ingredient list."}
+                            for field in ("quantity", "unit")}
+        repaired = self.app.handle(request)
+        self.assertEqual(repaired["recipe"]["source"], preview["recipe"]["source"])
+        self.assertEqual(repaired["recipe"]["ingredients"][:-1], preview["recipe"]["ingredients"])
+        saved = self.app.handle({"operation": "recipes", "action": "save",
+                                 "discovery_ref": repaired["discovery_ref"], "status": "active",
+                                 "idempotency_key": "reviewed-url"})["recipe"]
+        dish = {"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}, "portions": 4}
+        menu = self.app.handle({"operation": "menu", "action": "save",
+                                "menu": {"week": "2026-W47", "dishes": [dish], "salads": []}})["menu"]
+        required, unresolved = menu_requirements(menu)
+        self.assertEqual(unresolved, [])
+        self.assertEqual([(r["item"], r["unit"], r["quantity"]["numerator"]) for r in required],
+                         [("melk", "ml", 100), ("tomat", "g", 400)])
+
+    def test_reread_of_same_paste_recovers_omitted_quoted_ingredient(self):
+        source = transcript("Suppe\n2 personer\n200 g tomat\n50 ml melk\nBland.", ["200 g tomat"],
+                            ["Bland."], language="nb", yield_quote="2 personer", name="Suppe")
+        request = {"operation": "recipes", "action": "import", "source_kind": "transcript",
+                   "transcript": source, "storage_decision": DECISION}
+        first = self.app.handle(request)
+        self.assertEqual(first["suggested_status"], "active")
+        source["interpretation"]["ingredients"].append({"page": 1, "quote": "50 ml melk"})
+        repaired = self.app.handle(request)
+        self.assertNotEqual(first["discovery_ref"], repaired["discovery_ref"])
+        self.assertEqual(repaired["recipe"]["ingredients"][:-1], first["recipe"]["ingredients"])
+        milk = repaired["recipe"]["ingredients"][-1]
+        self.assertEqual((milk["original_text"], milk["evidence"]["quantity"]["basis"]), ("50 ml melk", "source"))
+        self.assertEqual((milk["quantity"], milk["unit"]), ({"numerator": 50, "denominator": 1}, "ml"))
 
     def test_translation_keeps_source_amounts_and_labels_only_new_readings(self):
         preview = self.imported()
