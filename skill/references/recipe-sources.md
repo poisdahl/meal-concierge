@@ -87,7 +87,11 @@ as a re-read if asked who checked it.
 Check every ingredient and component, including alternatives, optional garnishes
 and measured ingredients mentioned only in the method. Match units, fractions,
 food form and preparation notes. Distinguish person portions from the physical
-yield, such as twelve pancakes. Compare amounts in the method with the intended
+yield, such as twelve pancakes. If the user asks for one original batch, use
+an exact dish reference with `original_batch: true` and omit `portions` when
+saving their requested menu. Preserve an existing menu. To show quantities only,
+read the recipe without saving a menu. For a requested number of people,
+use a supported serving basis or a clearly labelled estimate. Compare amounts in the method with the intended
 portion count. Preserve temperatures, cooking times and individual piece sizes.
 A prepared component enters the shopping list only through its ingredients.
 Keep chosen alternatives and estimated amounts traceable to the original line.

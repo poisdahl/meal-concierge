@@ -414,7 +414,7 @@ class WebRecipeTests(unittest.TestCase):
             sibling = {'@type': 'Recipe', 'name': 'Other recipe', 'recipeYield': '2 servings',
                        'recipeIngredient': ['100 g salt'], 'recipeInstructions': ['Mix.']}
             record = {**sibling, 'name': 'Soup',
-                      'recipeIngredient': [f'{grams} g carrots + 100 g onions'],
+                      'recipeIngredient': [f'{grams} g gulrot + 100 g løk'],
                       'recipeInstructions': ['Add 1 dl water and simmer.']}
             body = ('<script type="application/ld+json">' + json.dumps([sibling, record]) + '</script>').encode()
             with patch('recipe_import_sources._get_bytes', return_value=(body, 'text/html')) as fetch:
@@ -428,7 +428,7 @@ class WebRecipeTests(unittest.TestCase):
         evidence = original['import_report']['review_source']
         self.assertEqual((evidence['kind'], evidence['record_index'], evidence['yield_text']),
                          ('structured_record', 1, '2 servings'))
-        self.assertEqual(evidence['ingredients'], ['200 g carrots + 100 g onions'])
+        self.assertEqual(evidence['ingredients'], ['200 g gulrot + 100 g løk'])
         self.assertEqual(evidence['steps'], ['Add 1 dl water and simmer.'])
         self.assertNotIn('salt', json.dumps(evidence))
         self.assertNotEqual(evidence['source_sha256'], changed['import_report']['review_source']['source_sha256'])
@@ -438,7 +438,7 @@ class WebRecipeTests(unittest.TestCase):
                    'response_view': 'agent', 'view_section': 'items', 'view_limit': 1}
         first = self.app.handle(request)['shopping_requirements']
         second = self.app.handle({**request, 'view_offset': 1})['shopping_requirements']
-        self.assertEqual([first['items'][0]['item'], second['items'][0]['item']], ['carrots', 'onions'])
+        self.assertEqual([first['items'][0]['item'], second['items'][0]['item']], ['gulrot', 'løk'])
         self.assertEqual(self.app.recipes.search(), [])
 
     def test_visible_ingredient_table_preserves_rows_for_checked_url_import(self):
