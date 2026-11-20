@@ -25,6 +25,9 @@ def _menu_recipe_presentation(recipe):
     result = {'name': shown.get('name') or recipe.get('name'),
               'times': _recipe_times(recipe.get('times')),
               'source': _fields(source, ('kind', 'publisher', 'author', 'title', 'url', 'relationship'))}
+    if recipe.get("original_batch"):
+        result["original_batch"] = True
+        result["source_yield"] = _display_text((recipe.get("yield") or {}).get("original_text"), 300)
     if isinstance(source.get('original'), dict):
         result['source']['original'] = _fields(source['original'], ('kind', 'publisher', 'author', 'title', 'url'))
     if isinstance(credit, str) and credit:
@@ -1033,6 +1036,14 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
         view["ingredients"] = _page(ingredients, offset, limit, "items")
     if section in {"summary", "steps"}:
         view["steps"] = _page(steps, offset, limit, "items")
+    if section == "items" and action in {"convert", "adapt", "resolve"}:
+        requirements = result.get("shopping_requirements")
+        if (recipe.get("rights") or {}).get("storage") == "link_only":
+            requirements = []
+        if requirements is None:
+            from recipes import scale_recipe
+            requirements = scale_recipe(recipe)["shopping_requirements"]
+        view["shopping_requirements"] = _page(requirements, offset, limit, "items")
     if section == "provenance":
         view["portions_evidence"] = _fields(recipe.get("portions_evidence"),
                                             ("basis", "input", "assumptions", "calculation"))

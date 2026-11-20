@@ -541,6 +541,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 recipe = display_recipe(recipe, menu["output_language"])
             batch_storage, batch_reheating = batch_guidance(batch) if batch else ('', '')
             portions_text = f"{format_portions(recipe['portions'])}{tr(' porsjoner', ' servings')}" if recipe.get("portions") else tr('Antall personporsjoner er ukjent', 'Number of servings is unknown')
+            if recipe.get("original_batch"):
+                portions_text = tr("Én oppskriftsmengde", "One original batch") + " — " + portions_text
             fallback = (recipe.get("presentation") or {}).get("fallback")
             if fallback:
                 portions_text += " — " + tr("Ønsket språk er ikke tilgjengelig; viser ", "Requested language unavailable; showing ") + recipe['presentation']['resolved_language']

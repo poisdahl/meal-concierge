@@ -16,7 +16,18 @@ in a form you can plan and shop from. Each ingredient keeps its original line.
 Amounts the source states stay marked as source amounts; anything the agent had
 to work out, such as cups, a can or "1 onion", is saved as a labelled estimate.
 
-Check the preview before saving. Before importing text or a URL, the agent must
+For example, send “Save this recipe” with the URL or pasted text, or “Use
+this for dinner on Friday” to include it in a menu. The agent checks the
+ingredients, portions and method against the original before using the recipe.
+When an authorized second agent is available it makes that comparison.
+Otherwise the importing agent re-reads the original independently. It fixes
+clear errors, such as a lost ingredient or a tablespoon read as a teaspoon.
+If an important serving or ingredient choice remains, it explains its estimate
+or asks you to choose. An ordinary save request needs no second confirmation.
+Ask for a preview first when you want to check it yourself. Using an import in
+a menu does not also add it to your personal recipe bank.
+
+Before importing text or a URL, the agent must
 record a concrete basis for storing the full recipe privately: your own recipe,
 permission, a verified license or an applicable private-use assessment. Public
 access or a source's presence in search settings is not permission. If the

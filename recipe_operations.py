@@ -57,6 +57,7 @@ class RecipeOperations:
     def _import_preview(self, request):
         """Build source evidence from one explicit read, never caller recipe JSON."""
         kind = request.get("source_kind")
+        review_source = None
         try:
             try:
                 decision = storage_decision(request.get("storage_decision"), source_kind=kind)
@@ -92,6 +93,7 @@ class RecipeOperations:
                     raise RecipeError("transcript import cannot include another source")
                 result = read_transcript(request.get("transcript"))
                 context = result["source_context"]
+                review_source = {"kind": "supplied_pages", "content_sha256": context["content_sha256"]}
                 identity = self._import_identity("supplied", context["kind"], context["content_sha256"])
             elif kind == "url":
                 if request.get("transcript") is not None or request.get("library_recipe_ref") is not None:
@@ -112,6 +114,8 @@ class RecipeOperations:
                         if request.get("record_index") not in {None, 0}:
                             raise RecipeError("record_index does not select an available incomplete source recipe")
                         index, interpretation_text = 0, page["text"]
+                    review_source = {"kind": "verified_text", "record_index": index,
+                                     "source_sha256": page.get("source_sha256"), "text": interpretation_text}
                     verified_url = normalize_source_url(request["url"], version=2)
                     result = read_transcript({"kind": "pasted_text", "pages": [{"page": 1, "text": interpretation_text}],
                         "interpretation": request["interpretation"], "attribution": {"url": request["url"]}})
@@ -143,6 +147,12 @@ class RecipeOperations:
                         raise RecipeError("record_index must select one returned source recipe")
                     result = page["recipes"][index]
                     result["source_recipe_count"] = len(page["recipes"])
+                    # Retain the selected publisher rows before normalization combines or splits them.
+                    extracted = result["extracted"]
+                    review_source = {"kind": "structured_record", "record_index": index,
+                                     "source_sha256": page["source_sha256"],
+                                     **{key: extracted[key] for key in ("name", "language", "ingredients", "steps",
+                                                                        "yield_text", "description", "notes", "times")}}
                     # Native JSON-LD identity is exact; page position distinguishes
                     # recipes where the publisher supplies no identifier.
                     source = result["candidate"]["source"]
@@ -186,6 +196,8 @@ class RecipeOperations:
             scaled = scale_recipe(recipe)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
             report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count", "incomplete_recipes", "encoded_source_text", "structured_error") if key in result}
+            if review_source is not None:
+                report["review_source"] = review_source
             return {**snapshot, "import_report": report, "readiness": scaled["readiness"],
                     "shopping_requirements": scaled["shopping_requirements"], "suggested_status": "active" if ready else "draft",
                     "personal_entry_created": False}

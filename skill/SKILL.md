@@ -413,8 +413,12 @@ size, availability and dietary facts. Mathem and MENY have no invented equivalen
 hints. Never invoke native bulk recipe-to-cart expansion without a supported
 preview. Read [recipe sources](references/recipe-sources.md) when importing text,
 photos, PDFs or a complex external source, or checking adaptation provenance.
-When the user pastes a recipe link or recipe text and wants to keep it, follow
-its "A link or text the user pasted" steps through to a saved recipe.
+Follow that reference's source check before saving or planning with a newly
+imported recipe. Delegate a source-to-candidate comparison when the host
+supports an authorized reviewer, otherwise independently re-read the source.
+Correct consequential differences and carry a request to save through to the
+saved entry. A request to use a recipe in this menu can use its discovery
+reference directly.
 
 ## Shopping lists
 
