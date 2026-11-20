@@ -338,9 +338,13 @@ class WebRecipeTests(unittest.TestCase):
                 'url': 'https://matprat.no/synthetic', 'storage_decision': {'storage': 'link_only'}})
             fetch.assert_not_called()
             self.assertEqual(link['recipe']['name'], 'Recipe link (matprat.no)')
+            self.assertNotIn('review_source', link['import_report'])
             self.assertEqual(link['import_report']['name_basis'], 'supplied_url_host')
             self.assertFalse(link['readiness']['scaling_ready'])
             self.assertEqual(link['shopping_requirements'], [])
+            bookmark = self.app.handle({'operation': 'recipes', 'action': 'resolve',
+                'discovery_ref': link['discovery_ref'], 'response_view': 'agent', 'view_section': 'items'})
+            self.assertEqual(bookmark['shopping_requirements']['items'], [])
             self.assertFalse(link['recipe'].get('ingredients'))
             self.assertFalse(link['recipe'].get('steps'))
             self.assertFalse(link['recipe'].get('notes'))
@@ -405,6 +409,38 @@ class WebRecipeTests(unittest.TestCase):
                                  'planner_handoff': result['save_handoff']})['menu']
         self.assertIn(url, json.dumps(saved))
 
+    def test_selected_structured_source_is_independent_of_normalized_recipe(self):
+        def preview(grams):
+            sibling = {'@type': 'Recipe', 'name': 'Other recipe', 'recipeYield': '2 servings',
+                       'recipeIngredient': ['100 g salt'], 'recipeInstructions': ['Mix.']}
+            record = {**sibling, 'name': 'Soup',
+                      'recipeIngredient': [f'{grams} g carrots + 100 g onions'],
+                      'recipeInstructions': ['Add 1 dl water and simmer.']}
+            body = ('<script type="application/ld+json">' + json.dumps([sibling, record]) + '</script>').encode()
+            with patch('recipe_import_sources._get_bytes', return_value=(body, 'text/html')) as fetch:
+                result = self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                    'url': 'https://example.org/soup', 'record_index': 1, 'storage_decision': DECISION,
+                    'response_view': 'agent'})
+            fetch.assert_called_once()
+            return result
+
+        original, changed = preview(200), preview(300)
+        evidence = original['import_report']['review_source']
+        self.assertEqual((evidence['kind'], evidence['record_index'], evidence['yield_text']),
+                         ('structured_record', 1, '2 servings'))
+        self.assertEqual(evidence['ingredients'], ['200 g carrots + 100 g onions'])
+        self.assertEqual(evidence['steps'], ['Add 1 dl water and simmer.'])
+        self.assertNotIn('salt', json.dumps(evidence))
+        self.assertNotEqual(evidence['source_sha256'], changed['import_report']['review_source']['source_sha256'])
+        self.assertNotEqual(original['recipe_digest'], changed['recipe_digest'])
+        self.assertEqual(len(original['recipe']['ingredients']), 2)
+        request = {'operation': 'recipes', 'action': 'resolve', 'discovery_ref': original['discovery_ref'],
+                   'response_view': 'agent', 'view_section': 'items', 'view_limit': 1}
+        first = self.app.handle(request)['shopping_requirements']
+        second = self.app.handle({**request, 'view_offset': 1})['shopping_requirements']
+        self.assertEqual([first['items'][0]['item'], second['items'][0]['item']], ['carrots', 'onions'])
+        self.assertEqual(self.app.recipes.search(), [])
+
     def test_visible_ingredient_table_preserves_rows_for_checked_url_import(self):
         url = 'https://trinesmatblogg.no/recipe/table-fixture/'
         html = b"""<main><h1>Test bread</h1><p>Serves 2</p><table>
@@ -430,6 +466,10 @@ class WebRecipeTests(unittest.TestCase):
                 '20 g mel', '2 ts salt', '3 dl', 'melk', '400 g', '200 g', 'smor',
                 '1 dl vann', 'Kna.', 'Stek.'])
             imported = self.app.handle({**request, 'interpretation': interpretation})
+            evidence = imported['import_report']['review_source']
+            self.assertEqual(evidence, {'kind': 'verified_text', 'record_index': 0,
+                                        'source_sha256': first['source_sha256'], 'text': first['text']})
+            self.assertIn('1 ts sukker', evidence['text'])  # Omitted by the first interpretation.
             row = imported['recipe']['ingredients'][0]
             self.assertEqual((row['item'], row['unit'], row['quantity']),
                              ('hvetemel', 'g', {'numerator': 500, 'denominator': 1}))
@@ -527,6 +567,8 @@ class WebRecipeTests(unittest.TestCase):
             'attribution': {'url': url}}
         imported = self.app.handle({'operation': 'recipes', 'action': 'import',
             'source_kind': 'transcript', 'transcript': transcript, 'storage_decision': DECISION})
+        self.assertEqual(imported['import_report']['review_source'], {
+            'kind': 'supplied_pages', 'content_sha256': imported['import_report']['source_context']['content_sha256']})
         self.assertIsNone(imported['recipe']['source'].get('url'))
         self.assertEqual(imported['recipe']['source']['original']['url'], url)
         with self.assertRaisesRegex(RecipeError, 'enabled source and assessed full storage'):

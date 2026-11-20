@@ -91,6 +91,10 @@ yield, such as twelve pancakes. Compare amounts in the method with the intended
 portion count. Preserve temperatures, cooking times and individual piece sizes.
 A prepared component enters the shopping list only through its ingredients.
 Keep chosen alternatives and estimated amounts traceable to the original line.
+Compare the resulting shopping requirements with that source inventory. After
+conversion, use recipe discovery `resolve` on the final reference with
+`view_section="items"`; follow its page offsets for longer recipes. This
+check uses recipe quantities and requires no product search or retailer cart.
 
 Apply consequential corrections that the source supports. For an extraction
 error, correct the interpretation from the original evidence where supported.
