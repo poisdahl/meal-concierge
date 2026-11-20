@@ -196,6 +196,10 @@ class RecipeContractTests(unittest.TestCase):
             self.save_menu({"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}, "original_batch": True})
 
     def test_original_batch_still_surfaces_unmeasured_ingredients(self):
+        # Editing a known recipe to a person target must not retain the batch label.
+        original = scale_recipe(normalize_recipe(authored_recipe()), original_batch=True)
+        self.assertTrue(scale_recipe(original)["original_batch"])
+        self.assertNotIn("original_batch", scale_recipe(original, 6))
         recipe = authored_recipe()
         recipe.pop("portions")
         recipe["ingredients"].append({"item": "fløte", "raw": "fløte etter smak"})

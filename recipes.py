@@ -1594,6 +1594,9 @@ def accept_recipe_estimates(recipe: Mapping[str, Any], digest: Any, fields: Any,
 
 def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None, *, original_batch: bool = False) -> dict[str, Any]:
     result = deepcopy(dict(recipe))
+    was_original_batch = result.pop("original_batch", False)
+    if portions is None and was_original_batch is True:
+        original_batch = True
     if (result.get("rights") or {}).get("storage") != "full":
         raise RecipeError("link_only recipes cannot be materialized into a menu")
     base = None if result.get("portions") is None else _finite_positive(result["portions"], "portions")
