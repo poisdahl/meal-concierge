@@ -75,7 +75,7 @@ that every ingredient and step survived import.
 
 When the host offers an authorized reviewer or subagent, delegate one
 read-only comparison. Give it only the necessary source, candidate, intended
-portions and any requested changes. Ask it to identify consequential differences,
+portions and any requested changes, plus the ingredient requirements being compared. Ask it to identify consequential differences,
 quote the relevant source lines, and return corrections or a short confirmation.
 It needs no household profile, saved recipes, account access or write tools.
 For a private recipe, keep the review within the authorized data boundary.
@@ -115,6 +115,11 @@ the affected rows and steps on the corrected candidate. When evidence leaves
 a material choice affecting cooking or shopping, use a practical labelled
 estimate if reasonable, or ask one focused question when the user needs to
 decide. A harmless difference in punctuation or phrasing needs no extra turn.
+
+If the host can show progress during a longer review, offer the useful first
+pass immediately as a provisional preview. Let the user carry on, and complete
+the requested save or planning step when the check finishes. On a synchronous
+host, finish in the same turn. A request for a quick look can end at the preview.
 
 Keep the check short. Reuse evidence already read and the exact imported
 reference. Only review selected imports. Reuse the result for the same
