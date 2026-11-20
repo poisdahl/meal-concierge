@@ -1592,11 +1592,13 @@ def accept_recipe_estimates(recipe: Mapping[str, Any], digest: Any, fields: Any,
     return result
 
 
-def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict[str, Any]:
+def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None, *, original_batch: bool = False) -> dict[str, Any]:
     result = deepcopy(dict(recipe))
     if (result.get("rights") or {}).get("storage") != "full":
         raise RecipeError("link_only recipes cannot be materialized into a menu")
     base = None if result.get("portions") is None else _finite_positive(result["portions"], "portions")
+    if original_batch and portions is not None:
+        raise RecipeError("choose either one original batch or target person portions")
     target = base if portions is None else _finite_positive(portions, "target portions")
     if base is None and portions is not None:
         raise RecipeError("unknown portions: resolve person servings explicitly before scaling")
@@ -1645,8 +1647,8 @@ def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict
             path = f"ingredients.{index}.quantity" if amount is None else f"ingredients.{index}.unit"
             if path not in missing:
                 missing.append(path)
-        reason = "person_servings_unknown" if base is None else (
-            "serving_evidence_needs_input" if "portions" in missing else
+        reason = "person_servings_unknown" if base is None and not original_batch else (
+            "serving_evidence_needs_input" if "portions" in missing and not original_batch else
             "non_scalable_quantity_unresolved" if item.get("scalable") is not True else
             "ingredient_evidence_needs_input" if any(f"ingredients.{index}.{key}" in missing for key in ("quantity", "unit")) else None
         )
@@ -1697,6 +1699,8 @@ def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict
     result["recipe_key"] = recipe_key(result)
     if result.get("id"):
         result["recipe_ref"] = {"id": result["id"], "revision": result["revision"]}
+    if original_batch:
+        result["original_batch"] = True
     result["shopping_requirements"] = requirements
     result["readiness"] = {"scaling_ready": not missing, "missing_decisions": missing}
     return result

@@ -1291,33 +1291,43 @@ class PlanningOperations:
                 discovery_reference = raw.get("discovery_ref") if "source" not in raw else None
                 if sum(item is not None for item in (reference, library_reference, discovery_reference)) > 1:
                     raise RecipeLibraryError("menu recipe must use exactly one recipe reference type")
-                if discovery_reference is not None:
-                    stored = self.recipes.resolve_discovery(discovery_reference)["recipe"]
-                    recipe = scale_recipe(stored, raw.get("portions") if raw.get("portions") is not None else profile_portions)
-                    recipe["discovery_ref"] = discovery_reference
-                elif library_reference is not None:
-                    checked = validate_library_recipe_ref(library_reference)
-                    if checked["library_id"] not in self.recipe_libraries:
-                        raise RecipeLibraryError("library_recipe_ref names an unconfigured recipe library")
-                    if checked["library_id"] == "builtin":
-                        stored = self.recipes.get(checked["recipe_id"], checked.get("version"))
-                        if stored.get("status") != "active" or stored.get("revision_status", stored.get("status")) != "active":
-                            raise HouseholdError("only active recipes can be added to a new menu")
+                original_batch = raw.get("original_batch", False)
+                if type(original_batch) is not bool:
+                    raise HouseholdError("original_batch must be true or false")
+                if discovery_reference is not None or library_reference is not None or isinstance(reference, Mapping):
+                    builtin = False
+                    if discovery_reference is not None:
+                        stored = self.recipes.resolve_discovery(discovery_reference)["recipe"]
+                    elif library_reference is not None:
+                        checked = validate_library_recipe_ref(library_reference)
+                        if checked["library_id"] not in self.recipe_libraries:
+                            raise RecipeLibraryError("library_recipe_ref names an unconfigured recipe library")
+                        builtin = checked["library_id"] == "builtin"
+                        stored = (self.recipes.get(checked["recipe_id"], checked.get("version")) if builtin
+                                  else self._external_library_get(checked))
                     else:
-                        stored = self._external_library_get(checked)
-                    for field in ("library_id", "is_favorite", "favorite_revision", "entry_origin", "pack", "locally_modified"):
-                        stored.pop(field, None)
-                    recipe = scale_recipe(stored, raw.get("portions") if raw.get("portions") is not None else profile_portions)
-                    recipe["library_recipe_ref"] = deepcopy(stored["library_recipe_ref"])
-                    recipe["recipe_key"] = library_recipe_key(recipe["library_recipe_ref"])
-                elif isinstance(reference, Mapping):
-                    stored = self.recipes.get(reference.get("id"), reference.get("revision"))
-                    if stored.get("status") != "active" or stored.get("revision_status", stored.get("status")) != "active":
-                        raise HouseholdError("only active recipes can be added to a new menu")
-                    for field in ("library_id", "is_favorite", "favorite_revision", "entry_origin", "pack", "locally_modified"):
-                        stored.pop(field, None)
-                    recipe = scale_recipe(stored, raw.get("portions") if raw.get("portions") is not None else profile_portions)
+                        builtin = True
+                        stored = self.recipes.get(reference.get("id"), reference.get("revision"))
+                    if builtin:
+                        # A saved draft whose source never gave person servings can
+                        # still be cooked explicitly as written. Never revive archives.
+                        allowed = {"active", "draft"} if original_batch and stored.get("portions") is None else {"active"}
+                        if stored.get("status") not in allowed or stored.get("revision_status", stored.get("status")) not in allowed:
+                            raise HouseholdError("only active recipes can be added to a new menu unless explicitly cooking a draft with unknown servings as one original batch")
+                    if discovery_reference is None:
+                        for field in ("library_id", "is_favorite", "favorite_revision", "entry_origin", "pack", "locally_modified"):
+                            stored.pop(field, None)
+                    portions = raw.get("portions")
+                    if portions is None and not original_batch:
+                        portions = profile_portions
+                    recipe = scale_recipe(stored, portions, original_batch=original_batch)
+                    if discovery_reference is not None:
+                        recipe["discovery_ref"] = discovery_reference
+                    if library_reference is not None:
+                        recipe["recipe_key"] = library_recipe_key(recipe["library_recipe_ref"])
                 else:
+                    if original_batch:
+                        raise HouseholdError("original_batch requires a recipe reference")
                     candidate = deepcopy(dict(raw))
                     if not isinstance(candidate.get("source"), Mapping) or not isinstance(candidate.get("rights"), Mapping):
                         raise HouseholdError("new menu recipes require explicit source, relationship and rights metadata")

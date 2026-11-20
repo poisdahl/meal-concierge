@@ -25,6 +25,9 @@ def _menu_recipe_presentation(recipe):
     result = {'name': shown.get('name') or recipe.get('name'),
               'times': _recipe_times(recipe.get('times')),
               'source': _fields(source, ('kind', 'publisher', 'author', 'title', 'url', 'relationship'))}
+    if recipe.get("original_batch"):
+        result["original_batch"] = True
+        result["source_yield"] = _display_text((recipe.get("yield") or {}).get("original_text"), 300)
     if isinstance(source.get('original'), dict):
         result['source']['original'] = _fields(source['original'], ('kind', 'publisher', 'author', 'title', 'url'))
     if isinstance(credit, str) and credit:

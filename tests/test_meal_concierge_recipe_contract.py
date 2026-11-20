@@ -154,6 +154,57 @@ class RecipeContractTests(unittest.TestCase):
             self.assertIn("personporsjoner er ukjent", menu_email_html(menu))
         self.assertEqual(self.save_menu(authored_recipe())["dishes"][0]["portions"], 12)
 
+    def test_explicit_original_batch_uses_saved_source_amounts_without_inventing_servings(self):
+        from agent_views import _menu_view
+        from core import HouseholdError
+        from test_recipe_convert_changes import transcript, DECISION
+        source = transcript("Bread\n2 loaves\n700 g mel\n3 ts salt\nBake both loaves.",
+                            ["700 g mel", "3 ts salt"], ["Bake both loaves."],
+                            name="Bread", language="en", yield_quote="2 loaves")
+        preview = self.app.handle({"operation": "recipes", "action": "import", "source_kind": "transcript",
+                                   "storage_decision": DECISION, "transcript": source})
+        self.assertEqual(preview["suggested_status"], "draft")
+        saved = self.app.handle({"operation": "recipes", "action": "save", "status": "draft",
+                                 "discovery_ref": preview["discovery_ref"], "idempotency_key": "bread"})["recipe"]
+        for ref in ({"discovery_ref": preview["discovery_ref"]}, {"library_recipe_ref": saved["library_recipe_ref"]},
+                    {"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}}):
+            menu = self.save_menu({**ref, "original_batch": True})
+            bread = menu["dishes"][0]
+            self.assertIsNone(bread["portions"])
+            self.assertFalse(bread["readiness"]["scaling_ready"])
+            self.assertEqual(bread["yield"]["original_text"], "2 loaves")
+            self.assertEqual(bread["steps"], ["Bake both loaves."])
+            projected = _menu_view("save", {"menu": menu}, 0, 10, "summary")
+            self.assertTrue(projected["slots"]["items"][0]["original_batch"])
+            self.assertEqual(projected["slots"]["items"][0]["source_yield"], "2 loaves")
+            self.assertIn("Én oppskriftsmengde", menu_email_html(menu))
+            requirements, unresolved = menu_requirements(menu)
+            self.assertFalse(unresolved)
+            self.assertEqual({r["item"]: (r["quantity"]["numerator"], r["unit"]) for r in requirements},
+                             {"mel": (700, "g"), "salt": (15, "ml")})
+            with self.assertRaisesRegex(RecipeError, "either"):
+                self.save_menu({**ref, "original_batch": True, "portions": 4})
+        self.assertFalse(self.provider.calls)
+        prepared = self.app.handle({"operation": "products", "action": "prepare", "menu_ref": self.app._cart_menu_ref(menu),
+                                    "candidate_approvals": [{"requirement_id": r["requirement_id"], "candidate_refs": [r["item"]]}
+                                                            for r in requirements]})["product_plan"]
+        self.assertEqual(prepared["status"], "prepared")
+        with self.assertRaisesRegex(RecipeError, "unknown portions"):
+            self.save_menu({"discovery_ref": preview["discovery_ref"], "portions": 4})
+        self.app.handle({"operation": "recipes", "action": "archive", "recipe_id": saved["id"], "expected_revision": saved["revision"]})
+        with self.assertRaisesRegex(HouseholdError, "only active"):
+            self.save_menu({"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}, "original_batch": True})
+
+    def test_original_batch_still_surfaces_unmeasured_ingredients(self):
+        recipe = authored_recipe()
+        recipe.pop("portions")
+        recipe["ingredients"].append({"item": "fløte", "raw": "fløte etter smak"})
+        saved = self.save(recipe)
+        menu = self.save_menu({"library_recipe_ref": saved["library_recipe_ref"], "original_batch": True})
+        requirements, unresolved = menu_requirements(menu)
+        self.assertEqual(len(requirements), 5)
+        self.assertEqual([(r["item"], r["reason"]) for r in unresolved], [("fløte", "non_scalable_quantity_unresolved")])
+
     def test_estimate_acceptance_is_exact_persisted_and_cannot_be_copied_or_reassigned(self):
         recipe = authored_recipe()
         recipe["portions_evidence"] = {"basis": "estimate", "input": "2 loaves", "assumptions": "Six slices per loaf, one slice per person."}
