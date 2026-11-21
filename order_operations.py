@@ -2421,6 +2421,18 @@ class OrderOperations:
             raise HouseholdError("Local retirement evidence is available only for retire_attempt")
         if "first_meal_date" in request and action != "prepare":
             raise HouseholdError("first_meal_date is a checkout preparation choice")
+        cart_only = request.get("cart_only")
+        if cart_only is not None:
+            if type(cart_only) is not bool:
+                raise HouseholdError("checkout cart_only must be true or false")
+            if action not in {"prepare", "submit", "confirm"}:
+                raise HouseholdError("cart_only is a purchase choice for checkout prepare, submit or confirm")
+            if cart_only and request.get("weekly"):
+                raise HouseholdError("cart_only buys the current cart without the saved menu; weekly buys for that menu. Choose one")
+            if cart_only and request.get("recovery"):
+                raise HouseholdError("cart_only applies to a new order review, not payment recovery")
+            if action == "confirm" and bool((self.store.read().get("pending_checkout") or {}).get("cart_only")) != cart_only:
+                raise HouseholdError("cart_only does not match the current checkout review; prepare a new review for that purchase")
         if "delivery_price_approved" in request and (type(request["delivery_price_approved"]) is not bool or action != "confirm"):
             raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
@@ -2536,13 +2548,6 @@ class OrderOperations:
             if not isinstance(original, str) or not original:
                 raise HouseholdError("review renewal requires the original checkout confirmation_id")
             return self._checkout_prepare(deadline, renew_confirmation_id=original)
-        cart_only = request.get("cart_only")
-        if cart_only not in (None, False, True):
-            raise HouseholdError("checkout cart_only must be true or false")
-        if cart_only and request.get("weekly"):
-            raise HouseholdError("cart_only buys the current cart without the saved menu; weekly buys for that menu. Choose one")
-        if cart_only and request.get("recovery"):
-            raise HouseholdError("cart_only applies to a new order review, not payment recovery")
         if action == "prepare" and request.get("recovery"):
             return self._checkout_recovery_prepare(
                 deadline,
@@ -2600,6 +2605,8 @@ class OrderOperations:
                 if not bound_confirmation:
                     raise HouseholdError("checkout idempotency record is incomplete; reconcile before retrying")
                 if pending and pending.get("confirmation_id") == bound_confirmation and pending.get("status") == "awaiting_confirmation" and not expired_awaiting_confirmation(pending, self._now()):
+                    if cart_only is not None and bool(pending.get("cart_only")) != cart_only:
+                        raise HouseholdError("checkout idempotency_key is bound to another purchase intent")
                     prepared = {
                         "confirmation_id": bound_confirmation,
                         "summary": deepcopy(pending["summary"]),
@@ -2610,7 +2617,7 @@ class OrderOperations:
             elif request.get("weekly") and (problem := self._weekly_checkout_problem()):
                 return problem
             elif (pending and pending.get("status") == "awaiting_confirmation" and not expired_awaiting_confirmation(pending, self._now())
-                    and bool(pending.get("cart_only")) == bool(cart_only)):
+                    and (True if cart_only else (False if request.get("weekly") else None)) in (None, bool(pending.get("cart_only")))):
                 prepared = {
                     "confirmation_id": pending["confirmation_id"],
                     "summary": deepcopy(pending["summary"]),
@@ -2850,10 +2857,11 @@ class OrderOperations:
                 state = self.store.read()
                 if state.get("pending_checkout") or state.get("pending_cancellation") or state.get("order_change"):
                     raise HouseholdError("finish the pending provider operation before manual checkout")
-                self._require_menu_provider(state.get("menu"))
+                if not cart_only:
+                    self._require_menu_provider(state.get("menu"))
                 summary = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
                 plan = state.get("cart_plan")
-                if isinstance(plan, Mapping) and plan.get("provider") == self.provider and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu")):
+                if not cart_only and isinstance(plan, Mapping) and plan.get("provider") == self.provider and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu")):
                     summary["menu_shortfall"] = self._menu_shortfall(plan, summary)
                 summary["dietary_assessment"] = self._checkout_dietary(summary, deadline)
                 return {
@@ -2872,7 +2880,11 @@ class OrderOperations:
                 raise HouseholdError("identity_review cannot resolve an addition or scheduled checkout")
             if state.get("pending_cart_change"):
                 raise HouseholdError("reconcile_change before checkout")
-            if not state.get("order_change"):
+            if cart_only is None:
+                # Renewal and payment switching re-prepare the same intent.
+                cart_only = bool((renew_confirmation_id is not None or _switch_confirmation_id is not None)
+                                 and (state.get("pending_checkout") or {}).get("cart_only"))
+            if not state.get("order_change") and not cart_only:
                 self._require_menu_provider(state.get("menu"))
             if cart_ready_continuation:
                 record = state.get("occurrences", {}).get(occurrence)
@@ -2920,10 +2932,6 @@ class OrderOperations:
             if baseline and baseline.get("status") in UNRESOLVED_CHECKOUT_STATUSES:
                 raise HouseholdError("reconcile the pending checkout before preparing another")
             order_change = deepcopy(state.get("order_change"))
-            if cart_only is None:
-                # Renewal and payment switching re-prepare the same intent.
-                cart_only = bool((renew_confirmation_id is not None or _switch_confirmation_id is not None)
-                                 and isinstance(baseline, Mapping) and baseline.get("cart_only"))
             if cart_only and (order_change or occurrence or automatic_checkout or scheduler_context or cart_ready_continuation):
                 raise HouseholdError("cart_only applies only to an interactive new order of the current cart")
             if requested_order_id is not None and (
@@ -3006,6 +3014,13 @@ class OrderOperations:
         if order_change and self.provider in {"oda", "mathem"} and self._cart_lines(summary)[0] != order_change.get("expected_cart_quantities", {}):
             raise HouseholdError(f"{self.provider.title()} addition cart changed outside this edit; abort with retain_cart=true and review the goods before checkout")
         cart_plan_baseline = independent_cart_plan if independent_cart else None
+        if cart_only and not order_change and self.store.read().get("managed_product_apply_fence"):
+            return {
+                "confirmed": False,
+                "status": "needs_input",
+                "reason": "managed_product_apply_incomplete",
+                "next": "Reconcile the cart and complete or clear the interrupted saved-menu product apply before checkout.",
+            }
         if not order_change and isinstance(menu_baseline, Mapping) and not independent_cart and not cart_only:
             cart_gate = self._cart_checkout_gate(summary, menu_baseline)
             if cart_gate is not None:
@@ -3296,8 +3311,9 @@ class OrderOperations:
                 state["pending_checkout"] = {
                     **({"renewed_from": renew_confirmation_id} if renew_confirmation_id else {}),
                     **({"independent_cart": True} if independent_cart else {}),
-                    # An explicit cart-only order neither binds nor consumes
-                    # the saved menu or its cart plan.
+                    # An explicit cart-only order never binds the saved menu or
+                    # reconciles its plan; only an already-ordered menu's
+                    # extras-only plan is consumed, as without the flag.
                     **({"cart_only": True} if cart_only else {}),
                     "checkout_payment": checkout_payment,
                     **({"payment_preference": payment_preference} if checkout_payment != payment_preference else {}),

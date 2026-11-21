@@ -176,6 +176,84 @@ class CartOnlyCheckoutTests(unittest.TestCase):
             self.assertIsNone(store.read()["pending_checkout"]["menu"])
             self.assertEqual(browser.checkout_clicks, 0)
 
+    def menu_review(self, store, application):
+        stopped = application.handle({"operation": "checkout", "action": "prepare"})
+        application.handle({"operation": "cart", "action": "reconcile", "decision": "keep_current",
+                            "menu_ref": application._cart_menu_ref(store.read()["menu"]),
+                            "cart_digest": stopped["cart_plan"]["cart_digest"],
+                            "accept_missing_product_ids": ["20"]})
+        review = application.handle({"operation": "checkout", "action": "prepare"})
+        self.assertEqual(review["summary"]["menu_attribution"], "menu_bound")
+        return review
+
+    def test_dispatch_rejects_a_purchase_intent_that_differs_from_the_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _provider, browser, application = self.household(directory, policy="standing")
+            review = self.menu_review(store, application)
+            with self.assertRaisesRegex(HouseholdError, "does not match the current checkout review"):
+                application.handle({"operation": "checkout", "action": "confirm", "cart_only": True,
+                                    "confirmation_id": review["confirmation_id"]})
+            for action in ("renew_review", "switch_payment", "reconcile", "discard_review"):
+                with self.assertRaisesRegex(HouseholdError, "purchase choice"):
+                    application.handle({"operation": "checkout", "action": action, "cart_only": True,
+                                        "confirmation_id": review["confirmation_id"]})
+            with self.assertRaisesRegex(HouseholdError, "true or false"):
+                application.handle({"operation": "checkout", "action": "prepare", "cart_only": 1})
+            with store.locked() as state:
+                application._bind_protected_request(state, "checkout", "bound-to-menu", review["confirmation_id"])
+            with self.assertRaisesRegex(HouseholdError, "bound to another purchase intent"):
+                application.handle({"operation": "checkout", "action": "submit", "cart_only": True,
+                                    "idempotency_key": "bound-to-menu"})
+            self.assertEqual(browser.checkout_clicks, 0)
+            self.assertEqual(store.read()["menu"]["phase"], "draft")
+
+    def test_submit_without_a_flag_pays_the_shown_cart_only_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _provider, browser, application = self.household(directory, policy="standing")
+            self.menu_review(store, application)
+            before = menu_state(store)
+            shown = application.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+
+            result = application.handle({"operation": "checkout", "action": "submit", "idempotency_key": "yes-buy-it"})
+
+            self.assertTrue(result["confirmed"], result)
+            self.assertEqual(result["confirmation_id"], shown["confirmation_id"])
+            self.assertEqual(result["menu_attribution"], "cart_only")
+            self.assertEqual(browser.checkout_clicks, 1)
+            self.assertEqual(menu_state(store), before)
+
+    def test_unrelated_menu_contents_and_delivery_reselection_keep_a_cart_only_purchase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, browser, application = self.household(directory, policy="standing")
+            with store.locked() as state:
+                state["menu"]["dishes"] = [{"title": "Recipe from another store", "source_provider": "meny"}]
+            before = menu_state(store)
+            with self.assertRaises(Exception):
+                application.handle({"operation": "checkout", "action": "prepare"})
+            application.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            provider.delivery_slots["slots"][0]["price_ore"] = 5900
+            reprepared = application.handle({"operation": "checkout", "action": "submit", "cart_only": True,
+                                             "idempotency_key": "price-changed"})
+            self.assertTrue(reprepared.get("reprepared"), reprepared)
+            self.assertTrue(store.read()["pending_checkout"]["cart_only"])
+
+            result = application.handle({"operation": "checkout", "action": "submit", "idempotency_key": "price-changed"})
+
+            self.assertTrue(result["confirmed"], result)
+            self.assertEqual(result["menu_attribution"], "cart_only")
+            self.assertEqual(browser.checkout_clicks, 1)
+            self.assertEqual(menu_state(store), before)
+
+    def test_cart_only_still_waits_for_an_interrupted_menu_product_apply(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _provider, browser, application = self.household(directory)
+            with store.locked() as state:
+                state["managed_product_apply_fence"] = {"reason": "synthetic interrupted apply"}
+            result = application.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            self.assertEqual(result["reason"], "managed_product_apply_incomplete")
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertEqual(browser.checkout_clicks, 0)
+
     def test_cart_only_is_rejected_for_scheduled_and_recovery_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             store, _provider, browser, application = self.household(directory)

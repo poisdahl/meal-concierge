@@ -648,9 +648,13 @@ unresolved and never treats the suggested default as automatic consent.
 
 An owner can also buy the current cart without the saved menu: manual checkout
 `prepare` or `submit` with `cart_only=true` skips this menu-plan question,
-records the order as `menu_attribution="cart_only"` and leaves the menu, its
-cart plan and recipe usage unchanged through purchase, reconciliation and
-cancellation. Renewal and payment switching keep that choice. Use
+records the order as `menu_attribution="cart_only"` and leaves a saved menu,
+its cart plan and recipe usage unchanged through purchase, reconciliation and
+cancellation; a menu that already belongs to an order only has its separate
+extras bookkeeping cleared, as without the flag. Renewal, payment switching and
+retries keep the choice; `confirm` or a bound idempotency key with a different
+`cart_only` value is rejected. An incomplete saved-menu product apply still
+blocks checkout. Use
 `weekly=true` for an explicit purchase of the saved weekly menu; the two flags
 are mutually exclusive, and products shared by the cart and the menu do not
 change the chosen attribution. Scheduled, order-change and recovery checkouts
