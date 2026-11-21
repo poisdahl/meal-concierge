@@ -5120,7 +5120,9 @@ class PlanningOperations:
                 "Use the owner's current explicit instruction if it already resolves this exact cart difference; "
                 "otherwise ask one combined question for this cart digest. Suggest keeping the current cart. "
                 "The owner may name exact exclusions, restore missing menu products, "
-                "or explicitly accept the current missing quantities."
+                "or explicitly accept the current missing quantities. If the owner interactively asked only to buy "
+                "the current cart, independent of the saved menu, prepare checkout with cart_only=true instead; "
+                "that leaves this menu plan unchanged."
             ),
         }
 
