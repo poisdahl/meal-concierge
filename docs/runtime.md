@@ -64,14 +64,19 @@ installed version and attaches to it; it does not select a newer release.
 - For browser use: **agent-browser 0.33.1** and **Chrome or non-snap Chromium**.
   The npm adapter may need Node.js 24+. Linux ARM64 needs a distribution Chromium.
   The [Grok guide](grok.md#browser-and-login) covers its native browser option.
-- On Ubuntu 23.10 and later, and other Linux hosts where
-  `kernel.apparmor_restrict_unprivileged_userns=1`, a Chrome or Chromium that no
-  installed AppArmor profile covers stops at startup with "No usable sandbox".
-  Before login, ask the host administrator to add a profile granting `userns` for
-  that exact browser executable, as Ubuntu does for its own Chrome packages (see
-  [Chromium's guide](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)).
-  Never run the store browser with `--no-sandbox`. `check-browser` does not start
-  the browser, so it cannot detect this.
+- On Ubuntu 23.10 and later, and other Linux hosts with
+  `kernel.apparmor_restrict_unprivileged_userns=1`, a Chrome or Chromium outside
+  an existing AppArmor profile stops at startup with "No usable sandbox".
+  Ubuntu's `/etc/apparmor.d/chrome` covers Google Chrome at
+  `/opt/google/chrome/chrome`; Chrome for Testing and other paths are not
+  covered. To check, run `BROWSER --headless=new --dump-dom about:blank` as the
+  service user. If it fails this way, report the message and the exact browser
+  path to the host administrator and stop the browser steps. The administrator
+  can add a profile granting `userns` to that one executable, following
+  [Chromium's guide](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md).
+  An installing agent never changes AppArmor profiles or kernel settings itself
+  and never disables the browser sandbox. `check-browser` only reads the
+  browser version, so it cannot detect this.
 - A separate data directory for each household/store. Additional trusted agents
   should connect to the same installation instead of making copies.
 
