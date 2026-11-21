@@ -69,12 +69,13 @@ installed version and attaches to it; it does not select a newer release.
   an existing AppArmor profile stops at startup with "No usable sandbox".
   Ubuntu's `/etc/apparmor.d/chrome` covers Google Chrome at
   `/opt/google/chrome/chrome`; Chrome for Testing and other paths are not
-  covered. To check, run `BROWSER --headless=new --dump-dom about:blank` as the
-  service user. If it fails this way, report the message and the exact browser
+  covered. To check, run
+  `BROWSER --headless=new --user-data-dir="$(mktemp -d)" --dump-dom about:blank`
+  as the service user. If it fails this way, report the message and the exact browser
   path to the host administrator and stop the browser steps. The administrator
   can add a profile granting `userns` to that one executable, following
   [Chromium's guide](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md).
-  An installing agent never changes AppArmor profiles or kernel settings itself
+  An agent never changes AppArmor profiles or kernel settings itself
   and never disables the browser sandbox. `check-browser` only reads the
   browser version, so it cannot detect this.
 - A separate data directory for each household/store. Additional trusted agents
