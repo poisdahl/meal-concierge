@@ -249,6 +249,31 @@ class CartOnlyCheckoutTests(unittest.TestCase):
             self.assertEqual(browser.checkout_clicks, 1)
             self.assertEqual(menu_state(store), before)
 
+    def test_weekly_request_never_pays_a_cart_only_review_and_expiry_keeps_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _provider, browser, application = self.household(directory, policy="standing")
+            self.menu_review(store, application)
+            before = menu_state(store)
+            shown = application.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            with self.assertRaisesRegex(HouseholdError, "cart_only, not for the saved weekly menu"):
+                application.handle({"operation": "checkout", "action": "confirm", "weekly": True,
+                                    "confirmation_id": shown["confirmation_id"]})
+            with store.locked() as state:
+                application._bind_protected_request(state, "checkout", "bound-to-cart", shown["confirmation_id"])
+            with self.assertRaisesRegex(HouseholdError, "bound to a cart_only review"):
+                application.handle({"operation": "checkout", "action": "submit", "weekly": True,
+                                    "idempotency_key": "bound-to-cart"})
+            self.assertEqual(browser.checkout_clicks, 0)
+            with store.locked() as state:
+                state["pending_checkout"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+
+            result = application.handle({"operation": "checkout", "action": "submit", "idempotency_key": "after-expiry"})
+
+            self.assertTrue(result["confirmed"], result)
+            self.assertEqual(result["menu_attribution"], "cart_only")
+            self.assertEqual(browser.checkout_clicks, 1)
+            self.assertEqual(menu_state(store), before)
+
     def test_cart_only_still_waits_for_an_interrupted_menu_product_apply(self):
         with tempfile.TemporaryDirectory() as directory:
             store, _provider, browser, application = self.household(directory)

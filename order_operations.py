@@ -2439,6 +2439,12 @@ class OrderOperations:
                     and pending.get("confirmation_id") == request.get("confirmation_id")):
                 raise HouseholdError("This unsubmitted review is linked to the saved menu, not cart_only; nothing was submitted. "
                                      "Prepare a cart_only review to buy only the cart")
+        if action == "confirm" and request.get("weekly"):
+            pending = self.store.read().get("pending_checkout") or {}
+            if (pending.get("cart_only") and pending.get("status") == "awaiting_confirmation"
+                    and pending.get("confirmation_id") == request.get("confirmation_id")):
+                raise HouseholdError("This unsubmitted review is cart_only, not for the saved weekly menu; nothing was submitted. "
+                                     "Prepare a weekly review to buy for the menu")
         if "delivery_price_approved" in request and (type(request["delivery_price_approved"]) is not bool or action != "confirm"):
             raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
@@ -2614,6 +2620,9 @@ class OrderOperations:
                     if cart_only and not pending.get("cart_only"):
                         raise HouseholdError("checkout idempotency_key is bound to a menu-linked review; nothing was submitted. "
                                              "Use a new key for a cart_only review")
+                    if request.get("weekly") and pending.get("cart_only"):
+                        raise HouseholdError("checkout idempotency_key is bound to a cart_only review; nothing was submitted. "
+                                             "Use a new key for a weekly review")
                     prepared = {
                         "confirmation_id": bound_confirmation,
                         "summary": deepcopy(pending["summary"]),
@@ -2631,8 +2640,11 @@ class OrderOperations:
                     "order_change": deepcopy(pending.get("order_change")),
                 }
             else:
+                # An expired review the owner saw as cart-only keeps that intent.
+                inherited = (not request.get("weekly") and isinstance(pending, Mapping)
+                             and pending.get("status") == "awaiting_confirmation" and pending.get("cart_only"))
                 prepared = self._checkout({"action": "prepare", "occurrence": request.get("occurrence"),
-                                           **({"cart_only": True} if cart_only else {})})
+                                           **({"cart_only": True} if cart_only or inherited else {})})
             if prepared.get("cart_reconciliation_required") is True or prepared.get("status") == "needs_input":
                 return {"confirmed": False, **prepared}
             with self.store.locked() as state:
