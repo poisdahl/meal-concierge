@@ -77,6 +77,11 @@ class CartOnlyCheckoutTests(unittest.TestCase):
             self.assertEqual(browser.checkout_clicks, 1)
             self.assertEqual(menu_state(store), before)
             self.assertEqual(store.read()["menu"]["phase"], "draft")
+            # A retried confirm after a lost reply returns the same order.
+            retried = application.handle({"operation": "checkout", "action": "confirm", "cart_only": True,
+                                          "confirmation_id": prepared["confirmation_id"]})
+            self.assertTrue(retried["confirmed"], retried)
+            self.assertEqual(browser.checkout_clicks, 1)
 
             review = application.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
             cancelled = application.handle({"operation": "orders", "action": "cancel_confirm", "order_id": "new-order",
@@ -190,7 +195,7 @@ class CartOnlyCheckoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store, _provider, browser, application = self.household(directory, policy="standing")
             review = self.menu_review(store, application)
-            with self.assertRaisesRegex(HouseholdError, "does not match the current checkout review"):
+            with self.assertRaisesRegex(HouseholdError, "linked to the saved menu, not cart_only"):
                 application.handle({"operation": "checkout", "action": "confirm", "cart_only": True,
                                     "confirmation_id": review["confirmation_id"]})
             for action in ("renew_review", "switch_payment", "reconcile", "discard_review"):
@@ -201,7 +206,7 @@ class CartOnlyCheckoutTests(unittest.TestCase):
                 application.handle({"operation": "checkout", "action": "prepare", "cart_only": 1})
             with store.locked() as state:
                 application._bind_protected_request(state, "checkout", "bound-to-menu", review["confirmation_id"])
-            with self.assertRaisesRegex(HouseholdError, "bound to another purchase intent"):
+            with self.assertRaisesRegex(HouseholdError, "bound to a menu-linked review"):
                 application.handle({"operation": "checkout", "action": "submit", "cart_only": True,
                                     "idempotency_key": "bound-to-menu"})
             self.assertEqual(browser.checkout_clicks, 0)

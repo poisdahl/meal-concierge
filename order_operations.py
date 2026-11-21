@@ -2431,8 +2431,14 @@ class OrderOperations:
                 raise HouseholdError("cart_only buys the current cart without the saved menu; weekly buys for that menu. Choose one")
             if cart_only and request.get("recovery"):
                 raise HouseholdError("cart_only applies to a new order review, not payment recovery")
-            if action == "confirm" and bool((self.store.read().get("pending_checkout") or {}).get("cart_only")) != cart_only:
-                raise HouseholdError("cart_only does not match the current checkout review; prepare a new review for that purchase")
+            pending = self.store.read().get("pending_checkout") or {}
+            # Only an unsubmitted review can be checked against a different
+            # intent. Retries and dispatched attempts reconcile normally.
+            if (action == "confirm" and cart_only and not pending.get("cart_only")
+                    and pending.get("status") == "awaiting_confirmation"
+                    and pending.get("confirmation_id") == request.get("confirmation_id")):
+                raise HouseholdError("This unsubmitted review is linked to the saved menu, not cart_only; nothing was submitted. "
+                                     "Prepare a cart_only review to buy only the cart")
         if "delivery_price_approved" in request and (type(request["delivery_price_approved"]) is not bool or action != "confirm"):
             raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
@@ -2605,8 +2611,9 @@ class OrderOperations:
                 if not bound_confirmation:
                     raise HouseholdError("checkout idempotency record is incomplete; reconcile before retrying")
                 if pending and pending.get("confirmation_id") == bound_confirmation and pending.get("status") == "awaiting_confirmation" and not expired_awaiting_confirmation(pending, self._now()):
-                    if cart_only is not None and bool(pending.get("cart_only")) != cart_only:
-                        raise HouseholdError("checkout idempotency_key is bound to another purchase intent")
+                    if cart_only and not pending.get("cart_only"):
+                        raise HouseholdError("checkout idempotency_key is bound to a menu-linked review; nothing was submitted. "
+                                             "Use a new key for a cart_only review")
                     prepared = {
                         "confirmation_id": bound_confirmation,
                         "summary": deepcopy(pending["summary"]),
