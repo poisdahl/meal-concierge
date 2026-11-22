@@ -4076,11 +4076,17 @@ class PlanningOperations:
         except StockDecisionConflict as exc:
             if request.get("action") != "apply":
                 raise
-            ref = request.get("menu_ref") or ((request.get("product_plan") or {}).get("binding") or {}).get("menu_ref")
+            supplied = request.get("product_plan") or {}
+            binding = supplied.get("binding") or {}
+            ref = request.get("menu_ref") or binding.get("menu_ref")
             result = {"applied": False, "status": "needs_input", "product_plan_stale": True, "reason": str(exc)}
             if ref:
+                # Refresh in the refused apply's own recurring scope (a supplied
+                # plan's binding, else the request) so a recipe-only shop stays so.
+                include_recurring = (binding if supplied else request).get("include_recurring", True)
                 current = self._products_operation({"operation": "products", "action": "prepare",
-                    "menu_ref": ref, "continuation_mode": "reset", **({"_deadline": request["_deadline"]} if request.get("_deadline") else {})})
+                    "menu_ref": ref, "continuation_mode": "reset", "include_recurring": include_recurring,
+                    **({"_deadline": request["_deadline"]} if request.get("_deadline") else {})})
                 result["fresh_product_plan"] = current["product_plan"]
         if not agent or result.get("projection") == "agent":
             return result

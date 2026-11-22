@@ -1301,6 +1301,35 @@ class ProductCapacityTests(unittest.TestCase):
         self.assertTrue(retried["applied"], retried)
         self.assertEqual(len(self.provider.quantities), 37)
 
+    def test_stock_conflict_refresh_keeps_recipe_only_scope(self):
+        self.save_week_with_due_recurring()
+        menu_ref = self.app._cart_menu_ref(self.menu)
+        onion = next(row for row in self.prepare(include_recurring=False)["requirements"] if row["identity"] == "onion")
+        sources = [{key: source[key] for key in ("collection", "recipe_index", "ingredient_index")}
+                   for source in onion["sources"]]
+
+        def record(action):
+            self.app.handle({"operation": "products", "action": "record_ingredients", "menu_ref": menu_ref,
+                             "ingredient_decisions": [{"source": source, "action": action} for source in sources]})
+
+        record("have_all")
+        initial = self.prepare(include_recurring=False)
+        prepared = self.app.handle({"operation": "products", "action": "prepare", "menu_ref": menu_ref,
+                                    "include_recurring": False, "candidate_approvals": self.approvals(initial)})
+        # The household now needs onion after all, so the reviewed stock answer conflicts.
+        record("include")
+        plan = prepared["product_plan"]
+        for arguments in (prepared["apply_arguments"], {
+                "action": "apply", "product_plan": plan, "product_plan_digest": plan["product_plan_digest"]}):
+            with self.subTest(form="product_plan" if "product_plan" in arguments else "menu_ref"):
+                refused = self.app.handle({"operation": "products", **arguments, "cart_change_requested": True})
+                self.assertFalse(refused["applied"], refused)
+                self.assertIn("differs from saved stock", refused["reason"])
+                fresh = refused["fresh_product_plan"]
+                self.assertIs(fresh["binding"].get("include_recurring"), False)
+                self.assertNotIn("recurring_review", fresh)
+                self.assertEqual(self.provider.quantities, {})
+
     def test_agent_short_partial_apply_and_uncertain_full_write_keep_outcomes(self):
         self.save_week()
         first = self.agent_products(menu_ref=self.app._cart_menu_ref(self.menu))
