@@ -1256,6 +1256,51 @@ class ProductCapacityTests(unittest.TestCase):
             self.agent_products(**fresh["apply_arguments"], cart_change_requested=True)
         self.assertEqual(self.provider.calls, [])
 
+    def save_week_with_due_recurring(self):
+        self.save_week()
+        self.provider.catalog["Recurring fixture"] = observation(
+            "Recurring fixture", [product("9001", "Recurring fixture", 500, "g", [option(100)])])
+        self.app.handle({"operation": "recurring", "action": "add", "item": {
+            "product_id": "9001", "product_name": "Recurring fixture", "quantity": 1,
+            "schedule": {"every": 1, "unit": "weeks", "anchor": "2026-W37"}}})
+
+    def retry_recipe_only_after_price_refusal(self, reviewed, key):
+        """Refuse one reviewed recipe-only apply for a real change, then retry its fresh review."""
+        self.assertFalse(reviewed["include_recurring"])
+        self.provider.entry("salmon")["products"][0]["purchase_options"][0].update(
+            merchandise_ore=200, total_payable_ore=200)
+        refused = self.agent_products(**reviewed[key], cart_change_requested=True)
+        self.assert_agent_wire(refused)
+        self.assertFalse(refused["applied"], refused)
+        self.assertIn("price facts changed", refused["reason"])
+        self.assertEqual(self.provider.quantities, {})
+        fresh = self.agent_products("get", product_plan_ref=refused["fresh_product_plan"]["product_plan_ref"])
+        self.assertFalse(fresh["include_recurring"])
+        retried = self.agent_products(**fresh[key], cart_change_requested=True)
+        self.assert_agent_wire(retried)
+        self.assertNotIn("9001", self.provider.quantities)
+        return retried
+
+    def test_agent_recipe_only_partial_retry_keeps_recurring_scope(self):
+        self.save_week_with_due_recurring()
+        first = self.agent_products(menu_ref=self.app._cart_menu_ref(self.menu), include_recurring=False)
+        row = next(row for row in self.read_product_pages(first) if row["item"] == "salmon")
+        salmon_ref = self.provider.entry("salmon")["products"][0]["product_ref"]
+        reviewed = self.agent_products(product_plan_ref=first["product_plan_ref"], candidate_approvals=[{
+            "requirement_id": row["requirement_id"], "candidate_refs": [salmon_ref]}])
+        retried = self.retry_recipe_only_after_price_refusal(reviewed, "partial_apply_arguments")
+        self.assertEqual(retried["status"], "partial_applied", retried)
+        self.assertEqual(set(self.provider.quantities), {salmon_ref})
+
+    def test_agent_recipe_only_full_retry_keeps_recurring_scope(self):
+        self.save_week_with_due_recurring()
+        initial = self.prepare(include_recurring=False)
+        self.prepare(include_recurring=False, candidate_approvals=self.approvals(initial))
+        reviewed = self.agent_products("get", menu_ref=self.app._cart_menu_ref(self.menu))
+        retried = self.retry_recipe_only_after_price_refusal(reviewed, "apply_arguments")
+        self.assertTrue(retried["applied"], retried)
+        self.assertEqual(len(self.provider.quantities), 37)
+
     def test_agent_short_partial_apply_and_uncertain_full_write_keep_outcomes(self):
         self.save_week()
         first = self.agent_products(menu_ref=self.app._cart_menu_ref(self.menu))

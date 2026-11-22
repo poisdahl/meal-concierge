@@ -3462,7 +3462,10 @@ class PlanningOperations:
                 arguments = {"planner_selection_ref": {key: handoff.get(key) for key in (
                     "planner_version", "input_digest", "selection_digest")}}
             menu_ref = result.get("menu_ref")
-            common = {**arguments, "candidate_approvals": self._plan_approvals(fresh),
+            # A retry keeps the reviewed recurring scope; defaulting it would
+            # add due recurring goods to a recipe-only plan and change its digest.
+            common = {**arguments, "include_recurring": binding.get("include_recurring", True),
+                      "candidate_approvals": self._plan_approvals(fresh),
                       "ingredient_decisions": fresh.get("ingredient_decisions"),
                       "budget_ore": fresh.get("budget_ore"), "price_mode": fresh.get("price_mode", "exact")}
             try:
