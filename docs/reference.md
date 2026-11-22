@@ -2121,7 +2121,8 @@ Review suggestions identify exact available candidates with observed covering
 packages. The household agent reviews culinary suitability and each returned
 approval. Unapproved suggestions leave the plan incomplete. Continuation work
 retains provider, query, page, menu, ingredient and household context with a
-five-minute review window. Apply performs a fresh validation cycle and binds its
+five-minute review window (30 minutes on MENY, whose one-page-per-product reads
+can outlast five minutes for a whole menu). Apply performs a fresh validation cycle and binds its
 prewrite checks to current menu, product, profile and cart evidence. Oda batches
 up to eight bounded product searches and retries failing queries individually.
 For public dietary details, an entry with a strong entity tag can reuse its

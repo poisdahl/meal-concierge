@@ -48,6 +48,7 @@ class SlowMeny:
         self.template = next(item for item in observation["products"] if item["name"] == "Lettmelk 0,5%")
         self.calls = []
         self.failing_query = None
+        self.seconds_per_read = SECONDS_PER_PRODUCT_READ
         self.cart = {"items": [], "count": 0, "subtotal": 0.0, "total": 0.0, "delivery": None}
 
     def product_for(self, query):
@@ -68,7 +69,7 @@ class SlowMeny:
     def call(self, tool_name, arguments, **_kwargs):
         self.calls.append((tool_name, deepcopy(arguments)))
         if tool_name == "product_search":
-            self.clock.now += SECONDS_PER_PRODUCT_READ
+            self.clock.now += self.seconds_per_read
             query = arguments["queries"][0]
             if query == self.failing_query:
                 raise MenyBrowserError("MENY search page failed", failure_class="adapter_rejected",
@@ -231,6 +232,39 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
         third = app.handle({"operation": "products", **second["continue_arguments"]})
         self.assertTrue(third.get("partial_applied"), third)
         self.assertEqual(provider.cart["count"], 12)
+
+
+class MenyPrepareWindowTests(unittest.TestCase):
+    def test_a_menu_whose_reads_outlast_five_minutes_still_finishes_preparing(self):
+        from datetime import datetime, timedelta, timezone
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        clock = FakeClock()
+        for module in (planning_operations, product_planner, service):
+            patcher = mock.patch.object(module, "time", clock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        store = StateStore(Path(temp.name), {"instance": "test", "household": "Test", "provider": "meny",
+                                             "profile_overrides": {}})
+        menu = {"menu_id": "menu_window", "revision": 1, "digest": "d" * 64, "phase": "draft",
+                "dishes": [{"shopping_requirements": [
+                    {"item": f"Lettmelk {number}", "quantity": 1, "unit": "l", "scalable": True}
+                    for number in range(1, 31)]}], "salads": []}
+        with store.locked() as state:
+            state["menu"] = deepcopy(menu)
+        provider = SlowMeny(clock)
+        provider.seconds_per_read = 20  # a MENY search plus its product details
+        app = Application(store, provider, mock.Mock())
+        start = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        app._now = lambda: start + timedelta(seconds=clock.now - 1000)
+        result = app.handle({"operation": "products", "action": "prepare", "menu_ref": app._cart_menu_ref(menu)})
+        calls = 1
+        while result.get("continue_arguments"):
+            self.assertLess(calls, 8, "preparation restarted before its last read")
+            clock.now += 60  # the agent's own time between calls
+            result = app.handle({"operation": "products", **result["continue_arguments"]})
+            calls += 1
+        self.assertEqual(provider.reads(), 30)
 
 
 if __name__ == "__main__":

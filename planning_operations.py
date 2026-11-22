@@ -3603,6 +3603,13 @@ class PlanningOperations:
                 "pending_detail_count": work.get("pending_detail_count", 0),
                 "pending_cart_write": work.get("pending_cart_write", 0)}
 
+    def _product_review_window_seconds(self):
+        # A read-only review cycle restarts when it is older than this. MENY reads
+        # one product page at a time (about 20 s each with details), so a menu's
+        # reads can outlast five minutes; a cycle that restarted before its last
+        # read would never finish. Apply still validates its own cycle.
+        return 1800 if self.provider == "meny" else 300
+
     # MENY changes one unit per product page. Starting a menu cart write with
     # less time than this risks a deadline mid-batch; the completed reads are
     # kept and the next call writes with a full budget instead.
@@ -4264,7 +4271,7 @@ class PlanningOperations:
                                 if continuation_record is not None and mode not in {"reset", "refresh_stock"} else {})
             observed_now = self._now()
             observed_start = observation_work.get("started_at")
-            if observed_start is None or not 0 <= (observed_now - datetime.fromisoformat(observed_start)).total_seconds() <= 300:
+            if observed_start is None or not 0 <= (observed_now - datetime.fromisoformat(observed_start)).total_seconds() <= self._product_review_window_seconds():
                 observation_work = {"started_at": observed_now.isoformat()}
             plan = self._prepare_products(
                 include_recurring=include_recurring,
