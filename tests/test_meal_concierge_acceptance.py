@@ -608,11 +608,12 @@ class GroceryTopupTests(unittest.TestCase):
                     app.handle(accept)
                 with store.locked() as state:
                     state.pop(field)
-        for field, value in [("managed_menu", {"revision": 1}), ("native_cart_binding", {"ref": "bound"}),
-                             ("order_change", {"order_id": "123"})]:
-            with self.subTest(journal_field=field):
+        # A managed batch with a proven ending keeps its own readback path.
+        for fields in [{"managed_menu": {"revision": 1}, "stopped_before_next_click": True},
+                       {"native_cart_binding": {"ref": "bound"}}, {"order_change": {"order_id": "123"}}]:
+            with self.subTest(journal_fields=sorted(fields)):
                 with store.locked() as state:
-                    state["pending_cart_change"] = {**journal, field: value}
+                    state["pending_cart_change"] = {**journal, **fields}
                 with self.assertRaises(HouseholdError):
                     app.handle(accept)
         with store.locked() as state:

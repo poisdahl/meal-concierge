@@ -2652,14 +2652,19 @@ class PlanningOperations:
                              "size": MAX_CANDIDATES_PER_REQUIREMENT})
             requested[key] = query
             rows.append((requirement, hints, key))
-        # A failing query cannot starve the still-unseen tail on later calls.
-        missing = sorted((key for key in requested if key not in cache), key=lambda key: attempted.index(key) if key in attempted else -1)
+        # A failing query cannot starve the still-unseen tail on later calls. A
+        # query that already failed twice in this cycle is settled as failed and
+        # not retried, so the remaining reads can run and the cycle can finish.
+        settled = {key for key, count in (work.get("search_failure_counts") or {}).items() if count >= 2} if work is not None else set()
+        missing = sorted((key for key in requested if key not in cache and key not in settled),
+                         key=lambda key: attempted.index(key) if key in attempted else -1)
         # A continuation may spend its whole budget on previously unseen queries.
         # Keep the last failed observation until that same search succeeds/retries.
         failed = work.setdefault("search_failures", {}) if work is not None else {}
         batch_reader = getattr(self.provider_client, "product_search_batch", None)
         native_batch = callable(batch_reader) and self.provider == "oda"
         singles = work.setdefault("single_searches", []) if work is not None else []
+        first_read_in_call = True
         while missing:
             remaining = MAX_REQUIREMENTS - work.get("reads", 0) if work is not None else len(missing)
             if remaining <= 0 or deadline is not None and time.monotonic() >= deadline:
@@ -2671,6 +2676,10 @@ class PlanningOperations:
                     break
                 keys.append(key)
             del missing[:len(keys)]
+            # Only a call's first read counts toward the repeated-failure stop;
+            # later failures in one call can be collateral, such as a host's
+            # per-call read allowance or an already failed browser.
+            counts_failure, first_read_in_call = first_read_in_call, False
             queries = [requested[key] for key in keys]
             if work is not None:
                 work["reads"] = work.get("reads", 0) + len(keys)
@@ -2705,6 +2714,8 @@ class PlanningOperations:
                         failed[key] = {"unavailable_reason": "provider_search_unavailable_or_scope_changed"}
                     else:
                         failed.pop(key, None)
+                        if work is not None:
+                            work.get("search_failure_counts", {}).pop(key, None)
             except HouseholdError as exc:
                 if native_batch and keys[0] not in singles:
                     singles.extend(key for key in keys if key not in singles)
@@ -2713,6 +2724,10 @@ class PlanningOperations:
                     failed[key] = {"unavailable_reason": "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_unavailable_or_scope_changed"}
                     if isinstance(exc, MenyBrowserError) and exc.provider_failure:
                         failed[key]["provider_failure"] = exc.provider_failure
+                    if (work is not None and counts_failure
+                            and failed[key]["unavailable_reason"] != "provider_search_deadline"):
+                        counts = work.setdefault("search_failure_counts", {})
+                        counts[key] = counts.get(key, 0) + 1
         observations = {}
         for requirement, hints, key in rows:
             if key not in cache:
@@ -2730,7 +2745,8 @@ class PlanningOperations:
                     "status": "currently_observed" if any(p.get("product_ref") in refs for p in products) else "not_in_current_search_scope"}
             observations[requirement["requirement_id"]] = normalized
         if work is not None:
-            work["pending_search_count"] = sum(key not in cache for key in requested)
+            settled = {key for key, count in (work.get("search_failure_counts") or {}).items() if count >= 2}
+            work["pending_search_count"] = sum(key not in cache and key not in settled for key in requested)
         return observations
 
     @staticmethod
@@ -3409,7 +3425,7 @@ class PlanningOperations:
             "menu_ref", "product_plan_digest", "partial_product_plan_digest", "remaining_issue_count",
             "cart_changed", "nothing_to_buy", "nothing_to_buy_for_menu", "price_verification",
             "price_locked", "final_price_authority", "product_plan_stale", "menu_binding_stale",
-            "default_suggestion", "next",
+            "default_suggestion", "next", "read_failures",
             "continue_arguments", "validation_progress", "product_plan_ref",
         )
         compact = {key: deepcopy(result[key]) for key in fields if key in result}
@@ -3589,7 +3605,62 @@ class PlanningOperations:
     @staticmethod
     def _product_work_progress(work):
         return {"pending_search_count": work.get("pending_search_count", 0),
-                "pending_detail_count": work.get("pending_detail_count", 0)}
+                "pending_detail_count": work.get("pending_detail_count", 0),
+                "pending_cart_write": work.get("pending_cart_write", 0)}
+
+    def _product_review_window_seconds(self):
+        # A read-only review cycle restarts when it is older than this. MENY reads
+        # one product page at a time (about 20 s each with details), so a menu's
+        # reads can outlast five minutes; a cycle that restarted before its last
+        # read would never finish. Apply still validates its own cycle.
+        return 1800 if self.provider == "meny" else 300
+
+    # MENY changes one unit per product page. Starting a menu cart write with
+    # less time than this risks a deadline mid-batch; the completed reads are
+    # kept and the next call writes with a full budget instead.
+    meny_cart_write_reserve_seconds = 150
+
+    def _reserve_cart_write_time(self, work, deadline, call_budget):
+        # Defer at most once per cycle, and never by more than a fresh call of
+        # the same budget can provide, so a short budget cannot loop forever.
+        reserve = min(self.meny_cart_write_reserve_seconds, call_budget - 30)
+        defer = (self.provider == "meny" and deadline is not None and not work.get("cart_write_deferred")
+                 and not self._product_work_pending({**work, "pending_cart_write": 0})
+                 and deadline - time.monotonic() < reserve)
+        work["pending_cart_write"] = int(defer)
+        if defer:
+            work["cart_write_deferred"] = True
+
+    @staticmethod
+    def _repeated_read_failures(work):
+        # A selected product that failed twice in one cycle for a reason other
+        # than time ends it; it is reported instead of retried indefinitely.
+        searches = work.get("searches") or {}
+        failures = work.get("search_failures") or {}
+        repeated = []
+        for key, attempts in sorted((work.get("search_failure_counts") or {}).items()):
+            if attempts >= 2 and key not in searches:
+                try:
+                    query = json.loads(key).get("query")
+                except (TypeError, ValueError, AttributeError):
+                    query = None
+                repeated.append({"query": query, "attempts": attempts, **deepcopy(failures.get(key) or {})})
+        return repeated
+
+    def _store_partial_validation(self, key, work):
+        with self.store.locked() as state:
+            entries = dict((state.get("partial_product_validation") or {}).get("entries") or {})
+            if work is None:
+                entries.pop(key, None)
+            else:
+                entries[key] = deepcopy(work)
+                # Bound the slots kept for alternating partial selections.
+                while len(entries) > 4:
+                    entries.pop(min(entries, key=lambda name: str(entries[name].get("started_at", ""))))
+            if entries:
+                state["partial_product_validation"] = {"entries": entries}
+            else:
+                state.pop("partial_product_validation", None)
 
     @classmethod
     def _product_work_pending(cls, work):
@@ -3648,7 +3719,8 @@ class PlanningOperations:
             if work.get("observation_context") != context:
                 # Before the context key existed, old work could retain detail
                 # or price facts from a different household profile or scope.
-                for key in ("searches", "recurring_observations", "attempted_searches", "search_failures", "single_searches"):
+                for key in ("searches", "recurring_observations", "attempted_searches", "search_failures", "single_searches",
+                            "search_failure_counts", "cart_write_deferred"):
                     work.pop(key, None)
                 if "restarted" in work:
                     # During write validation, changed context starts a new
@@ -4064,6 +4136,7 @@ class PlanningOperations:
         deadline = time.monotonic() + timeout
         if request.get("_deadline") is not None:
             deadline = min(deadline, request["_deadline"])
+        call_budget = max(0.0, deadline - time.monotonic())
         request = {**request, "_deadline": deadline}
         if action == "lowest_cost":
             return self._compare_menu_costs(request)
@@ -4084,6 +4157,7 @@ class PlanningOperations:
             return self._products_operation({
                 **deepcopy(dict(arguments)), "cart_change_requested": request.get("cart_change_requested"),
                 **restore_arguments, "_deadline": deadline,
+                **({"_partial_plan_ref": request["product_plan_ref"]} if partial else {}),
             }, validation_record=record if not partial else None,
                validation_ref=request["product_plan_ref"] if not partial else None)
         if action == "prepare":
@@ -4202,7 +4276,7 @@ class PlanningOperations:
                                 if continuation_record is not None and mode not in {"reset", "refresh_stock"} else {})
             observed_now = self._now()
             observed_start = observation_work.get("started_at")
-            if observed_start is None or not 0 <= (observed_now - datetime.fromisoformat(observed_start)).total_seconds() <= 300:
+            if observed_start is None or not 0 <= (observed_now - datetime.fromisoformat(observed_start)).total_seconds() <= self._product_review_window_seconds():
                 observation_work = {"started_at": observed_now.isoformat()}
             plan = self._prepare_products(
                 include_recurring=include_recurring,
@@ -4366,6 +4440,34 @@ class PlanningOperations:
                     if isinstance(approval, Mapping)
                     and isinstance(approval.get("requirement_id"), str)
                 })
+                # Like a complete plan, the combined selection is read once per
+                # validation cycle, resumably across calls. A slow store (MENY
+                # reads one product page at a time) cannot exhaust one call.
+                validation_key = mp.digest({
+                    "menu_ref": expected_menu_ref, "partial_product_plan_digest": expected_digest,
+                    "approvals": [combined_approvals[key] for key in sorted(combined_approvals)],
+                })
+                context = self._product_current_context(self.store.read())
+                stored_entries = (self.store.read().get("partial_product_validation") or {}).get("entries")
+                stored_work = stored_entries.get(validation_key) if isinstance(stored_entries, dict) else None
+                work = deepcopy(stored_work) if isinstance(stored_work, dict) else {}
+                restarted = False
+                if work:
+                    try:
+                        age = (self._now() - datetime.fromisoformat(work["started_at"])).total_seconds()
+                    except (KeyError, TypeError, ValueError):
+                        age = -1
+                    if not 0 <= age <= 3600:
+                        work, restarted = {}, True
+                work.setdefault("started_at", self._now().isoformat())
+                work["restarted"] = restarted
+                plan_ref = request.get("_partial_plan_ref")
+                continuation = ({
+                    "action": "apply", "product_plan_ref": plan_ref, "partial_apply": True,
+                    "partial_product_plan_digest": expected_digest, "cart_change_requested": True,
+                    **restore_arguments,
+                } if plan_ref else {key: deepcopy(value) for key, value in request.items()
+                                    if not key.startswith("_") and key not in {"operation", "contract", "response_view"}})
                 fresh = self._prepare_products(
                     include_recurring=include_recurring,
                     binding=fresh_binding,
@@ -4376,7 +4478,35 @@ class PlanningOperations:
                     price_mode=request.get("price_mode") or "exact",
                     observe_selected_only=True,
                     deadline=deadline,
+                    work=work,
                 )
+                if not 0 <= (self._now() - datetime.fromisoformat(work["started_at"])).total_seconds() <= 3600:
+                    # Reads that straddled the cycle limit cannot authorize a write.
+                    restarted = True
+                    work = {"started_at": self._now().isoformat(), "restarted": True,
+                            "pending_search_count": max(1, len(combined_approvals)), "pending_detail_count": 0}
+                repeated_failures = self._repeated_read_failures(work)
+                if repeated_failures:
+                    self._store_partial_validation(validation_key, None)
+                    return {"applied": False, "cart_changed": False, "status": "needs_input",
+                            "menu_ref": deepcopy(expected_menu_ref), "partial_product_plan_digest": expected_digest,
+                            "reason": "selected product reads keep failing", "read_failures": repeated_failures,
+                            "fresh_product_plan": fresh,
+                            "next": "No cart write occurred. Report the failing product reads and check the store connection status, since a lost store login causes this; then retry the same apply or prepare again."}
+                self._reserve_cart_write_time(work, deadline, call_budget)
+                if self._product_work_pending(work):
+                    with self.store.locked() as state:
+                        if (self._cart_menu_ref(state.get("menu")) != expected_menu_ref
+                                or self._product_current_context(state) != context):
+                            raise HouseholdError("product validation context changed while reading; prepare again")
+                    self._store_partial_validation(validation_key, work)
+                    return {"applied": False, "cart_changed": False, "status": "validating",
+                            "menu_ref": deepcopy(expected_menu_ref), "partial_product_plan_digest": expected_digest,
+                            "validation_progress": {**self._product_work_progress(work), "restarted": restarted},
+                            "continue_arguments": continuation,
+                            "next": "Selected-product reads or cart-write time remain. Continue these exact arguments; no cart write has occurred."}
+                # A completed cycle is consumed before drift review or cart dispatch.
+                self._store_partial_validation(validation_key, None)
                 if existing_cart_plan.get("partial_product_plan_digest") and fresh.get("status") == "prepared":
                     fresh = self._with_partial_apply_authority(fresh)
                 if fresh.get("partial_product_plan_digest") != expected_digest:
@@ -4478,35 +4608,23 @@ class PlanningOperations:
                         requirements.append(deepcopy(product))
 
                 def final_partial_prewrite_check() -> dict[str, Any]:
-                    try:
-                        final = self._prepare_products(
-                            include_recurring=include_recurring,
-                            binding=fresh_binding,
-                            menu=menu,
-                            candidate_approvals=list(combined_approvals.values()),
-                            ingredient_decisions=fresh.get("ingredient_decisions"),
-                            budget_ore=fresh.get("budget_ore"),
-                            price_mode=fresh.get("price_mode") or "exact",
-                            observe_selected_only=True,
-                            deadline=deadline,
-                        )
-                    except HouseholdError:
-                        return {"ok": False, "reason": "selected product facts became unavailable immediately before cart sync", "fresh_product_plan": None}
-                    final_selected_ids = {
-                        row.get("requirement_id") for row in final.get("requirements", [])
-                        if row.get("status") == "selected"
-                    }
-                    return {
-                        "ok": final.get("partial_product_plan_digest") == combined_digest
-                        and final_selected_ids == set(combined_approvals),
-                        "reason": "selected product facts changed immediately before cart sync",
-                        "fresh_product_plan": final,
-                    }
+                    # As for a complete plan, this cycle's selected-product reads
+                    # authorize the write; reading every product again here would
+                    # spend the write's time budget on a slow store.
+                    current = self.store.read()
+                    if not 0 <= (self._now() - datetime.fromisoformat(work["started_at"])).total_seconds() <= 3600:
+                        return {"ok": False, "reason": "selected-product validation expired before cart sync",
+                                "next": "Repeat the same reviewed partial apply to refresh validation; no cart write occurred.",
+                                "continue_arguments": deepcopy(continuation)}
+                    return {"ok": self._cart_menu_ref(current.get("menu")) == expected_menu_ref
+                            and self._product_current_context(current) == context,
+                            "reason": "menu or dietary context changed before cart sync"}
 
                 cart_result = self._cart_sync({
                     "requirements": requirements,
                     "_expected_menu_ref": expected_menu_ref,
                     "_before_cart_write": final_partial_prewrite_check,
+                    "_expected_product_context": context,
                     "_include_recurring": False, "_reviewed_product_digest": expected_digest,
                 }, deadline)
                 if cart_result.get("synced") is not True:
@@ -4614,6 +4732,19 @@ class PlanningOperations:
                 restarted = True
                 work = {"started_at": self._now().isoformat(), "restarted": True,
                         "pending_search_count": max(1, len(fresh["requirements"])), "pending_detail_count": 0}
+            repeated_failures = self._repeated_read_failures(work)
+            if repeated_failures:
+                if validation_ref is not None:
+                    with self.store.locked() as state:
+                        records = state["menu_planning"]["prepared"]
+                        if canonical(records.get(validation_ref)) == canonical(validation_record):
+                            records[validation_ref].pop("validation_work", None)
+                return {"applied": False, "cart_changed": False, "status": "needs_input",
+                        "menu_ref": deepcopy(expected_menu_ref), "product_plan_digest": supplied.get("product_plan_digest"),
+                        "reason": "selected product reads keep failing", "read_failures": repeated_failures,
+                        "fresh_product_plan": fresh,
+                        "next": "No cart write occurred. Report the failing product reads and check the store connection status, since a lost store login causes this; then retry the same apply or prepare again."}
+            self._reserve_cart_write_time(work, deadline, call_budget)
             if self._product_work_pending(work):
                 work["restore_arguments"] = deepcopy(restore_arguments)
                 if validation_ref is None:
@@ -4641,7 +4772,7 @@ class PlanningOperations:
                     "validation_progress": {**self._product_work_progress(work), "restarted": restarted},
                     "continue_arguments": {"action": "apply", "product_plan_ref": validation_ref,
                         "product_plan_digest": supplied["product_plan_digest"], "cart_change_requested": True, **restore_arguments},
-                    "next": "Selected-product reads remain. Continue these exact arguments; no cart write has occurred."}
+                    "next": "Selected-product reads or cart-write time remain. Continue these exact arguments; no cart write has occurred."}
             # A completed cycle is consumed before either drift review or cart
             # dispatch. Replaying a completed apply starts a fresh read cycle.
             if validation_ref is not None:
@@ -5206,8 +5337,13 @@ class PlanningOperations:
 
     def _ordinary_cart_observation_allowed(self, state, pending, *, owner_choice=False):
         cancellation = state.get("pending_cancellation")
+        # A managed menu batch with a proven ending keeps its own readback path.
+        # Without that evidence MENY cannot settle it, so the household may
+        # accept the observed cart instead of staying blocked.
         meny_choice = (owner_choice and self.provider == "meny" and self.allow_observed_cart_recovery
-                       and pending and not pending.get("managed_menu") and not cancellation
+                       and pending and not cancellation
+                       and not (pending.get("managed_menu")
+                                and (pending.get("dispatch_finished") or pending.get("stopped_before_next_click")))
                        and not callable(getattr(self.provider_client, "validate_cart_reconciliation", None)))
         if (not pending or not (self._can_reread_ordinary_cart() or meny_choice) or pending.get("provider") != self.provider
                 or not isinstance(pending.get("before"), dict) or not isinstance(pending.get("expected"), dict)
@@ -5294,7 +5430,11 @@ class PlanningOperations:
         if not pending:
             receipt = state.get("cart_change_receipts", {}).get(token) or {}
             if receipt.get("status") == "owner_accepted_cart" and receipt.get("observed_digest") == digest:
-                return {"reconciled": True, "status": "previously_accepted", "operation_id": token}
+                original = receipt.get("original_operation") or {}
+                return {"reconciled": True, "status": "previously_accepted", "operation_id": token,
+                        **({"next": "This interrupted menu cart fill was already accepted. Read the cart and continue "
+                                    "the menu's cart review or product apply; never resend the earlier change."}
+                           if self.provider == "meny" and original.get("managed_menu") else {})}
         if (not self._ordinary_cart_observation_allowed(state, pending, owner_choice=True)
                 or self._cart_operation_ref(pending) != token):
             raise HouseholdError("read the current pending grocery cart before accepting it")
@@ -5303,26 +5443,50 @@ class PlanningOperations:
         live, names = self._owner_cart_lines(cart)
         if digest != self._cart_digest(live):
             raise HouseholdError("cart changed since the review; show the current cart before accepting it")
+        meny_menu_fill = self.provider == "meny" and bool(pending.get("managed_menu"))
         with self.store.locked() as state:
             self._archive_observed_cart_target(state, pending, live, owner_accepted=True)
             plan = state.get("cart_plan")
+            menu_current = self._cart_menu_ref(state.get("menu")) == pending.get("managed_menu")
             accepted_meny_clear = self.provider == "meny" and pending.get("clear_requested")
+            current_plan = (not accepted_meny_clear and isinstance(plan, dict) and plan.get("provider") == self.provider
+                            and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
+                            and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu")))
+            if current_plan:
+                self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
+            if (meny_menu_fill and pending.get("acknowledged") is not None and isinstance(plan, dict)
+                    and plan.get("provider") == self.provider and plan.get("menu_ref") == pending["managed_menu"]):
+                # Confirmed batches stay menu-owned, also when the menu changed since.
+                self._retain_acknowledged_cart_additions(plan, pending["before"], pending["acknowledged"], live)
             if accepted_meny_clear:
                 self._finish_cart_clear(state, pending, live, names, owner_accepted=True)
             elif pending.get("clear_requested"):
                 state.pop("product_plan_completion", None)
                 self._clear_persisted_product_plan(plan)
-            if (not accepted_meny_clear and isinstance(plan, dict) and plan.get("provider") == self.provider
-                    and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
-                    and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu"))):
-                self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
-                self._set_cart_needs_input(plan, live, names)
-                plan.update(status="active", approved_cart_digest=digest, pending_cart_digest=None)
-                plan.pop("ownership_review", None)
+            if current_plan:
+                if meny_menu_fill:
+                    # Accepting the observed cart settles the journal, not the
+                    # menu: the lost batch is only adoptable, and the household
+                    # reviews what is missing.
+                    plan.pop("ownership_review", None)
+                    self._offer_cart_ownership_review(plan, pending.get("acknowledged") or pending["before"], live,
+                                                      pending.get("batch") or pending["operations"])
+                    self._set_cart_needs_input(plan, live, names)
+                else:
+                    self._set_cart_needs_input(plan, live, names)
+                    plan.update(status="active", approved_cart_digest=digest, pending_cart_digest=None)
+                    plan.pop("ownership_review", None)
         result = {"reconciled": True, "cart_write_pending": False, "status": "owner_accepted_cart",
                   "operation_id": token, "cart_digest": digest, "cart": cart}
         if accepted_meny_clear and state.get("managed_product_apply_fence"):
             result["next"] = "Read the cart and complete a fresh saved-menu product review before making further changes."
+        elif meny_menu_fill and menu_current:
+            result["next"] = ("The interrupted menu cart fill did not finish. Show the household this cart and its "
+                              "missing menu products; with their choice, use cart reconcile restore_missing or keep_current "
+                              "with this cart_digest. Never resend the earlier change.")
+        elif meny_menu_fill:
+            result["next"] = ("The menu changed after the interrupted cart fill. Prepare and apply the current menu's "
+                              "products before checkout; goods already in the cart count toward it. Never resend the earlier change.")
         return result
 
     def _observed_managed_target(self, mutation_error, cart, expected, menu_ref, operations):
@@ -6156,7 +6320,9 @@ class PlanningOperations:
         stopped_prefix = pending.get("stopped_before_next_click") is True
         finished = pending.get("dispatch_finished") is True
         if pending.get("managed_menu"):
-            if not finished and not (stopped_prefix and quantities == pending["expected"]):
+            # A proven stop names every click it made, so a different cart now is
+            # household drift for the cart review rather than an uncertain dispatch.
+            if not finished and not stopped_prefix:
                 raise HouseholdError("cart dispatch remains uncertain; the original batch needs terminal evidence before another write")
             with self.store.locked() as state:
                 plan = state.get("cart_plan") or {}

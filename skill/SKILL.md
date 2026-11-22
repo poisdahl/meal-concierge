@@ -579,9 +579,9 @@ shell commands to recover hidden output.
 Apply the returned `apply_arguments` unchanged, adding `cart_change_requested=true`
 only for an authorized cart update. The short arguments refer to the saved
 review; do not copy product observations, candidate lists or menu context into
-apply. Full apply is the normal path. If it returns `status="validating"`, follow
-its `continue_arguments`: selected-product reads are still pending and no cart
-write has occurred. A long pause can restart those reads without losing choices.
+apply. Full apply is the normal path. If a full or partial apply returns
+`status="validating"`, follow its `continue_arguments`: selected-product reads or
+MENY cart-write time are still pending and no cart write has occurred. A long pause can restart those reads without losing choices.
 Do not substitute partial cart writes for this continuation. A partial
 apply leaves checkout incomplete; finish the same menu. If apply reports drift,
 read/reconcile it and prepare again. Never bypass an incomplete menu apply with
@@ -615,7 +615,9 @@ from that cart read, then continue the requested workflow. For an uncertain ordi
 MENY cart, show the quantities returned by reconcile_change or get, including an
 empty cart. If the household chooses to use them, call accept_current with those
 references. The earlier change may still arrive. Read the cart before planning
-another change.
+another change. An interrupted MENY menu fill can be accepted the same way; then
+show the missing menu products and, as the household chooses, use cart reconcile
+`restore_missing` or `keep_current` with the returned cart digest.
 
 Show material substitutions, exact variants, package sizes and counts. Separate
 merchandise estimates from final totals, pant and delivery fees. Unknown prices

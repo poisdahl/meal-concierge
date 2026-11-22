@@ -548,7 +548,18 @@ batched and dietary detail reads are deduplicated by SKU. Pending reads return
 ref survives restart and lost replies. A validation cycle older than one hour,
 missing its service timestamp or dated in the future restarts only its reads,
 preserving choices and review. The existing managed apply fence prevents checkout
-of an older cart while validation is pending. Current menu/profile/ownership are
+of an older cart while validation is pending. A selected product whose read
+fails twice in one cycle for a reason other than time ends the cycle with
+`status=needs_input`, `reason="selected product reads keep failing"` and
+`read_failures`, including any `provider_failure` such as a lost store login;
+no cart write occurs. MENY changes one unit per product page, so when completed
+reads leave less than its cart-write reserve, apply returns `status=validating`
+with `validation_progress.pending_cart_write=1` and writes on the continuation
+with a full time budget. It defers at most once per cycle and never by more
+than a fresh call's budget provides. MENY does not click a unit when less than
+about 25 seconds remain; the batch then stops with a proven ending. A slower
+readback after a click still ends uncertain and can be accepted as below.
+Current menu/profile/ownership are
 checked again near cart sync, including no-op sync. Drift stops before a cart
 write; complete validated whole-package quantities pass to the
 existing guarded, restart-safe cart sync. A verified exact product-line amount
@@ -2082,8 +2093,12 @@ already in the retailer cart, delivery, fees and discounts enter the final
 retailer checkout review.
 
 An incomplete preparation with reviewed selected lines may return digest-bound
-`partial_apply_arguments`. Partial apply rereads every selection accumulated by
-this and earlier partial applies before syncing them, excludes recurring goods,
+`partial_apply_arguments`. Partial apply validates every selection accumulated by
+this and earlier partial applies in a resumable selected-product cycle, like a
+complete apply: pending reads return `status=validating` with `continue_arguments`
+and no cart write, and that cycle's reads authorize the sync. Its prewrite check
+binds the cycle age, menu and household context without reading every product
+again. It excludes recurring goods,
 and is idempotent across repeated or incremental partial applications. It never records full shopping completion;
 checkout remains blocked until a later complete apply reconciles the whole menu.
 
@@ -2106,7 +2121,11 @@ Review suggestions identify exact available candidates with observed covering
 packages. The household agent reviews culinary suitability and each returned
 approval. Unapproved suggestions leave the plan incomplete. Continuation work
 retains provider, query, page, menu, ingredient and household context with a
-five-minute review window. Apply performs a fresh validation cycle and binds its
+five-minute review window (30 minutes on MENY, whose one-page-per-product reads
+can outlast five minutes for a whole menu). A search that fails twice in one
+cycle for a reason other than time is settled as failed: its requirement stays
+unresolved and the remaining reads finish, instead of being retried forever.
+Apply performs a fresh validation cycle and binds its
 prewrite checks to current menu, product, profile and cart evidence. Oda batches
 up to eight bounded product searches and retries failing queries individually.
 For public dietary details, an entry with a strong entity tag can reuse its
@@ -2138,8 +2157,19 @@ For an ordinary MENY cart change with an uncertain outcome, reconcile_change or
 get can offer the observed cart for acceptance, including an explicitly empty
 cart. On the household's choice, accept_current rereads the signed-in ordinary
 cart and archives the original journal with its dispatch outcome. A later
-shopping plan starts from a fresh cart read. MENY order edits, managed product
-operations and payments retain their own reconciliation paths.
+shopping plan starts from a fresh cart read. The same choice applies to a
+managed MENY menu batch whose outcome is unknown. Accepting it archives the
+journal but does not complete the menu: units from earlier confirmed batches
+stay menu-owned, the lost batch's visible gain appears in
+`ownership_review.maximum_adoptable`, and the menu plan asks for a review of the
+observed cart. Continue with `cart reconcile` and its digest, using
+`restore_missing` or `keep_current` as the household chooses. If the menu was
+saved again meanwhile, the confirmed units stay owned by the earlier plan and
+the next step is a product prepare/apply for the current menu. A managed MENY
+batch with a proven ending keeps its readback path instead: a finished batch or
+proven stop settles from a fresh read, and a cart that differs from its
+acknowledged clicks goes to the cart review as household drift. MENY order
+edits and payments retain their own reconciliation paths.
 
 An unsubmitted checkout review can be discarded with `checkout discard_review`
 and its exact confirmation ID. Discarding an unsubmitted recovery review restores
