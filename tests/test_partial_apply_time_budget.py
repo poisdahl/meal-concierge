@@ -12,6 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import StateStore  # noqa: E402
+from meny import MenyBrowserError  # noqa: E402
 from product_observations import normalize_meny_product_search  # noqa: E402
 from product_planner import menu_requirements  # noqa: E402
 from service import Application  # noqa: E402
@@ -46,6 +47,7 @@ class SlowMeny:
         observation = normalize_meny_product_search(fixture["response"], observed_at=OBSERVED_AT)
         self.template = next(item for item in observation["products"] if item["name"] == "Lettmelk 0,5%")
         self.calls = []
+        self.failing_query = None
         self.cart = {"items": [], "count": 0, "subtotal": 0.0, "total": 0.0, "delivery": None}
 
     def product_for(self, query):
@@ -68,6 +70,9 @@ class SlowMeny:
         if tool_name == "product_search":
             self.clock.now += SECONDS_PER_PRODUCT_READ
             query = arguments["queries"][0]
+            if query == self.failing_query:
+                raise MenyBrowserError("MENY search page failed", failure_class="adapter_rejected",
+                                       source="adapter_stderr")
             return {"provider": "meny", "query": query, "observed_at": OBSERVED_AT,
                     "scope": {"kind": "provider_search", "page": 1, "requested_size": 5, "returned": 1,
                               "semantics": "bounded_relevance_ranked"},
@@ -95,7 +100,7 @@ class SlowMeny:
 
 
 class PartialApplyTimeBudgetTests(unittest.TestCase):
-    def household(self, approved):
+    def household(self, approved, unresolved=True):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         clock = FakeClock()
@@ -108,7 +113,7 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
         menu = {"menu_id": "menu_slow_meny", "revision": 1, "digest": "c" * 64, "phase": "draft",
                 "dishes": [{"shopping_requirements": [
                     {"item": f"Lettmelk {number}", "quantity": 1, "unit": "l", "scalable": True}
-                    for number in range(1, approved + 2)]}],
+                    for number in range(1, approved + 1 + int(unresolved))]}],
                 "salads": []}
         with store.locked() as state:
             state["menu"] = deepcopy(menu)
@@ -125,8 +130,17 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
                                "candidate_approvals": approvals})
         while prepared.get("continue_arguments"):
             prepared = app.handle({"operation": "products", **prepared["continue_arguments"]})
-        self.assertIn("partial_apply_arguments", prepared, prepared.get("product_plan", {}).get("status"))
+        if unresolved:
+            self.assertIn("partial_apply_arguments", prepared, prepared.get("product_plan", {}).get("status"))
         return store, provider, app, prepared
+
+    def finish(self, app, result, limit=6):
+        calls = 1
+        while result.get("status") == "validating":
+            self.assertLess(calls, limit, result)
+            result = app.handle({"operation": "products", **result["continue_arguments"]})
+            calls += 1
+        return result, calls
 
     def test_large_partial_fill_continues_across_calls_and_writes_once(self):
         store, provider, app, prepared = self.household(approved=26)
@@ -165,6 +179,38 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
         second = app.handle({"operation": "products", **first["continue_arguments"]})
         self.assertTrue(second.get("partial_applied"), second)
         self.assertEqual(provider.reads(), reads)
+        self.assertEqual(provider.cart["count"], 12)
+
+
+    def test_a_selected_read_that_keeps_failing_ends_the_fill_with_its_failure(self):
+        for unresolved in (True, False):
+            with self.subTest(partial=unresolved):
+                store, provider, app, prepared = self.household(approved=3, unresolved=unresolved)
+                provider.failing_query = "Lettmelk 2"
+                key = "partial_apply_arguments" if unresolved else "apply_arguments"
+                result, calls = self.finish(app, app.handle({"operation": "products", **prepared[key],
+                                                             "cart_change_requested": True}))
+                self.assertEqual(result["status"], "needs_input", result)
+                self.assertEqual(result["reason"], "selected product reads keep failing")
+                failure, = result["read_failures"]
+                self.assertEqual((failure["query"], failure["attempts"]), ("Lettmelk 2", 2))
+                self.assertEqual(failure["provider_failure"]["class"], "adapter_rejected")
+                self.assertLessEqual(calls, 2)
+                self.assertEqual(provider.writes(), 0)
+                self.assertFalse(store.read().get("partial_product_validation"))
+                # Once the store reads again, the same apply completes.
+                provider.failing_query = None
+                done, _ = self.finish(app, app.handle({"operation": "products", **prepared[key],
+                                                       "cart_change_requested": True}))
+                self.assertTrue(done.get("applied"), done)
+
+    def test_a_short_apply_budget_still_writes_without_deferring_forever(self):
+        store, provider, app, prepared = self.household(approved=12)
+        app.products_apply_budget_seconds = 120
+        result, calls = self.finish(app, app.handle({"operation": "products", **prepared["partial_apply_arguments"],
+                                                     "cart_change_requested": True}))
+        self.assertTrue(result.get("partial_applied"), result)
+        self.assertLessEqual(calls, 3)
         self.assertEqual(provider.cart["count"], 12)
 
 

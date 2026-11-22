@@ -69,6 +69,10 @@ class UncertainMenuMenyWriteTests(unittest.TestCase):
                                        "operation_id": shown["operation_id"], "cart_digest": shown["cart_digest"]})
                 self.assertEqual(accepted["status"], "owner_accepted_cart")
                 self.assertIn("never resend", accepted["next"].lower())
+                again = app.handle({"operation": "cart", "action": "accept_current",
+                                    "operation_id": shown["operation_id"], "cart_digest": shown["cart_digest"]})
+                self.assertEqual(again["status"], "previously_accepted")
+                self.assertIn("never resend", again["next"].lower())
                 state = store.read()
                 self.assertFalse(state.get("pending_cart_change"))
                 receipt = state["cart_change_receipts"][journal["operation_id"]]
@@ -114,6 +118,118 @@ class UncertainMenuMenyWriteTests(unittest.TestCase):
         with store.locked() as state:
             state["pending_cart_change"] = deepcopy(journal)
         self.assertEqual(app.handle(accept)["status"], "owner_accepted_cart")
+
+
+class MenyRecoveryEdgeTests(unittest.TestCase):
+    def app(self, provider_name="meny"):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return base.CartPlanTests.app(temp.name, provider_name)
+
+    @staticmethod
+    def observed(provider):
+        original = provider.call
+
+        def call(tool, arguments, **kwargs):
+            cart = original(tool, arguments, **kwargs)
+            if tool == "get_cart" and arguments.get("observe_order_mode"):
+                return {**cart, "ordinary_cart": True}
+            return cart
+        return original, call
+
+    def test_a_proven_stop_settles_by_readback_after_the_household_changes_the_cart(self):
+        from meny import MenyCartStoppedError
+        store, provider, _browser, app, product = self.app()
+        original, observed = self.observed(provider)
+        stage = {"stopped": False, "fail_read": False}
+
+        def call(tool, arguments, **kwargs):
+            if tool == "get_cart" and stage["fail_read"]:
+                stage["fail_read"] = False
+                raise HouseholdError("MENY operation deadline reached")
+            if tool == "manipulate_cart" and not stage["stopped"]:
+                stage["stopped"] = True
+                first = dict(arguments["operations"][0], quantity=1)
+                provider._mutate_cart({"operations": [first]})
+                stage["fail_read"] = True  # the deadline also cuts the post-stop read
+                raise MenyCartStoppedError("MENY operation deadline reached", [first])
+            return observed(tool, arguments, **kwargs)
+
+        provider.call = call
+        start = app._cart_lines(cart_summary(provider.cart))[0][product]
+        try:
+            base.CartPlanTests.sync(app, product, start + 2)
+        except HouseholdError:
+            pass
+        pending = store.read()["pending_cart_change"]
+        self.assertTrue(pending["stopped_before_next_click"])
+        self.assertFalse(pending.get("dispatch_finished"))
+        provider._mutate_cart({"operations": [{"productId": product, "quantity": 1}]})  # household edit
+        self.assertNotIn("accept_current_available", app.handle({"operation": "cart", "action": "get"}))
+        settled = app.handle({"operation": "cart", "action": "reconcile_change"})
+        self.assertTrue(settled["reconciled"], settled)
+        state = store.read()
+        self.assertFalse(state.get("pending_cart_change"))
+        self.assertEqual(state["cart_plan"]["status"], "needs_input")
+        self.assertEqual(state["cart_plan"]["added_quantities"][product], 1)
+
+    def test_acceptance_after_a_menu_change_keeps_confirmed_units_and_points_to_the_current_menu(self):
+        store, provider, _browser, app, product = self.app()
+        original, observed = self.observed(provider)
+        writes = []
+
+        def call(tool, arguments, **kwargs):
+            if tool == "manipulate_cart":
+                writes.append(arguments)
+                if len(writes) == 2:
+                    raise HouseholdError("transport response lost")
+            return observed(tool, arguments, **kwargs)
+
+        provider.call = call
+        start = app._cart_lines(cart_summary(provider.cart))[0][product]
+        uncertain = base.CartPlanTests.sync(app, product, start + 4)
+        self.assertEqual(uncertain["reason"], "cart_write_result_uncertain")
+        with store.locked() as state:
+            state["menu"] = base.CartPlanTests.menu(revision=2, digest="b" * 64)
+        shown = app.handle({"operation": "cart", "action": "get"})
+        accepted = app.handle({"operation": "cart", "action": "accept_current",
+                               "operation_id": shown["operation_id"], "cart_digest": shown["cart_digest"]})
+        self.assertIn("current menu", accepted["next"])
+        self.assertEqual(store.read()["cart_plan"]["added_quantities"], {product: 2})
+        provider.call = original
+        synced = base.CartPlanTests.sync(app, product, start + 4)
+        if not synced.get("synced"):
+            app.handle({"operation": "cart", "action": "reconcile", "decision": "restore_missing",
+                        "menu_ref": app._cart_menu_ref(store.read()["menu"]),
+                        "cart_digest": synced["cart_plan"]["cart_digest"]})
+        plan = store.read()["cart_plan"]
+        self.assertEqual(app._cart_lines(cart_summary(provider.cart))[0][product], start + 4)
+        self.assertEqual(plan["baseline_quantities"].get(product, 0), start)
+
+    def test_oda_managed_acceptance_keeps_its_approve_as_is_result(self):
+        store, provider, _browser, app, product = self.app("oda")
+        original = provider.call
+
+        def call(tool, arguments, **kwargs):
+            if tool == "manipulate_cart":
+                raise HouseholdError("transport response lost")
+            return original(tool, arguments, **kwargs)
+
+        provider.call = call
+        base.CartPlanTests.sync(app, product, 3)
+        provider.call = original
+        shown = app.handle({"operation": "cart", "action": "get"})
+        accepted = app.handle({"operation": "cart", "action": "accept_current",
+                               "operation_id": shown["operation_id"], "cart_digest": shown["cart_digest"]})
+        self.assertEqual(accepted["status"], "owner_accepted_cart")
+        self.assertNotIn("next", accepted)
+        self.assertEqual(store.read()["cart_plan"]["status"], "active")
+
+    def test_the_partial_continuation_reference_is_internal_only(self):
+        _store, _provider, _browser, app, _product = self.app()
+        with self.assertRaisesRegex(HouseholdError, "internal-only"):
+            app.handle({"operation": "products", "action": "apply", "partial_apply": True,
+                        "_partial_plan_ref": "productplan_forgedforgedforged"})
 
 
 class MenyClickDeadlineTests(unittest.TestCase):

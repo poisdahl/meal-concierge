@@ -548,12 +548,18 @@ batched and dietary detail reads are deduplicated by SKU. Pending reads return
 ref survives restart and lost replies. A validation cycle older than one hour,
 missing its service timestamp or dated in the future restarts only its reads,
 preserving choices and review. The existing managed apply fence prevents checkout
-of an older cart while validation is pending. MENY changes one unit per product
-page, so when completed reads leave less than its cart-write reserve, apply
-returns `status=validating` with `pending_cart_write=1` and writes on the
-continuation with a full time budget. A MENY unit whose result could not be
-read back before the deadline is never clicked; the batch stops with a proven
-ending instead. Current menu/profile/ownership are
+of an older cart while validation is pending. A selected product whose read
+fails twice in one cycle for a reason other than time ends the cycle with
+`status=needs_input`, `reason="selected product reads keep failing"` and
+`read_failures`, including any `provider_failure` such as a lost store login;
+no cart write occurs. MENY changes one unit per product page, so when completed
+reads leave less than its cart-write reserve, apply returns `status=validating`
+with `validation_progress.pending_cart_write=1` and writes on the continuation
+with a full time budget. It defers at most once per cycle and never by more
+than a fresh call's budget provides. MENY does not click a unit when less than
+about 25 seconds remain; the batch then stops with a proven ending. A slower
+readback after a click still ends uncertain and can be accepted as below.
+Current menu/profile/ownership are
 checked again near cart sync, including no-op sync. Drift stops before a cart
 write; complete validated whole-package quantities pass to the
 existing guarded, restart-safe cart sync. A verified exact product-line amount
@@ -2153,9 +2159,13 @@ journal but does not complete the menu: units from earlier confirmed batches
 stay menu-owned, the lost batch's visible gain appears in
 `ownership_review.maximum_adoptable`, and the menu plan asks for a review of the
 observed cart. Continue with `cart reconcile` and its digest, using
-`restore_missing` or `keep_current` as the household chooses. A managed batch
-with a proven ending, MENY order edits and payments retain their own
-reconciliation paths.
+`restore_missing` or `keep_current` as the household chooses. If the menu was
+saved again meanwhile, the confirmed units stay owned by the earlier plan and
+the next step is a product prepare/apply for the current menu. A managed MENY
+batch with a proven ending keeps its readback path instead: a finished batch or
+proven stop settles from a fresh read, and a cart that differs from its
+acknowledged clicks goes to the cart review as household drift. MENY order
+edits and payments retain their own reconciliation paths.
 
 An unsubmitted checkout review can be discarded with `checkout discard_review`
 and its exact confirmation ID. Discarding an unsubmitted recovery review restores
