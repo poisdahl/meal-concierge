@@ -2652,8 +2652,12 @@ class PlanningOperations:
                              "size": MAX_CANDIDATES_PER_REQUIREMENT})
             requested[key] = query
             rows.append((requirement, hints, key))
-        # A failing query cannot starve the still-unseen tail on later calls.
-        missing = sorted((key for key in requested if key not in cache), key=lambda key: attempted.index(key) if key in attempted else -1)
+        # A failing query cannot starve the still-unseen tail on later calls. A
+        # query that already failed twice in this cycle is settled as failed and
+        # not retried, so the remaining reads can run and the cycle can finish.
+        settled = {key for key, count in (work.get("search_failure_counts") or {}).items() if count >= 2} if work is not None else set()
+        missing = sorted((key for key in requested if key not in cache and key not in settled),
+                         key=lambda key: attempted.index(key) if key in attempted else -1)
         # A continuation may spend its whole budget on previously unseen queries.
         # Keep the last failed observation until that same search succeeds/retries.
         failed = work.setdefault("search_failures", {}) if work is not None else {}
@@ -2741,7 +2745,8 @@ class PlanningOperations:
                     "status": "currently_observed" if any(p.get("product_ref") in refs for p in products) else "not_in_current_search_scope"}
             observations[requirement["requirement_id"]] = normalized
         if work is not None:
-            work["pending_search_count"] = sum(key not in cache for key in requested)
+            settled = {key for key, count in (work.get("search_failure_counts") or {}).items() if count >= 2}
+            work["pending_search_count"] = sum(key not in cache and key not in settled for key in requested)
         return observations
 
     @staticmethod

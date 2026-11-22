@@ -434,7 +434,12 @@ class ProductContinuationTests(unittest.TestCase):
         with mock.patch("planning_operations.MAX_REQUIREMENTS", 1):
             result = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu))
             for _ in range(74):
+                if "continue_arguments" not in result:
+                    break
                 result = self.request(**result["continue_arguments"])
+        # A query that failed twice in the cycle is settled as failed, so preparation finishes.
+        self.assertNotIn("continue_arguments", result)
+        self.assertEqual(counts["salmon"], 2)
         self.assertGreaterEqual(min(counts.values()), 2)
         self.assertEqual(sum("observation" in row for row in result["product_plan"]["requirements"]), 36)
 

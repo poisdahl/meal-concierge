@@ -266,6 +266,48 @@ class MenyPrepareWindowTests(unittest.TestCase):
             calls += 1
         self.assertEqual(provider.reads(), 30)
 
+    def test_preparation_finishes_with_persistently_failing_searches_unresolved(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        clock = FakeClock()
+        for module in (planning_operations, product_planner, service):
+            patcher = mock.patch.object(module, "time", clock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        store = StateStore(Path(temp.name), {"instance": "test", "household": "Test", "provider": "meny",
+                                             "profile_overrides": {}})
+        menu = {"menu_id": "menu_failing", "revision": 1, "digest": "e" * 64, "phase": "draft",
+                "dishes": [{"shopping_requirements": [
+                    {"item": f"Lettmelk {number}", "quantity": 1, "unit": "l", "scalable": True}
+                    for number in range(1, 7)]}], "salads": []}
+        with store.locked() as state:
+            state["menu"] = deepcopy(menu)
+        provider = SlowMeny(clock)
+        failing = {"Lettmelk 2", "Lettmelk 5"}  # e.g. a search page that never renders
+        original = provider.call
+
+        def call(tool_name, arguments, **kwargs):
+            if tool_name == "product_search" and arguments["queries"][0].casefold() in {item.casefold() for item in failing}:
+                provider.calls.append((tool_name, deepcopy(arguments)))
+                raise MenyBrowserError("MENY search results did not finish rendering",
+                                       failure_class="adapter_rejected", source="adapter_stderr")
+            return original(tool_name, arguments, **kwargs)
+
+        provider.call = call
+        app = Application(store, provider, mock.Mock())
+        result = app.handle({"operation": "products", "action": "prepare", "menu_ref": app._cart_menu_ref(menu)})
+        calls = 1
+        while result.get("continue_arguments"):
+            self.assertLess(calls, 8, "preparation kept retrying failing searches")
+            result = app.handle({"operation": "products", **result["continue_arguments"]})
+            calls += 1
+        searched = {row["item"] for row in result["product_plan"]["requirements"]
+                    if (row.get("observation") or {}).get("products")}
+        self.assertEqual(searched, {f"Lettmelk {number}" for number in range(1, 7)} - failing)
+        attempts = [arguments["queries"][0].casefold() for name, arguments in provider.calls if name == "product_search"]
+        for item in failing:
+            self.assertGreaterEqual(attempts.count(item.casefold()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
