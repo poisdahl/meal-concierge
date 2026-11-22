@@ -2660,6 +2660,7 @@ class PlanningOperations:
         batch_reader = getattr(self.provider_client, "product_search_batch", None)
         native_batch = callable(batch_reader) and self.provider == "oda"
         singles = work.setdefault("single_searches", []) if work is not None else []
+        first_read_in_call = True
         while missing:
             remaining = MAX_REQUIREMENTS - work.get("reads", 0) if work is not None else len(missing)
             if remaining <= 0 or deadline is not None and time.monotonic() >= deadline:
@@ -2671,6 +2672,10 @@ class PlanningOperations:
                     break
                 keys.append(key)
             del missing[:len(keys)]
+            # Only a call's first read counts toward the repeated-failure stop;
+            # later failures in one call can be collateral, such as a host's
+            # per-call read allowance or an already failed browser.
+            counts_failure, first_read_in_call = first_read_in_call, False
             queries = [requested[key] for key in keys]
             if work is not None:
                 work["reads"] = work.get("reads", 0) + len(keys)
@@ -2715,7 +2720,8 @@ class PlanningOperations:
                     failed[key] = {"unavailable_reason": "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_unavailable_or_scope_changed"}
                     if isinstance(exc, MenyBrowserError) and exc.provider_failure:
                         failed[key]["provider_failure"] = exc.provider_failure
-                    if work is not None and failed[key]["unavailable_reason"] != "provider_search_deadline":
+                    if (work is not None and counts_failure
+                            and failed[key]["unavailable_reason"] != "provider_search_deadline"):
                         counts = work.setdefault("search_failure_counts", {})
                         counts[key] = counts.get(key, 0) + 1
         observations = {}
@@ -3414,7 +3420,7 @@ class PlanningOperations:
             "menu_ref", "product_plan_digest", "partial_product_plan_digest", "remaining_issue_count",
             "cart_changed", "nothing_to_buy", "nothing_to_buy_for_menu", "price_verification",
             "price_locked", "final_price_authority", "product_plan_stale", "menu_binding_stale",
-            "default_suggestion", "next",
+            "default_suggestion", "next", "read_failures",
             "continue_arguments", "validation_progress", "product_plan_ref",
         )
         compact = {key: deepcopy(result[key]) for key in fields if key in result}
@@ -3701,7 +3707,8 @@ class PlanningOperations:
             if work.get("observation_context") != context:
                 # Before the context key existed, old work could retain detail
                 # or price facts from a different household profile or scope.
-                for key in ("searches", "recurring_observations", "attempted_searches", "search_failures", "single_searches"):
+                for key in ("searches", "recurring_observations", "attempted_searches", "search_failures", "single_searches",
+                            "search_failure_counts", "cart_write_deferred"):
                     work.pop(key, None)
                 if "restarted" in work:
                     # During write validation, changed context starts a new
@@ -5429,20 +5436,22 @@ class PlanningOperations:
             self._archive_observed_cart_target(state, pending, live, owner_accepted=True)
             plan = state.get("cart_plan")
             menu_current = self._cart_menu_ref(state.get("menu")) == pending.get("managed_menu")
+            accepted_meny_clear = self.provider == "meny" and pending.get("clear_requested")
+            current_plan = (not accepted_meny_clear and isinstance(plan, dict) and plan.get("provider") == self.provider
+                            and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
+                            and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu")))
+            if current_plan:
+                self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
             if (meny_menu_fill and pending.get("acknowledged") is not None and isinstance(plan, dict)
                     and plan.get("provider") == self.provider and plan.get("menu_ref") == pending["managed_menu"]):
                 # Confirmed batches stay menu-owned, also when the menu changed since.
                 self._retain_acknowledged_cart_additions(plan, pending["before"], pending["acknowledged"], live)
-            accepted_meny_clear = self.provider == "meny" and pending.get("clear_requested")
             if accepted_meny_clear:
                 self._finish_cart_clear(state, pending, live, names, owner_accepted=True)
             elif pending.get("clear_requested"):
                 state.pop("product_plan_completion", None)
                 self._clear_persisted_product_plan(plan)
-            if (not accepted_meny_clear and isinstance(plan, dict) and plan.get("provider") == self.provider
-                    and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
-                    and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu"))):
-                self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
+            if current_plan:
                 if meny_menu_fill:
                     # Accepting the observed cart settles the journal, not the
                     # menu: the lost batch is only adoptable, and the household

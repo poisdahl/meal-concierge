@@ -195,7 +195,8 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
                 failure, = result["read_failures"]
                 self.assertEqual((failure["query"], failure["attempts"]), ("Lettmelk 2", 2))
                 self.assertEqual(failure["provider_failure"]["class"], "adapter_rejected")
-                self.assertLessEqual(calls, 2)
+                self.assertLessEqual(calls, 3)
+                self.assertEqual(app._product_apply_view(result)["read_failures"], result["read_failures"])
                 self.assertEqual(provider.writes(), 0)
                 self.assertFalse(store.read().get("partial_product_validation"))
                 # Once the store reads again, the same apply completes.
@@ -211,6 +212,24 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
                                                      "cart_change_requested": True}))
         self.assertTrue(result.get("partial_applied"), result)
         self.assertLessEqual(calls, 3)
+        self.assertEqual(provider.cart["count"], 12)
+
+
+    def test_a_context_change_that_rereads_every_product_can_defer_the_write_again(self):
+        store, provider, app, prepared = self.household(approved=12)
+        arguments = {"operation": "products", **prepared["partial_apply_arguments"], "cart_change_requested": True}
+        first = app.handle(arguments)
+        self.assertEqual(first["validation_progress"]["pending_cart_write"], 1)
+        reads = provider.reads()
+        with store.locked() as state:  # changes the product context, not the selection
+            state["recurring_fulfilled"] = {"unrelated": "2026-11-01"}
+        second = app.handle({"operation": "products", **first["continue_arguments"]})
+        self.assertEqual(provider.reads() - reads, 12)
+        self.assertEqual(second["status"], "validating", second)
+        self.assertEqual(second["validation_progress"]["pending_cart_write"], 1)
+        self.assertEqual(provider.writes(), 0)
+        third = app.handle({"operation": "products", **second["continue_arguments"]})
+        self.assertTrue(third.get("partial_applied"), third)
         self.assertEqual(provider.cart["count"], 12)
 
 
