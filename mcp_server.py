@@ -1653,11 +1653,13 @@ def _applied_product_result_projection(result: dict[str, Any]) -> dict[str, Any]
         or result.get("reason") in {"cart_write_result_uncertain", "cart_changed_during_sync"}
     )
     status = "outcome_unknown" if uncertain else "partial_applied" if observed_partial else "rejected_before_write"
+    diagnostic = normalize_provider_failure(result.get("provider_failure"))
     return {
         "status": status,
         "applied": False,
         **({"checkout_blocked": True} if status in {"partial_applied", "outcome_unknown"} else {}),
         **({"reason": _bounded_detail(result["reason"])} if "reason" in result else {}),
+        **({"provider_failure": diagnostic} if diagnostic else {}),
         **({"operation_id": result["operation_id"]} if isinstance(result.get("operation_id"), str) else {}),
         **({"menu_ref": result["menu_ref"]} if isinstance(result.get("menu_ref"), dict) else {}),
         **({"product_plan_digest": result["product_plan_digest"]}

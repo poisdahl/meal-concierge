@@ -3425,7 +3425,7 @@ class PlanningOperations:
             "menu_ref", "product_plan_digest", "partial_product_plan_digest", "remaining_issue_count",
             "cart_changed", "nothing_to_buy", "nothing_to_buy_for_menu", "price_verification",
             "price_locked", "final_price_authority", "product_plan_stale", "menu_binding_stale",
-            "default_suggestion", "next", "read_failures",
+            "default_suggestion", "next", "read_failures", "provider_failure",
             "continue_arguments", "validation_progress", "product_plan_ref",
         )
         compact = {key: deepcopy(result[key]) for key in fields if key in result}
@@ -5146,6 +5146,13 @@ class PlanningOperations:
                 acknowledged.clear()
                 acknowledged.update(prefix)
                 raise
+            except MenyBrowserError as exc:
+                # The batch stays uncertain; keep its closed reason as evidence.
+                if exc.provider_failure:
+                    with self.store.locked() as state:
+                        if state.get("pending_cart_change") == pending:
+                            state["pending_cart_change"]["provider_failure"] = deepcopy(exc.provider_failure)
+                raise
             with self.store.locked() as state:
                 if state.get("pending_cart_change") != pending:
                     raise HouseholdError("original MENY batch changed after dispatch")
@@ -5511,7 +5518,9 @@ class PlanningOperations:
             pending.get("stopped_before_next_click") and pending["expected"] == live
         ):
             return {"outcome_unknown": True, "cart_write_pending": True,
-                    "operation_id": pending["operation_id"]}
+                    "operation_id": pending["operation_id"],
+                    **({"provider_failure": deepcopy(pending["provider_failure"])}
+                       if pending.get("provider_failure") else {})}
         self._finish_managed_cart_journal(state, pending, "read_back")
         return None
 

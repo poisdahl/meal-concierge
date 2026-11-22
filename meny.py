@@ -124,21 +124,42 @@ MENY_ORDER_TIMEOUT = 240
 MENY_LOGIN_POLL_ATTEMPTS = 24
 MENY_LOGIN_POLL_INTERVAL = 1.25
 MAX_CART_CLICKS = 2
-# Time a dispatched unit needs to settle and pass its final cart reads before the deadline.
-MENY_POST_CLICK_SECONDS = 25
+# How long a dispatched unit may take to show its new quantity. A slower browser
+# can show a second add late while MENY still applies the first one.
+MENY_QUANTITY_SETTLE_SECONDS = 15
+# Time a dispatched unit needs before the deadline: its settle window, then the
+# order-route, login and final settled-cart reads that follow it.
+MENY_POST_CLICK_SECONDS = MENY_QUANTITY_SETTLE_SECONDS + 25
 MENY_VIEWPORT = (1280, 900)
 
 
 class MenyBrowserError(HouseholdError):
     def __init__(self, message: str, *, failure_class: str | None = None,
-                 source: str | None = None):
+                 source: str | None = None, elapsed_ms: int | None = None):
         super().__init__(message)
         self.provider_failure = normalize_provider_failure({
             "provider": "meny", "class": failure_class, "source": source,
-            "phase": {"local_timeout": "local_wait", "local_spawn": "local_spawn"}.get(
-                source, "adapter_invocation"),
-            "daemon_request_ending": "unknown",
+            "phase": {"local_timeout": "local_wait", "local_spawn": "local_spawn",
+                      "cart_readback": "post_click_readback"}.get(source, "adapter_invocation"),
+            "daemon_request_ending": "unknown", "elapsed_ms": elapsed_ms,
         })
+
+
+def _unsettled_click(message: str, observed: int, before: int, dispatched_at: float | None) -> MenyBrowserError:
+    # Closed evidence only: whether the last read still showed the pre-click
+    # quantity (or none), and how long after mouse-down the bounded wait ended.
+    return MenyBrowserError(
+        message, failure_class="quantity_not_settled" if observed in {before, -1} else "quantity_unexpected",
+        source="cart_readback",
+        elapsed_ms=None if dispatched_at is None else round((time.monotonic() - dispatched_at) * 1000))
+
+
+def _dispatched_error(message: str, cause: HouseholdError) -> MenyBrowserError:
+    """An unconfirmed dispatched change keeps its cause's closed facts, never its text."""
+    error = MenyBrowserError(message)
+    if isinstance(cause, MenyBrowserError):
+        error.provider_failure = cause.provider_failure
+    return error
 
 
 class _BrowserTransportError(MenyBrowserError):
@@ -1376,7 +1397,7 @@ class MenyClient:
             raise MenyCartStoppedError(str(exc), acknowledged + exc.applied_operations) from exc
         except HouseholdError as exc:
             if applied:
-                raise HouseholdError("MENY cart changed partially; read the cart and do not retry this request") from exc
+                raise _dispatched_error("MENY cart changed partially; read the cart and do not retry this request", exc) from exc
             raise
 
     def _read_settled_cart(self) -> dict[str, Any]:
@@ -1394,17 +1415,18 @@ class MenyClient:
         ]
         if signatures[-2] == signatures[-1]:
             return snapshots[-1]
-        raise HouseholdError("MENY cart quantities did not settle")
+        raise MenyBrowserError("MENY cart quantities did not settle", failure_class="cart_not_settled",
+                               source="cart_readback")
 
     def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None) -> None:
-        dispatched = False
+        dispatched_at: float | None = None
 
         def before_dispatch() -> None:
-            nonlocal dispatched
+            nonlocal dispatched_at
             # A click the deadline cuts off cannot be read back. Stopping here
             # is a proven zero-click ending for this unit.
             self._require_time(MENY_POST_CLICK_SECONDS)
-            dispatched = True
+            dispatched_at = time.monotonic()
 
         try:
             self._open(BASE_URL + product)
@@ -1413,13 +1435,14 @@ class MenyClient:
             if previous is not None:
                 expected = previous + delta
                 self._resolve_order_route(order_change_code)
-                if self._wait_for_quantity(expected, previous, product) != expected:
-                    raise HouseholdError("MENY product quantity did not settle")
+                observed = self._wait_for_quantity(expected, previous, product)
+                if observed != expected:
+                    raise _unsettled_click("MENY product quantity did not settle", observed, previous, dispatched_at)
                 self._assert_authenticated()
                 return
         except HouseholdError as exc:
-            if dispatched:
-                raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
+            if dispatched_at is not None:
+                raise _dispatched_error("MENY cart change is uncertain; read the cart and do not retry this request", exc) from exc
             raise MenyCartStoppedError(str(exc)) from exc
 
         if delta < 0:
@@ -1486,12 +1509,12 @@ class MenyClient:
             raise HouseholdError("MENY order routing did not settle")
 
     def _remove_one_from_cart(self, product: str, order_change_code: str | None) -> None:
-        dispatched = False
+        dispatched_at: float | None = None
 
         def before_dispatch() -> None:
-            nonlocal dispatched
+            nonlocal dispatched_at
             self._require_time(MENY_POST_CLICK_SECONDS)
-            dispatched = True
+            dispatched_at = time.monotonic()
 
         try:
             cart = self._read_cart()
@@ -1504,11 +1527,11 @@ class MenyClient:
             self._click_cart_remove_control(product, current, order_change_code, before_dispatch)
             observed = self._wait_for_cart_quantity(product, current - 1, order_change_code)
             if observed != current - 1:
-                raise HouseholdError("MENY cart quantity did not settle")
+                raise _unsettled_click("MENY cart quantity did not settle", observed, current, dispatched_at)
             self._assert_authenticated()
         except HouseholdError as exc:
-            if dispatched:
-                raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
+            if dispatched_at is not None:
+                raise _dispatched_error("MENY cart change is uncertain; read the cart and do not retry this request", exc) from exc
             raise MenyCartStoppedError(str(exc)) from exc
 
     def _click_cart_remove_control(self, product: str, quantity: int, order_change_code: str | None, before_dispatch: Any) -> None:
@@ -1567,7 +1590,9 @@ class MenyClient:
 
     def _wait_for_cart_quantity(self, product: str, expected: int, order_change_code: str | None) -> int:
         observed = -1
-        for _ in range(12):
+        settle_by = time.monotonic() + MENY_QUANTITY_SETTLE_SECONDS
+        # Polls 0.25 s apart; the clock ends the window sooner when reads are slow.
+        for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
             self._sleep(0.25)
             result = self._eval(r"""
 (() => {
@@ -1598,6 +1623,8 @@ class MenyClient:
                 return expected
             if isinstance(result.get("quantity"), int):
                 observed = result["quantity"]
+            if time.monotonic() >= settle_by:
+                break
         return observed
 
     def _product_control(self, action: str, delta: int, product: str) -> dict[str, Any]:
@@ -2079,7 +2106,9 @@ __DELIVERY_BINDING__
 
     def _wait_for_quantity(self, expected: int, previous: int, product: str) -> int:
         observed = previous
-        for _ in range(12):
+        settle_by = time.monotonic() + MENY_QUANTITY_SETTLE_SECONDS
+        # Polls 0.25 s apart; the clock ends the window sooner when reads are slow.
+        for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
             self._sleep(0.25)
             result = self._product_control("read", 1, product)
             if result.get("authenticated") is not True:
@@ -2087,7 +2116,7 @@ __DELIVERY_BINDING__
             observed = result.get("quantity")
             if isinstance(observed, bool) or not isinstance(observed, int) or observed < 0:
                 raise HouseholdError("MENY product quantity is invalid")
-            if observed == expected:
+            if observed == expected or time.monotonic() >= settle_by:
                 break
         return observed
 

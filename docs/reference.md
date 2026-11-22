@@ -557,8 +557,12 @@ reads leave less than its cart-write reserve, apply returns `status=validating`
 with `validation_progress.pending_cart_write=1` and writes on the continuation
 with a full time budget. It defers at most once per cycle and never by more
 than a fresh call's budget provides. MENY does not click a unit when less than
-about 25 seconds remain; the batch then stops with a proven ending. A slower
-readback after a click still ends uncertain and can be accepted as below.
+about 40 seconds remain; the batch then stops with a proven ending. After a
+click it waits up to 15 seconds for the new quantity, since a slower browser can
+show a second add late. A readback that still does not confirm the click ends
+uncertain and can be accepted as below. Its journal and result keep a closed
+`provider_failure`, such as `quantity_not_settled` with `elapsed_ms` since the
+click; it grants no retry authority.
 Current menu/profile/ownership are
 checked again near cart sync, including no-op sync. Drift stops before a cart
 write; complete validated whole-package quantities pass to the
