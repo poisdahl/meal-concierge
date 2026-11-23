@@ -1,0 +1,14 @@
+{
+  "reserved_total_ore": 79490,
+  "lines": [
+    {"type": "calculator-total", "title": "Sum 4 varer", "price": "986,90"},
+    {"type": "recycle", "title": "Pant", "price": "2,00"},
+    {"type": "picking-fee", "title": "Plukk og pakk", "price": "Gratis"},
+    {"type": "handover-product", "title": "Levering på døren", "price": "49,00"},
+    {"type": "buffer", "title": "Reservert beløp for vekt/erstatningsvarer", "price": "67,16"},
+    {"type": "discount", "title": "Kampanjerabatt", "price": "-319,06"},
+    {"type": "fee-POSE"},
+    {"type": "static", "title": "Emballasje", "price": "ca. 8,90", "packaging": true},
+    {"type": "sum", "title": "Beløp som reserveres*", "price": "794,90"}
+  ]
+}

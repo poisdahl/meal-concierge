@@ -25,6 +25,26 @@ ROWS = [
 ]
 
 
+CHECKOUT_ROW_HARNESS = r"""
+const {script, lines, summaryCount} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const norm = text => (text || '').normalize('NFC').replace(/\s+/g, ' ').trim();
+const visible = node => !node.hidden;
+const nodes = text => typeof text === 'string' ? [{innerText: text}] : [];
+const row = ({type, title, price, hidden, packaging}) => ({
+  hidden, classList: {contains: c => c === `ws-summary-line--${type}`},
+  closest: selector => packaging && selector === '.ws-summary-line--fee-POSE' ? {} : null,
+  querySelectorAll: selector => ({
+    ':scope > .ws-summary-line__main > .ws-summary-line__price': nodes(price),
+    ':scope > .ws-summary-line__main > .ws-summary-line__header > .ws-summary-line__title': nodes(title),
+  })[selector] || [],
+});
+const summary = {querySelectorAll: selector => selector === '.ws-summary-line' ? lines.map(row) : []};
+const root = {querySelectorAll: selector => selector === '.ws-price-summary.ws-checkout-summary__price-summary'
+  ? Array(summaryCount).fill(summary) : []};
+process.stdout.write(JSON.stringify(eval(script)(root)));
+"""
+
+
 class MenyCheckoutBreakdownTests(unittest.TestCase):
     def test_verified_components_and_included_discount(self):
         for included in (False, True):
@@ -64,25 +84,17 @@ class MenyCheckoutBreakdownTests(unittest.TestCase):
                 result = normalize_checkout_payment_snapshot({**PAYMENT, "price_rows": rows})
                 self.assertEqual(result, {"total": PAYMENT["total"], "delivery": PAYMENT["delivery"]})
 
+    @staticmethod
+    def read_dom_price_rows(lines, summary_count):
+        result = subprocess.run(
+            [shutil.which("node"), "-e", CHECKOUT_ROW_HARNESS], input=json.dumps({
+                "script": CHECKOUT_PRICE_ROWS_JS, "lines": lines, "summaryCount": summary_count,
+            }), text=True, capture_output=True, check=True, timeout=10,
+        )
+        return json.loads(result.stdout)
+
     @unittest.skipUnless(shutil.which("node"), "Node required to exercise the checkout DOM read")
     def test_reads_visible_vendor_rows_and_returns_only_allowlisted_values(self):
-        harness = r"""
-const {script, lines, summaryCount} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
-const norm = text => text.normalize('NFC').replace(/\s+/g, ' ').trim();
-const visible = node => !node.hidden;
-const row = ({type, title, price, hidden, packaging}) => ({
-  hidden, classList: {contains: c => c === `ws-summary-line--${type}`},
-  closest: selector => packaging && selector === '.ws-summary-line--fee-POSE' ? {} : null,
-  querySelectorAll: selector => ({
-    ':scope > .ws-summary-line__main > .ws-summary-line__price': [{innerText: price}],
-    ':scope > .ws-summary-line__main > .ws-summary-line__header > .ws-summary-line__title': [{innerText: title}],
-  })[selector] || [],
-});
-const summary = {querySelectorAll: selector => selector === '.ws-summary-line' ? lines.map(row) : []};
-const root = {querySelectorAll: selector => selector === '.ws-price-summary.ws-checkout-summary__price-summary'
-  ? Array(summaryCount).fill(summary) : []};
-process.stdout.write(JSON.stringify(eval(script)(root)));
-"""
         lines = [
             {"type": "calculator-total", "title": "Sum 15 varer", "price": "1\u00a0850,00"},
             {"type": "delivery-fee", "title": "Levering på døren", "price": "Gratis"},
@@ -96,17 +108,31 @@ process.stdout.write(JSON.stringify(eval(script)(root)));
         ]
         for count in (1, 2):
             with self.subTest(count=count):
-                result = subprocess.run(
-                    [shutil.which("node"), "-e", harness], input=json.dumps({
-                        "script": CHECKOUT_PRICE_ROWS_JS, "lines": lines, "summaryCount": count,
-                    }), text=True, capture_output=True, check=True, timeout=10,
-                )
-                self.assertNotIn("Synthetic", result.stdout)
-                self.assertEqual(json.loads(result.stdout), [True, sorted([
+                price_rows = self.read_dom_price_rows(lines, count)
+                self.assertNotIn("Synthetic", json.dumps(price_rows))
+                self.assertEqual(price_rows, [True, sorted([
                     ["product_subtotal", 185000], ["delivery_price", 0], ["picking_fee", 4900],
                     ["weight_substitution_reserve", 3800], ["reserved_total", 192390],
                     ["packaging_estimate", 1000], ["discounts", -2310],
                 ])] if count == 1 else None)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required to exercise the checkout DOM read")
+    def test_sanitized_live_prepayment_rows_reconcile_to_the_reserved_total(self):
+        # Retains the checkout row structure and amounts from a disposable test
+        # basket, with campaign and packaging titles replaced.
+        fixture_path = Path(__file__).parent / "fixtures/checkout/meny_prepayment_price_rows.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["reserved_total_ore"], 79490)
+        parsed = normalize_checkout_payment_snapshot({
+            **PAYMENT, "total": fixture["reserved_total_ore"] / 100,
+            "price_rows": self.read_dom_price_rows(fixture["lines"], 1),
+        })
+        self.assertEqual(parsed["price_breakdown"], {
+            "status": "itemized", "product_subtotal_ore": 98690, "deposits_ore": 200,
+            "delivery_price_ore": 4900, "picking_fee_ore": 0,
+            "weight_substitution_reserve_ore": 6716, "packaging_estimate_ore": 890,
+            "discounts_ore": -31906, "discounts_already_in_subtotal": False,
+        })
 
     @unittest.skipUnless(shutil.which("node"), "Node required to exercise the dispatch gate")
     def test_dispatch_gate_rejects_same_total_when_the_reviewed_fees_change(self):
