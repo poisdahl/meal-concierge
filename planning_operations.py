@@ -5515,6 +5515,16 @@ class PlanningOperations:
         self._finish_managed_cart_journal(state, pending, "read_back")
         return None
 
+    @staticmethod
+    def _managed_cart_write_reason(mutation_error, pending_result, drift_reason):
+        if mutation_error is None:
+            return drift_reason
+        # A proven MENY stop whose earlier clicks were read back leaves nothing
+        # to settle; only a write whose journal is still pending is uncertain.
+        if isinstance(mutation_error, MenyCartStoppedError) and not pending_result:
+            return "cart_write_stopped_before_click"
+        return "cart_write_result_uncertain"
+
     def _cart_sync(self, request: Mapping[str, Any], deadline: float | None) -> dict[str, Any]:
         expected_menu_ref = self._require_cart_menu(request)
         summarize = getattr(self.provider_client, "managed_cart_summary", cart_summary)
@@ -5767,7 +5777,7 @@ class PlanningOperations:
                 **self._cart_question(
                     current,
                     verified_summary,
-                    reason="cart_write_result_uncertain" if mutation_error is not None else "cart_changed_during_sync",
+                    reason=self._managed_cart_write_reason(mutation_error, pending_result, "cart_changed_during_sync"),
                 ),
             }
         with self.store.locked() as state:
@@ -5956,7 +5966,8 @@ class PlanningOperations:
                 **self._cart_question(
                     plan,
                     verified_summary,
-                    reason="cart_write_result_uncertain" if mutation_error is not None else "cart_changed_while_applying_decision",
+                    reason=self._managed_cart_write_reason(mutation_error, pending_result,
+                                                           "cart_changed_while_applying_decision"),
                 ),
             }
         approved_digest = self._cart_digest(verified_live)

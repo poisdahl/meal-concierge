@@ -1650,7 +1650,8 @@ def _applied_product_result_projection(result: dict[str, Any]) -> dict[str, Any]
     )
     observed_partial = (
         result.get("partial_applied") is True
-        or result.get("reason") in {"cart_write_result_uncertain", "cart_changed_during_sync"}
+        or result.get("reason") in {"cart_write_result_uncertain", "cart_write_stopped_before_click",
+                                    "cart_changed_during_sync"}
     )
     status = "outcome_unknown" if uncertain else "partial_applied" if observed_partial else "rejected_before_write"
     return {

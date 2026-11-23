@@ -617,7 +617,9 @@ empty cart. If the household chooses to use them, call accept_current with those
 references. The earlier change may still arrive. Read the cart before planning
 another change. An interrupted MENY menu fill can be accepted the same way; then
 show the missing menu products and, as the household chooses, use cart reconcile
-`restore_missing` or `keep_current` with the returned cart digest.
+`restore_missing` or `keep_current` with the returned cart digest. A fill with
+`reason=cart_write_stopped_before_click` stopped before its next click and has
+nothing to settle: skip accept_current and go straight to that review.
 
 Show material substitutions, exact variants, package sizes and counts. Separate
 merchandise estimates from final totals, pant and delivery fees. Unknown prices

@@ -2168,8 +2168,12 @@ saved again meanwhile, the confirmed units stay owned by the earlier plan and
 the next step is a product prepare/apply for the current menu. A managed MENY
 batch with a proven ending keeps its readback path instead: a finished batch or
 proven stop settles from a fresh read, and a cart that differs from its
-acknowledged clicks goes to the cart review as household drift. MENY order
-edits and payments retain their own reconciliation paths.
+acknowledged clicks goes to the cart review as household drift. When a sync or
+reconcile reads back the clicks made before its stop, it returns
+`reason=cart_write_stopped_before_click` with nothing pending and no
+`operation_id`, so go straight to the cart review. `cart_write_result_uncertain`
+means the original journal is still pending. MENY order edits and payments
+retain their own reconciliation paths.
 
 An unsubmitted checkout review can be discarded with `checkout discard_review`
 and its exact confirmation ID. Discarding an unsubmitted recovery review restores
