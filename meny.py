@@ -1089,6 +1089,26 @@ class MenyClient:
   const queryHeadings = visibleQueryHeaderElements.filter(x => norm(x.innerText) === `Resultater for "${query}"`);
   const queryHeadingValid = queryHeaders.length === 0 || (queryHeaders.length === 1 && visibleQueryHeaders.length === 1 && queryHeaderElements.length === 1 && visibleQueryHeaderElements.length === 1 && queryHeadings.length === 1);
   const headings = roots.length === 1 ? [...roots[0].querySelectorAll(':scope > h2')].filter(visible).filter(x => norm(x.innerText) === heading) : [];
+  const fallback = new Map([['recipes', 'Oppskrifter'], ['articles', 'Artikler']]).get(expandedValues[0]);
+  if (kind === 'products' && identity && fallback && authenticated.length === 1 && roots.length === 1 &&
+      stateRoots.length === 1 && stateRoots[0] === roots[0] && queryHeadingValid && queryHeadings.length === 1) {
+    // MENY can select another result kind when there are no products. Check
+    // the loaded tabs and exact query before treating it as an empty search.
+    const tabs = [...queryHeaders[0].querySelectorAll(':scope > #search-result-tab')].filter(visible);
+    const radio = value => tabs.length === 1 ? [...tabs[0].querySelectorAll('input[type="radio"]')].filter(x => x.value === value) : [];
+    const products = radio('products');
+    const selected = radio(expandedValues[0]);
+    const productLabels = products.length === 1 ? [...products[0].labels].filter(visible) : [];
+    const selectedLabels = selected.length === 1 ? [...selected[0].labels].filter(visible) : [];
+    const fallbackHeading = [...roots[0].querySelectorAll(':scope > h2')].filter(visible);
+    if (productLabels.length === 1 && norm(productLabels[0].innerText) === 'Varer' && !products[0].checked &&
+        selectedLabels.length === 1 && selected[0].checked &&
+        new RegExp(`^${fallback} \\([1-9]\\d*\\)$`).test(norm(selectedLabels[0].innerText)) &&
+        fallbackHeading.length === 1 && norm(fallbackHeading[0].innerText) === fallback &&
+        !roots[0].querySelectorAll('li.ws-product-list-vertical__item').length) {
+      return JSON.stringify({ready:true, identity:true, route:false, authenticated:true, root_count:1, state_root_count:1, query_header_count:1, query_count:1, heading_count:1, products:[], recipes:[]});
+    }
+  }
   if (!route || authenticated.length !== 1 || mains.length !== 1 || roots.length !== 1 || stateRoots.length !== 1 || stateRoots[0] !== roots[0] || !queryHeadingValid || headings.length !== 1) {
     return JSON.stringify({ready:false, identity, route, authenticated:authenticated.length === 1, root_count:roots.length, state_root_count:stateRoots.length, query_header_count:queryHeaders.length, query_count:queryHeadings.length, heading_count:headings.length, products:[], recipes:[]});
   }

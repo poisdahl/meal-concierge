@@ -6667,6 +6667,80 @@ process.stdout.write(eval(script));
                 if len(" / ".join(tags).encode("utf-8")) <= 100:
                     self.assertEqual(product["display"]["campaign_tag"], " / ".join(tags))
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute the browser extractor")
+    def test_product_search_recognizes_only_a_bound_zero_product_fallback(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        client._invoke = mock.Mock()
+        client._product_price_details = mock.Mock()
+        harness = r"""
+const fs = require('node:fs');
+const {script, kind, productLabel, checked, headingQuery, productPresent, loggedIn} = JSON.parse(fs.readFileSync(0, 'utf8'));
+const element = (text = '', selectors = {}) => ({
+  innerText: text,
+  getBoundingClientRect: () => ({width: 10, height: 10}),
+  getAttribute: () => null,
+  querySelectorAll: selector => selectors[selector] || [],
+});
+global.getComputedStyle = () => ({display: 'block', visibility: 'visible'});
+global.location = new URL(`https://meny.no/sok?query=n%C3%B8ytral+olje&expanded=${kind}`);
+const kindLabel = kind === 'recipes' ? 'Oppskrifter' : 'Artikler';
+const tabs = element('', {'input[type="radio"]': [
+  {value: 'products', checked: false, labels: [element(productLabel)]},
+  {value: kind, checked, labels: [element(`${kindLabel} (1)`)]},
+]});
+const header = element('', {
+  ':scope > h2.ws-search-result__title': [element(`Resultater for "${headingQuery}"`)],
+  ':scope > #search-result-tab': [tabs],
+});
+const root = element('', {
+  ':scope > h2': [element(kindLabel)],
+  'li.ws-product-list-vertical__item': productPresent ? [element()] : [],
+});
+const state = element('', {':scope > .ws-search-result-full': [root], ':scope > .ws-search-result__header': [header]});
+root.closest = () => state;
+global.document = element('', {
+  'button': [element(loggedIn ? 'Brukermeny' : 'Logg inn')],
+  'main': [element('', {'.ws-search-result-full': [root]})],
+});
+process.stdout.write(eval(script));
+"""
+        cases = (
+            ("recipes", {}, True),
+            ("articles", {}, True),
+            ("recipes", {"productLabel": "Varer (2)"}, False),
+            ("recipes", {"checked": False}, False),
+            ("recipes", {"headingQuery": "annet søk"}, False),
+            ("recipes", {"productPresent": True}, False),
+            ("recipes", {"loggedIn": False}, False),
+        )
+        search_script = None
+        for kind, overrides, ready in cases:
+            with self.subTest(kind=kind, overrides=overrides):
+                def evaluate(script):
+                    completed = subprocess.run(
+                        [shutil.which("node"), "-e", harness],
+                        input=json.dumps({"script": script, "kind": kind, "productLabel": "Varer", "checked": True,
+                                          "headingQuery": "nøytral olje", "productPresent": False,
+                                          "loggedIn": True, **overrides}),
+                        text=True, capture_output=True, check=True, timeout=10,
+                    )
+                    snapshot = json.loads(completed.stdout)
+                    self.assertIs(snapshot["ready"], ready)
+                    return snapshot
+
+                if ready:
+                    client._eval = mock.Mock(side_effect=evaluate)
+                    result = client._search("nøytral olje", 3, "products")
+                    search_script = client._eval.call_args.args[0]
+                    self.assertEqual(result["products"], [])
+                    self.assertEqual(result["scope"]["requested_size"], 3)
+                else:
+                    # Exercise the same DOM extractor without waiting out both poll loops.
+                    evaluate(search_script)
+                client._product_price_details.assert_not_called()
+
     def test_product_search_accepts_current_results_shell_without_optional_query_header(self):
         client = self.client()
         client._open = mock.Mock()
