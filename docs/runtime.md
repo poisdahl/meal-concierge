@@ -64,20 +64,18 @@ installed version and attaches to it; it does not select a newer release.
 - For browser use: **agent-browser 0.33.1** and **Chrome or non-snap Chromium**.
   The npm adapter may need Node.js 24+. Linux ARM64 needs a distribution Chromium.
   The [Grok guide](grok.md#browser-and-login) covers its native browser option.
-- On Ubuntu 23.10 and later, and other Linux hosts with
-  `kernel.apparmor_restrict_unprivileged_userns=1`, a Chrome or Chromium outside
-  an existing AppArmor profile stops at startup with "No usable sandbox".
-  Ubuntu's `/etc/apparmor.d/chrome` covers Google Chrome at
-  `/opt/google/chrome/chrome`; Chrome for Testing and other paths are not
-  covered. To check, run
+- On Ubuntu 23.10 and later and other Linux hosts with
+  `kernel.apparmor_restrict_unprivileged_userns=1`, Chrome or Chromium may stop
+  at startup with "No usable sandbox". Ubuntu's `/etc/apparmor.d/chrome`
+  applies to Google Chrome at `/opt/google/chrome/chrome`. If the installed
+  browser uses a different path, check the exact executable by running
   `BROWSER --headless=new --user-data-dir="$(mktemp -d)" --dump-dom about:blank`
-  as the service user. If it fails this way, report the message and the exact browser
-  path to the host administrator and stop the browser steps. The administrator
-  can add a profile granting `userns` to that one executable, following
-  [Chromium's guide](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md).
-  An agent never changes AppArmor profiles or kernel settings itself
-  and never disables the browser sandbox. `check-browser` only reads the
-  browser version, so it cannot detect this.
+  as the service user. `check-browser` checks prerequisites without starting
+  a browser session. If the launch reports this error, give the host
+  administrator the message and executable path. The administrator can grant
+  `userns` through an AppArmor profile for that exact, administrator-controlled
+  path. Keep the browser sandbox and host-wide restriction enabled. See the
+  per-executable profile option in [Chromium's guide](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md).
 - A separate data directory for each household/store. Additional trusted agents
   should connect to the same installation instead of making copies.
 
