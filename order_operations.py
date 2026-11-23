@@ -23,7 +23,7 @@ from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, OdaCheckoutMismatchError, Oda
                          require_order_binding)
 from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_contents, cart_summary, checkout_payment_settings, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
 from retail_mcp import retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date
-from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match
+from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match, meny_delivery_list_price_display
 from planning_assessment import assess_menu
 from service_common import (
     CANCELLATION_OPERATION_TIMEOUT,
@@ -1381,7 +1381,10 @@ class OrderOperations:
                 "slots": slots,
                 **diagnostics,
                 "price_display": {
-                    slot["slot_ref"]: delivery_price_display(slot)
+                    slot["slot_ref"]: (
+                        meny_delivery_list_price_display(slot, display[slot["slot_ref"]])
+                        if self.provider == "meny" else delivery_price_display(slot)
+                    )
                     for slot in slots
                 },
                 "display": display,

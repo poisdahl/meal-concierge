@@ -590,13 +590,16 @@ Delivery list returns the same seven-field slot object for each provider:
 `slot_ref`, unchanged provider ID or `null`, complete offset-aware start/end
 timestamps, integer `price_ore` or `null`, `price_kind` (`exact`, `from` or
 `unavailable`) and the provider-selected flag. Price presentation is derived
-only from that state as `49 kr`, `fra 49 kr` or `pris ikke tilgjengelig`.
+from that state as `49 kr`, `fra 49 kr` or `pris ikke tilgjengelig`.
 `fra 0` is never reported as free. Parsers accept only their supported response
 shapes; unknown shapes stop instead of guessing price or units. Oda delivery
 parsing requires integer IDs, RFC 3339 `openDatetime` / `closeDatetime`, and exact
 `kr` + NBSP + integer-kroner prices, including `kr 0`. Other Oda price syntax
 remains unavailable. Full or provider-unavailable Oda rows are not candidates.
-MENY price parsing supports its duplicated `fra N kr fra N kroner` label form.
+For MENY listing only, a duplicated plain amount for the same window can be
+shown as a picker quote in the outer `price_display` map. The slot keeps an
+unavailable price for cheapest-window selection and checkout. Confirm the quote
+against checkout before paying. MENY lower-bound price parsing supports its duplicated `fra N kr fra N kroner` label form.
 MENY list results retain that bounded original ARIA label in the outer
 `display[slot_ref]` metadata map while excluding it from the seven-field slot
 identity, so price wording can change without changing `slot_ref`.
