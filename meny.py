@@ -31,6 +31,13 @@ from core import (
     oslo_local_timestamp,
     validate_delivery_slot,
 )
+from meny_catalog import (
+    MenyCatalogUnavailable,
+    is_store_gln,
+    read_catalog,
+    regular_card_barcode,
+    regular_price_details,
+)
 from product_observations import MenyProductPriceError, normalize_meny_product_search
 from rpc_client import normalize_provider_failure
 
@@ -162,6 +169,8 @@ CHECKOUT_PRICE_ROWS_JS = r"""root => {
 }"""
 DEFAULT_BROWSER_ARGS = "--disable-gpu,--disable-quic"
 MENY_READ_TIMEOUT = 110
+MENY_CATALOG_TIMEOUT = 1.5
+MENY_CATALOG_COOLDOWN = 60
 MENY_CART_TIMEOUT = 240
 # Until MENY's price calculator answers, the cart drawer lists the items with a
 # zero total. Give a slow answer this long before reloading the page.
@@ -1038,6 +1047,7 @@ class MenyClient:
         self.recovery_allowed = False
         self._recovery_consumed = False
         self._shell_target: str | None = None
+        self._catalog_retry_at = 0.0
 
     def probe(self, *, deadline: float | None = None, allow_recovery: bool = False) -> dict[str, Any]:
         with self._locked_operation(MENY_READ_TIMEOUT, deadline, allow_recovery=allow_recovery):
@@ -1300,7 +1310,27 @@ class MenyClient:
   const empty = [...root.querySelectorAll(':scope > p.ws-search-result-full__empty')].filter(visible).filter(x => norm(x.innerText) === emptyText);
   const cards = kind === 'products' ? productCards : recipeCards;
   const ready = (cards.length > 0 && empty.length === 0) || (cards.length === 0 && empty.length === 1);
-  return JSON.stringify({ready, identity:true, route:true, authenticated:true, root_count:1, state_root_count:1, query_header_count:queryHeaders.length, query_count:queryHeadings.length, heading_count:1, products, recipes});
+  // MENY binds its search request to the effective fulfillment store. Keep
+  // only that identifier from the loaded document, never the request URL.
+  const stores = new Set();
+  if (ready && kind === 'products' && productCards.length) {
+    for (const entry of globalThis.performance?.getEntriesByType?.('resource') || []) {
+      if (entry.responseStatus !== 200 || !['fetch', 'xmlhttprequest'].includes(entry.initiatorType)) continue;
+      const url = new URL(entry.name);
+      let match, key;
+      if (url.origin === 'https://productsearchapi.trumfnetthandel.prod.trumf.cloud') {
+        match = url.pathname.match(/^\/products\/v1\/1300\/(0|[0-9]{13})\/search\/(?:basic|minimal|maximal)$/);
+        key = 'query';
+      } else if (url.origin === 'https://platform-rest-prod.ngdata.no') {
+        match = url.pathname.match(/^\/api\/products\/1300\/(0|[0-9]{13})\/?$/);
+        key = 'search';
+      }
+      const terms = key ? url.searchParams.getAll(key) : [];
+      if (match && !url.username && !url.password && !url.hash && terms.length === 1 && terms[0] === query) stores.add(match[1]);
+    }
+  }
+  const store_gln = stores.size === 1 ? [...stores][0] : null;
+  return JSON.stringify({ready, identity:true, route:true, authenticated:true, root_count:1, state_root_count:1, query_header_count:queryHeaders.length, query_count:queryHeadings.length, heading_count:1, products, recipes, store_gln});
 })()
 """.replace("EXPECTED", json.dumps({
                     "query": query,
@@ -1335,9 +1365,34 @@ class MenyClient:
         response = {"provider": "meny", "query": query, kind: values}
         if kind != "products":
             return response
-        normalized = normalize_meny_product_search(response, read_price_details=self._product_price_details)
+        catalog = self._search_catalog(values, result.get("store_gln"))
+
+        def read_price_details(product):
+            row = catalog.get(regular_card_barcode(product))
+            return regular_price_details(product, row) or self._product_price_details(product)
+
+        normalized = normalize_meny_product_search(response, read_price_details=read_price_details)
         normalized["scope"]["requested_size"] = limit
         return normalized
+
+    def _search_catalog(self, products, store_gln):
+        now = time.monotonic()
+        if (
+            not is_store_gln(store_gln)
+            or now < self._catalog_retry_at
+            or self.deadline is not None and self.deadline - now < MENY_CATALOG_TIMEOUT
+        ):
+            return {}
+        barcodes = list(dict.fromkeys(
+            code for product in products if (code := regular_card_barcode(product)) is not None
+        ))
+        if not barcodes:
+            return {}
+        try:
+            return read_catalog(store_gln, barcodes, timeout=MENY_CATALOG_TIMEOUT)
+        except MenyCatalogUnavailable:
+            self._catalog_retry_at = time.monotonic() + MENY_CATALOG_COOLDOWN
+            return {}
 
     def _product_price_details(self, product: Mapping[str, Any]) -> dict[str, Any]:
         path = product.get("product_id")

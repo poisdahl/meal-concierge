@@ -426,12 +426,15 @@ mass, volume or count; the display value is rounded to two decimal øre per
 canonical unit using round-half-even. Oda `product_search` supplies merchandise
 price and availability without product-level deposit or offer-term fields;
 missing fields leave `total_payable_ore` and automatic offer use unavailable. MENY search cards likewise do not prove an exact pant amount or
-that pant is absent. For each bounded, available exact-price result the MENY
-adapter therefore verifies the same current price against the linked product's
-single primary price block. Exactly no pant marker establishes zero product
-pant; a `+ pant` marker without its amount remains unknown. This lets ordinary
-no-pant products expose an exact payable total without treating card absence as
-evidence. The `Tilbud` current/original-price pair and strict `N for M` tag are the
+that pant is absent. MENY keeps the signed-in search's ranking and availability.
+When MENY's current search request identifies one fulfillment store, the
+adapter can batch exact barcodes against that store's catalog. The catalog
+must corroborate the card's product path, name, package, and price with a
+fixed regular-price row and explicit zero pant. The adapter opens linked
+product pages for offers, deposits, variable weights, and rows it cannot
+corroborate. On a product page, no pant marker in its verified primary price
+block establishes zero product pant. A `+ pant` marker without its amount
+remains unknown. The `Tilbud` current/original-price pair and strict `N for M` tag are the
 supported automatic MENY discount forms. `Fra N,NN kr`
 is always a lower bound (including `fra 0`), never payable. Other lower-bound,
 promotional and package grammars remain display-only. Without explicit campaign
