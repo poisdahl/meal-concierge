@@ -583,6 +583,9 @@ normal reconciliation boundary. Reconciliation uses the same bounded batches.
 
 ## Delivery prices and selection
 
+The MENY browser lists a group of requested dates from one open calendar. It
+keeps the requested date order and filters out all other days.
+
 Delivery list returns the same seven-field slot object for each provider:
 `slot_ref`, unchanged provider ID or `null`, complete offset-aware start/end
 timestamps, integer `price_ore` or `null`, `price_kind` (`exact`, `from` or

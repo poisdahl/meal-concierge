@@ -57,7 +57,7 @@ ORDERS_URL = f"{BASE_URL}/trumf-profil/nettbutikk#/bestillinger"
 ORDER_PATH = re.compile(r"/(?:trumf-)?profil/nettbutikk/bestilling/(\d{1,20})")
 PRODUCT_PATH = re.compile(r"/varer/(?!kampanjer/)[A-Za-z0-9._~%/-]+-\d{4,14}")
 DELIVERY_SLOT = re.compile(
-    r"^(?:(?P<price_prefix>[^,\r\n]{1,200}),\s*)?"
+    r"^(?:(?P<price_prefix>(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner)),\s*)?"
     r"(?P<day>0?[1-9]|[12]\d|3[01])\.\s*"
     r"(?P<month>januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+"
     r"klokka\s+(?P<start_hour>[01]?\d|2[0-3]):(?P<start_minute>[0-5]\d)\s+"
@@ -65,7 +65,7 @@ DELIVERY_SLOT = re.compile(
     re.IGNORECASE,
 )
 MENY_FROM_PRICE = re.compile(
-    r"^fra\s+(?P<from_kr>\d+)\s+kr\s+fra\s+(?P<from_words>\d+)\s+kroner$",
+    r"^fra\s+(?P<amount>[0-9]{1,7}(?:,[0-9]{2})?)\s+kr\s+fra\s+(?P=amount)\s+kroner$",
     re.IGNORECASE,
 )
 MENY_DELIVERY_WINDOW = re.compile(
@@ -454,8 +454,11 @@ def normalize_meny_delivery_slot(value: Any) -> dict[str, Any]:
     ):
         raise HouseholdError("MENY delivery slot changed")
     price = MENY_FROM_PRICE.fullmatch(str(match["price_prefix"] or ""))
-    price_kind = "from" if price is not None and price["from_kr"] == price["from_words"] else "unavailable"
-    price_ore = int(price["from_kr"]) * 100 if price_kind == "from" else None
+    price_ore = None
+    if price is not None:
+        kroner, _, ore = price["amount"].partition(",")
+        price_ore = int(kroner) * 100 + int(ore or "0")
+    price_kind = "from" if price_ore is not None else "unavailable"
     return validate_delivery_slot({
         "slot_ref": f"meny:{slot_date.isoformat()}T{start}/{end}",
         "provider_slot_id": None,
@@ -1011,6 +1014,8 @@ class MenyCartStoppedError(HouseholdError):
 class MenyClient:
     """Expose the small provider interface used by the household service."""
 
+    supports_delivery_date_batch = True
+
     def __init__(
         self,
         *,
@@ -1147,6 +1152,7 @@ class MenyClient:
                 return self._delivery_slots(
                     str(arguments.get("delivery_date") or ""),
                     require_selected=arguments.get("require_selected") is True,
+                    delivery_dates=arguments.get("delivery_dates"),
                 )
             if tool == "select_delivery_slot":
                 return self._select_delivery_slot(arguments.get("delivery_slot_id"))
@@ -2753,7 +2759,7 @@ __DELIVERY_BINDING__
   const slots = [];
   for (const button of [...root.querySelectorAll('button')].filter(visible)) {
     const label = norm(button.getAttribute('aria-label') || button.innerText);
-    const match = label.match(/^(?:[^,\r\n]{1,200},\s*)?(0?[1-9]|[12]\d|3[01])\.\s*(januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+([01]?\d|2[0-3]):([0-5]\d)\s+til\s+([01]?\d|2[0-3]):([0-5]\d)$/i);
+    const match = label.match(/^(?:(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner),\s*)?(0?[1-9]|[12]\d|3[01])\.\s*(januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+([01]?\d|2[0-3]):([0-5]\d)\s+til\s+([01]?\d|2[0-3]):([0-5]\d)$/i);
     if (!match || button.disabled || button.getAttribute('aria-disabled') === 'true') continue;
     let year = osloParts.year;
     const month = months[match[2].toLocaleLowerCase('nb-NO')];
@@ -2780,7 +2786,19 @@ __DELIVERY_BINDING__
         self._wait_delivery_picker_closed()
         return result["slots"]
 
-    def _delivery_slots(self, delivery_date: str = "", *, require_selected: bool = False) -> dict[str, Any]:
+    def _delivery_slots(
+        self, delivery_date: str = "", *, require_selected: bool = False,
+        delivery_dates: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if delivery_dates is not None:
+            try:
+                if (require_selected or delivery_date or not isinstance(delivery_dates, list)
+                        or not 1 <= len(delivery_dates) <= 7
+                        or any(not isinstance(day, str) or date.fromisoformat(day).isoformat() != day
+                               for day in delivery_dates)):
+                    raise ValueError
+            except ValueError as exc:
+                raise HouseholdError("MENY delivery dates must be one to seven ISO dates for a listing") from exc
         if delivery_date:
             try:
                 date.fromisoformat(delivery_date)
@@ -2801,7 +2819,9 @@ __DELIVERY_BINDING__
                 f"MENY shows {selected_count} selected delivery windows after rereading the picker. "
                 "Check or select the intended delivery window before checkout."
             )
-        if delivery_date:
+        if delivery_dates is not None:
+            slots = [slot for day in dict.fromkeys(delivery_dates) for slot in slots if slot.get("date") == day]
+        elif delivery_date:
             slots = [slot for slot in slots if slot.get("date") == delivery_date]
             if require_selected and not any(slot.get("selected") is True for slot in slots):
                 raise HouseholdError("MENY has a different delivery date selected; review the window before checkout")
@@ -2867,7 +2887,7 @@ __DELIVERY_BINDING__
   const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible).filter(x => [...x.querySelectorAll('h1')].filter(visible).filter(h => norm(h.innerText) === 'Når skal vi levere til deg?').length === 1);
   if (!identity || authenticated.length !== 1 || dialogs.length !== 1) return JSON.stringify({ready:false, identity, authenticated:authenticated.length === 1});
   const dismiss = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText) === 'Lukk');
-  const slotPattern = /^(?:[^,\r\n]{1,200},\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
+  const slotPattern = /^(?:(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner),\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const buttons = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
     const label = norm(x.getAttribute('aria-label') || x.innerText);
     return slotPattern.test(label) && label.split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix;
@@ -2936,7 +2956,7 @@ __DELIVERY_BINDING__
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible).filter(x => [...x.querySelectorAll('h1')].filter(visible).filter(h => norm(h.innerText) === 'Når skal vi levere til deg?').length === 1);
   if (!identity || authenticated.length !== 1 || dialogs.length !== 1) return JSON.stringify({ready:false, identity, authenticated:authenticated.length === 1});
-  const slotPattern = /^(?:[^,\r\n]{1,200},\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
+  const slotPattern = /^(?:(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner),\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const allSelected = [...dialogs[0].querySelectorAll('button[aria-pressed="true"]')].filter(visible).filter(x => slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
   const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix);
   const confirm = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
@@ -2987,7 +3007,7 @@ __DELIVERY_BINDING__
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible).filter(x => [...x.querySelectorAll('h1')].filter(visible).filter(h => norm(h.innerText) === 'Når skal vi levere til deg?').length === 1);
   if (!identity || authenticated.length !== 1 || dialogs.length !== 1) return JSON.stringify({ready:false, identity, authenticated:authenticated.length === 1});
-  const slotPattern = /^(?:[^,\r\n]{1,200},\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
+  const slotPattern = /^(?:(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner),\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const allSelected = [...dialogs[0].querySelectorAll('button[aria-pressed="true"]')].filter(visible).filter(x => slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
   const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix);
   const dismiss = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText) === 'Lukk');

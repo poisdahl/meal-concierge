@@ -5189,6 +5189,53 @@ process.stdout.write(eval(require('node:fs').readFileSync(0, 'utf8')));
         client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-dismiss"]')
         client._wait_delivery_picker_closed.assert_called_once_with()
 
+    @unittest.skipUnless(shutil.which("node"), "Node executes the MENY picker controls")
+    def test_meny_delivery_picker_keeps_fractional_price_windows(self):
+        client = self.client()
+        client._open_delivery_picker = mock.Mock()
+        client._invoke = mock.Mock()
+        client._wait_delivery_picker_closed = mock.Mock()
+        harness = r"""
+const fs = require("node:fs");
+const {script, labels} = JSON.parse(fs.readFileSync(0, "utf8"));
+const visible = (innerText) => ({
+  innerText, disabled: false, getAttribute: () => null, setAttribute: () => {},
+  getBoundingClientRect: () => ({width:40, height:20})
+});
+const buttons = labels.map(visible);
+buttons.push(visible("Lukk"));
+const dialog = {...visible(""), querySelectorAll: selector =>
+  selector === "h1" ? [visible("Når skal vi levere til deg?")] : buttons};
+global.location = new URL("https://meny.no/varer");
+global.getComputedStyle = () => ({display:"block", visibility:"visible"});
+global.document = {querySelectorAll(selector) {
+  if (selector === "button") return [visible("Brukermeny")];
+  if (selector === 'dialog,[role="dialog"]') return [dialog];
+  return [];
+}};
+process.stdout.write(eval(script));
+"""
+        labels = [
+            "fra 49,90 kr fra 49,90 kroner, 23. desember klokka 07:00 til 08:00",
+            "49,90 kr 49,90 kroner, 23. desember klokka 08:00 til 09:00",
+            "fra 49,80 kr fra 49,90 kroner, 23. desember klokka 09:00 til 10:00",
+        ]
+
+        def evaluate(script):
+            result = subprocess.run([shutil.which("node"), "-e", harness],
+                                    input=json.dumps({"script": script, "labels": [
+                                        *labels, "Vis mer, informasjon, 23. desember klokka 10:00 til 11:00",
+                                    ]}), text=True, capture_output=True, check=True, timeout=10)
+            return json.loads(result.stdout)
+
+        client._eval = evaluate
+        result = client._delivery_slots()
+        self.assertEqual(list(result["display"].values()), labels)
+        self.assertEqual([(slot["price_kind"], slot["price_ore"]) for slot in result["slots"]],
+                         [("from", 4990), ("unavailable", None), ("unavailable", None)])
+        self.assertTrue(meny_label_slot_ref(labels[0], today=date(2026, 12, 20))[0].endswith("T07:00/08:00"))
+        client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-dismiss"]')
+
     def test_delivery_checkout_rereads_an_inconclusive_selection_without_reserving(self):
         client = self.client()
         client._select_delivery_slot = mock.Mock()
@@ -9833,6 +9880,61 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(provider.call.call_args.kwargs["deadline"], 250.0)
             reference = result["slots"][0]["slot_ref"]
             self.assertEqual(result["display"][reference], provider.delivery_displays[reference])
+
+    def test_meny_browser_delivery_lists_multiple_dates_in_one_picker_read(self):
+        def window(day, start="07:00", end="08:00"):
+            label = f"fra 49 kr fra 49 kroner, {day}. november klokka {start} til {end}"
+            return {"slot_id": label, "display": label, "date": f"2026-11-{day}",
+                    "start": start, "end": end, "selected": False}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = StateStore(root, {**CONFIG, "provider": "meny"})
+            provider = MenyClient(instance="multi-date", binary="unused", executable="unused",
+                                  profile=root, home=root, socket_directory=root, uid=os.getuid(), gid=os.getgid())
+            provider._require_login = mock.Mock()
+            provider._read_delivery_picker = mock.Mock(return_value=[
+                window(23), window(24), window(24, "08:00", "09:00"),
+                {"date": "2026-11-25"},  # Other days are filtered before normalization.
+            ])
+            provider._select_delivery_slot = mock.Mock()
+            provider.call = mock.Mock(wraps=provider.call)
+            app = Application(store, provider, self.browser)
+            dates = ["2026-11-24", "2026-11-26", "2026-11-23", "2026-11-24"]
+
+            result = app.handle({"operation": "delivery", "action": "list", "dates": dates})
+
+            provider._read_delivery_picker.assert_called_once_with()
+            provider._select_delivery_slot.assert_not_called()
+            provider.call.assert_called_once()
+            self.assertEqual(provider.call.call_args.args, ("get_delivery_slots", {"delivery_dates": dates}))
+            refs = ["meny:2026-11-24T07:00/08:00", "meny:2026-11-24T08:00/09:00",
+                    "meny:2026-11-23T07:00/08:00"]
+            self.assertEqual([slot["slot_ref"] for slot in result["slots"]], refs)
+            self.assertEqual(list(result["display"]), refs)
+            self.assertTrue(all(slot["price_kind"] == "from" and slot["price_ore"] == 4900
+                                for slot in result["slots"]))
+
+    def test_provider_delivery_dates_stay_scalar_without_calendar_capability_or_for_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            provider.call = mock.Mock(wraps=provider.call)
+            app = Application(store, provider, self.browser)
+            dates = ["2026-11-24", "2026-11-23"]
+
+            app.handle({"operation": "delivery", "action": "list", "dates": dates})
+
+            self.assertEqual([entry.args for entry in provider.call.call_args_list],
+                             [("get_delivery_slots", {"delivery_date": day}) for day in dates])
+            provider.call.reset_mock()
+            provider.supports_delivery_date_batch = True
+
+            app._normalized_provider_slots(dates, require_selected=True)
+
+            self.assertEqual([entry.args for entry in provider.call.call_args_list],
+                             [("get_delivery_slots", {"delivery_date": day, "require_selected": True})
+                              for day in dates])
 
     def test_cart_change_accepts_intuitive_action_and_snake_case_product_id(self):
         self.app.handle({"operation": "cart", "action": "update", "operations": [{"product_id": "10", "quantity": 1}]})
