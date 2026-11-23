@@ -5326,6 +5326,7 @@ process.stdout.write(eval(script));
             {"ready": False, "identity": True, "authenticated": True},
             {"ready": True, "identity": True, "authenticated": True, "already_selected": False, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
             {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
+            {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
             {"ready": True, "identity": True, "authenticated": True, "dialog_count": 0},
             {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
             {"ready": True, "identity": True, "authenticated": True, "dialog_count": 0},
@@ -5347,6 +5348,8 @@ process.stdout.write(eval(script));
         self.assertIn("label === 'Bekreft levering'", scripts[2])
         self.assertIn("label.match(/^Behold levering", scripts[2])
         self.assertIn("confirm.length + keep.length !== 1", scripts[2])
+        self.assertIn("const markControl = false", scripts[2])
+        self.assertIn("const markControl = true", scripts[3])
         self.assertNotIn("startsWith('Bekreft levering ')", scripts[2])
         self.assertIn(".split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix", scripts[2])
         self.assertNotIn("endsWith(expectedSuffix)", "\n".join(scripts))
@@ -5369,6 +5372,7 @@ process.stdout.write(eval(script));
         alternative = label.replace("10:00 til 12:00", "08:00 til 10:00")
         keep = "Behold levering torsdag 3. september klokka 10:00 til 12:00"
         other_keep = keep.replace("10:00 til 12:00", "08:00 til 10:00")
+        other_confirmation = other_keep.replace("Behold", "Bekreft")
         read_log = mock.call("network", "requests", "--filter",
                              "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS")
         clear_log = mock.call("network", "requests", "--clear")
@@ -5404,8 +5408,11 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
             ("no keep control", [], [], label, None, [dismiss]),
             ("duplicate keep", [keep, keep], [keep], label, "changed or is unavailable", []),
             ("wrong keep", [other_keep], [keep], label, "changed or is unavailable", []),
-            ("confirmation changed", [keep], [other_keep], label, "confirmation changed", []),
-            ("competing confirmation", [keep], [keep, "Bekreft levering"], label, "confirmation changed", []),
+            ("confirmation changed", [keep], [other_keep], label, "confirmation changed", [read_log, clear_log]),
+            ("competing confirmation", [keep], [keep, "Bekreft levering"], label, "confirmation changed",
+             [read_log, clear_log]),
+            ("competing wrong-window confirmation", [keep], [keep, other_confirmation], label,
+             "confirmation changed", [read_log, clear_log]),
             ("wrong reopened selection", [keep], [keep], alternative, "could not be verified",
              [read_log, clear_log, confirm]),
         ):
@@ -5420,8 +5427,11 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
 
                 def evaluate(script):
                     if script not in observed:
-                        current = (after if "const keepOnly" in script else
-                                   before if "const keepWindow" in script else [])
+                        if "const markControl = true" in script:
+                            self.assertEqual(client._invoke.call_args_list, [read_log, clear_log])
+                            current = after
+                        else:
+                            current = before if "const keep" in script else []
                         selected_label = label if "const keep" in script else reread
                         loaded = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps({
                             "script": script, "controls": [label, alternative, "Lukk", *current],
@@ -5477,6 +5487,7 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
         client._sleep = mock.Mock()
         client._eval = mock.Mock(side_effect=[
             {"ready": True, "identity": True, "authenticated": True, "already_selected": False, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
+            {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
             {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
             *([{"ready": False, "identity": True, "authenticated": True, "dialog_count": 1}] * 20),
         ])
@@ -8513,6 +8524,7 @@ process.stdout.write(eval(script));
             [household, {**renewal, "url": renewal["url"].replace("api.ngdata.no", "example.test")}],
             [household, {**renewal, "status": True}],
             [household, renewal, {**renewal, "status": 500}],
+            [household, renewal, {**renewal, "url": f"{endpoint}/other-hold/extend", "status": None}],
             [household, renewal, {**holding, "status": None}],
             [household, renewal, {**household, "status": 403}],
             [household, renewal, {**household, "status": None}],
@@ -8521,6 +8533,9 @@ process.stdout.write(eval(script));
                 self.assertFalse(meny_delivery_reservation_acknowledged({"requests": requests}, allow_extend=True))
         self.assertTrue(meny_delivery_reservation_acknowledged(
             {"requests": [household, {**renewal, "status": 404}, holding]}, allow_extend=True,
+        ))
+        self.assertFalse(meny_delivery_reservation_acknowledged(
+            {"requests": [household, holding, {**holding, "status": None}]},
         ))
 
     def test_same_window_refresh_with_unknown_outcome_is_not_retried_by_checkout(self):

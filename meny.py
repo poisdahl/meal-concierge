@@ -2984,12 +2984,12 @@ __DELIVERY_BINDING__
             }
         if not already_selected:
             self._invoke("click", '[data-meal-concierge-action="delivery-slot"]')
-        for _ in range(20):
-            confirmation = self._eval(r"""
+        confirmation_script = r"""
 (() => {
   document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const expectedSuffix = EXPECTED_SUFFIX.toLocaleLowerCase('nb-NO');
   const keepOnly = KEEP_ONLY;
+  const markControl = MARK_CONTROL;
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const identity = location.origin === 'https://meny.no' && location.pathname === '/varer' && !location.search && !location.hash;
@@ -2999,42 +2999,56 @@ __DELIVERY_BINDING__
   const slotPattern = /^(?:(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner),\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const allSelected = [...dialogs[0].querySelectorAll('button[aria-pressed="true"]')].filter(visible).filter(x => slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
   const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix);
-  const confirm = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
+  const controls = [...dialogs[0].querySelectorAll('button')].filter(visible);
+  const enabled = x => !x.disabled && x.getAttribute('aria-disabled') !== 'true';
+  const confirmControls = controls.filter(x => /^Bekreft levering(?:\s|$)/i.test(norm(x.getAttribute('aria-label') || x.innerText)));
+  const confirm = confirmControls.filter(enabled).filter(x => {
     const label = norm(x.getAttribute('aria-label') || x.innerText);
     const parts = label.match(/^Bekreft levering (?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(.+)$/i);
     return label === 'Bekreft levering' || (parts && parts[1].toLocaleLowerCase('nb-NO') === expectedSuffix);
   });
-  const keepControls = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true')
-    .filter(x => /^Behold levering(?:\s|$)/i.test(norm(x.getAttribute('aria-label') || x.innerText)));
-  const keep = keepControls.filter(x => {
+  const keepControls = controls.filter(x => /^Behold levering(?:\s|$)/i.test(norm(x.getAttribute('aria-label') || x.innerText)));
+  const keep = keepControls.filter(enabled).filter(x => {
     const label = norm(x.getAttribute('aria-label') || x.innerText);
     const parts = label.match(/^Behold levering (?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(.+)$/i);
     return parts && parts[1].toLocaleLowerCase('nb-NO') === expectedSuffix;
   });
   if (allSelected.length !== 1 || selected.length !== 1 || confirm.length + keep.length !== 1 ||
-      keepControls.length !== keep.length || (keepOnly && keep.length !== 1)) {
+      confirmControls.length !== confirm.length || keepControls.length !== keep.length ||
+      (keepOnly && keep.length !== 1)) {
     return JSON.stringify({ready:false, identity, authenticated:true, selected_count:selected.length, total_selected_count:allSelected.length});
   }
-  (confirm[0] || keep[0]).setAttribute('data-meal-concierge-action', 'delivery-confirm');
+  if (markControl) (confirm[0] || keep[0]).setAttribute('data-meal-concierge-action', 'delivery-confirm');
   return JSON.stringify({ready:true, identity, authenticated:true, selected_count:1, total_selected_count:1, keeping_existing:keep.length === 1, label:norm(selected[0].getAttribute('aria-label') || selected[0].innerText)});
 })()
-""".replace("EXPECTED_SUFFIX", json.dumps(expected_suffix, ensure_ascii=False)).replace("KEEP_ONLY", json.dumps(already_selected)))
-            if confirmation.get("identity") is not True:
+""".replace("EXPECTED_SUFFIX", json.dumps(expected_suffix, ensure_ascii=False)).replace("KEEP_ONLY", json.dumps(already_selected))
+
+        def read_confirmation(*, mark: bool) -> dict[str, Any]:
+            observed = self._eval(confirmation_script.replace("MARK_CONTROL", json.dumps(mark)))
+            if observed.get("identity") is not True:
                 raise HouseholdError("MENY delivery route changed")
-            if confirmation.get("authenticated") is not True:
+            if observed.get("authenticated") is not True:
                 raise HouseholdError("MENY login is required in the configured browser profile")
-            if confirmation.get("ready") is True and (not already_selected or confirmation.get("keeping_existing") is True):
+            return observed
+
+        for _ in range(20):
+            if read_confirmation(mark=False).get("ready") is True:
                 break
             self._sleep(0.25)
         else:
             raise HouseholdError("MENY delivery confirmation changed")
-        keeping = confirmation.get("keeping_existing") is True
-        if keeping and meny_label_slot_ref(confirmation.get("label"))[0] != slot_ref:
-            raise HouseholdError("MENY delivery slot date changed; list delivery slots again")
         # Clearing the log does not enable tracking on a fresh browser session.
         self._invoke("network", "requests", "--filter", MENY_RESERVATION_PATH, "--method", "OPTIONS")
         self._invoke("network", "requests", "--clear")
+        confirmation = read_confirmation(mark=True)
+        keeping = confirmation.get("keeping_existing") is True
+        if confirmation.get("ready") is not True or (already_selected and not keeping):
+            raise HouseholdError("MENY delivery confirmation changed")
+        if keeping and meny_label_slot_ref(confirmation.get("label"))[0] != slot_ref:
+            raise HouseholdError("MENY delivery slot date changed; list delivery slots again")
         self._invoke("click", '[data-meal-concierge-action="delivery-confirm"]')
+        # The request log establishes write success. The marked control and
+        # the reopened picker establish the matching delivery window.
         if keeping:
             self._wait_for_delivery_reservation(allow_extend=True)
         else:
