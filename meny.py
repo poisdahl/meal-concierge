@@ -1569,14 +1569,22 @@ class MenyClient:
         acknowledged = []
         try:
             for product, quantity in validated:
+                delta = 1 if quantity > 0 else -1
                 for _ in range(abs(quantity)):
                     try:
                         self._require_time(8)
                     except HouseholdError as exc:
                         raise MenyCartStoppedError(str(exc)) from exc
-                    self._change_one(product, 1 if quantity > 0 else -1, order_change_code=order_change_code)
+                    unit = {"productId": product, "quantity": delta}
+                    # Keep the hydrated product page only for a consecutive
+                    # ordinary add whose previous unit was already read back.
+                    reuse_ready = (
+                        order_change_code is None and delta == 1 and bool(acknowledged)
+                        and acknowledged[-1] == unit
+                    )
+                    self._change_one(product, delta, order_change_code=order_change_code, reuse_ready=reuse_ready)
                     applied += 1
-                    acknowledged.append({"productId": product, "quantity": 1 if quantity > 0 else -1})
+                    acknowledged.append(unit)
             return self._read_settled_cart()
         except MenyCartStoppedError as exc:
             raise MenyCartStoppedError(str(exc), acknowledged + exc.applied_operations) from exc
@@ -1603,7 +1611,8 @@ class MenyClient:
         raise MenyBrowserError("MENY cart quantities did not settle", failure_class="cart_not_settled",
                                source="cart_readback")
 
-    def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None) -> None:
+    def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None,
+                    reuse_ready: bool = False) -> None:
         dispatched_at: float | None = None
 
         def before_dispatch() -> None:
@@ -1614,7 +1623,7 @@ class MenyClient:
             dispatched_at = time.monotonic()
 
         try:
-            self._open(BASE_URL + product)
+            self._open(BASE_URL + product, reuse_ready=reuse_ready)
             self._assert_authenticated()
             previous = self._activate_product_control(product, delta, before_dispatch)
             if previous is not None:
@@ -4020,15 +4029,16 @@ __DELIVERY_BINDING__
                 raise CancellationPreconditionError(str(exc)) from exc
             raise
 
-    def _open(self, url: str) -> None:
+    def _open(self, url: str, *, reuse_ready: bool = False) -> None:
         parsed = urlparse(url)
         if parsed.scheme != "https" or parsed.netloc != "meny.no":
             raise HouseholdError("MENY browser URL is invalid")
+        reuse_ready = reuse_ready and self._shell_target == url
         self._shell_target = url
-        if self.cdp is not None:
-            if not self._viewport_primed:
-                self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
-                self._viewport_primed = True
+        if self.cdp is not None and not self._viewport_primed:
+            self._invoke("set", "viewport", *(str(value) for value in MENY_VIEWPORT))
+            self._viewport_primed = True
+        if self.cdp is not None or reuse_ready:
             try:
                 if self._site_shell_ready():
                     self._cdp_primed = True

@@ -4866,16 +4866,54 @@ class MenyClientTests(unittest.TestCase):
         self.assertIn("['products','recipes'].includes(expanded[0])", script)
 
     def test_cart_change_uses_exact_catalog_path_and_delta(self):
-        client = self.client()
-        changes = []
-        client._change_one = lambda product, delta, **kwargs: changes.append((product, delta, kwargs.get("order_change_code")))
-        client._read_cart = mock.Mock(return_value={"provider": "meny", "items": []})
-        client._sleep = mock.Mock()
-        result = client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
-        self.assertEqual(changes, [(MENY_PRODUCT, 1, None), (MENY_PRODUCT, 1, None)])
-        self.assertEqual(result["provider"], "meny")
-        self.assertEqual(client._read_cart.call_count, 4)
-        self.assertEqual(client._sleep.call_count, 3)
+        for quantity, order_code, reuse in ((2, None, True), (-2, None, False), (2, "order-42", False)):
+            with self.subTest(quantity=quantity, order_code=order_code):
+                client = self.client()
+                client._change_one = mock.Mock()
+                client._read_cart = mock.Mock(return_value={"provider": "meny", "items": []})
+                client._sleep = mock.Mock()
+                request = {"operations": [{"productId": MENY_PRODUCT, "quantity": quantity}]}
+                if order_code is not None:
+                    request["order_change_code"] = order_code
+                result = client._change_cart(request)
+                delta = 1 if quantity > 0 else -1
+                self.assertEqual(client._change_one.call_args_list, [
+                    mock.call(MENY_PRODUCT, delta, order_change_code=order_code, reuse_ready=False),
+                    mock.call(MENY_PRODUCT, delta, order_change_code=order_code, reuse_ready=reuse),
+                ])
+                self.assertEqual(result["provider"], "meny")
+                self.assertEqual(client._read_cart.call_count, 4)
+                self.assertEqual(client._sleep.call_count, 3)
+
+    def test_repeated_ordinary_add_reuses_only_a_ready_product_page(self):
+        url = "https://meny.no" + MENY_PRODUCT
+        for ready, navigation_count in ((True, 1), (False, 2), (HouseholdError("browser unavailable"), 2)):
+            with self.subTest(ready=ready):
+                client = self.client()
+                client._invoke = mock.Mock(return_value={"url": url})
+                client._site_shell_ready = mock.Mock(side_effect=[True, ready, True])
+                client._assert_authenticated = mock.Mock()
+                client._resolve_order_route = mock.Mock()
+                client._product_control = mock.Mock(side_effect=[
+                    {"ready": True, "authenticated": True, "quantity": count, "label": "Legg til 1 stk Brokkoli"}
+                    for count in (0, 1)
+                ])
+                client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, dispatch, _verify: dispatch())
+                client._wait_for_quantity = mock.Mock(side_effect=[1, 2])
+                cart = {"items": [{"product_id": MENY_PRODUCT, "quantity": 2}]}
+                client._read_cart = mock.Mock(return_value=cart)
+                client._sleep = mock.Mock()
+
+                result = client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
+
+                self.assertEqual(result, cart)
+                self.assertEqual(client._invoke.call_args_list, [mock.call("open", url)] * navigation_count)
+                self.assertEqual(client._assert_authenticated.call_count, 4)
+                self.assertEqual(client._resolve_order_route.call_args_list, [mock.call(None)] * 2)
+                self.assertEqual(client._wait_for_quantity.call_args_list, [
+                    mock.call(1, 0, MENY_PRODUCT), mock.call(2, 1, MENY_PRODUCT),
+                ])
+                self.assertEqual(client._read_cart.call_count, 4)
 
     def test_cart_change_uses_the_final_two_matching_readbacks(self):
         client = self.client()
@@ -4957,7 +4995,7 @@ class MenyClientTests(unittest.TestCase):
             with self.assertRaises(MenyCartStoppedError) as caught:
                 client.call("manipulate_cart", {"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
         self.assertEqual(caught.exception.applied_operations, [{"productId": MENY_PRODUCT, "quantity": 1}])
-        client._change_one.assert_called_once_with(MENY_PRODUCT, 1, order_change_code=None)
+        client._change_one.assert_called_once_with(MENY_PRODUCT, 1, order_change_code=None, reuse_ready=False)
         client._read_cart.assert_not_called()
         self.assertIsNone(client.deadline)
 
