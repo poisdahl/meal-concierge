@@ -705,8 +705,10 @@ distinct from retrying an uncertain dispatched action.
 
 If MENY reports that the selected delivery reservation has expired, list the
 same date and select the same window once to renew it before preparing checkout
-again. Selecting an already chosen window uses MENY's explicit keep-delivery
-control and verifies the renewed selection before payment.
+again. An already chosen window can be renewed through MENY's exact
+keep-delivery control. The service waits for the renewal and household update,
+then checks the selected window again. When the renewal outcome is uncertain,
+inspect the selected window before attempting another reservation.
 
 ## Provider login and startup
 

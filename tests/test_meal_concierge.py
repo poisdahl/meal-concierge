@@ -5353,51 +5353,99 @@ process.stdout.write(eval(script));
         client._sleep.assert_called_once_with(0.25)
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("click", '[data-meal-concierge-action="delivery-slot"]'),
+            mock.call("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS"),
             mock.call("network", "requests", "--clear"),
             mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
             mock.call("click", '[data-meal-concierge-action="delivery-dismiss"]'),
         ])
         client._wait_for_delivery_reservation.assert_called_once_with()
 
+    @unittest.skipUnless(shutil.which("node"), "Node executes the MENY picker controls")
     @mock.patch("meny.datetime")
-    def test_already_selected_delivery_refreshes_through_a_verified_temporary_slot(self, clock):
+    def test_same_window_refresh_confirms_only_one_exact_keep_control_and_rereads(self, clock):
         clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
-        client = self.client()
-        client._open_delivery_picker = mock.Mock()
-        client._eval = mock.Mock(side_effect=[
-            {
-                "ready": True,
-                "identity": True,
-                "authenticated": True,
-                "already_selected": True,
-                "refresh_available": True,
-                "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00",
-                "refresh_slot": "fra 0 kr fra 0 kroner, 3. september klokka 08:00 til 10:00",
-            },
-            {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
-            {"ready": True, "identity": True, "authenticated": True, "already_selected": False, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
-            {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
-            {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
-        ])
-        client._invoke = mock.Mock(return_value={})
-        client._wait_delivery_picker_closed = mock.Mock()
-        client._wait_for_delivery_reservation = mock.Mock()
+        slot_ref = "meny:2026-09-03T10:00/12:00"
+        label = "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"
+        alternative = label.replace("10:00 til 12:00", "08:00 til 10:00")
+        keep = "Behold levering torsdag 3. september klokka 10:00 til 12:00"
+        other_keep = keep.replace("10:00 til 12:00", "08:00 til 10:00")
+        read_log = mock.call("network", "requests", "--filter",
+                             "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS")
+        clear_log = mock.call("network", "requests", "--clear")
+        confirm = mock.call("click", '[data-meal-concierge-action="delivery-confirm"]')
+        dismiss = mock.call("click", '[data-meal-concierge-action="delivery-dismiss"]')
+        harness = r"""
+const fs = require("node:fs");
+const {script, controls, selectedLabel} = JSON.parse(fs.readFileSync(0, "utf8"));
+const marks = [];
+const visible = (label) => ({
+  innerText:label, disabled:false,
+  getAttribute: name => name === "aria-pressed" && label === selectedLabel ? "true" : null,
+  setAttribute: (name, value) => marks.push([value, label]),
+  getBoundingClientRect: () => ({width:40, height:20}),
+});
+const buttons = controls.map(visible);
+const dialog = {...visible(""), querySelectorAll(selector) {
+  if (selector === "h1") return [visible("Når skal vi levere til deg?")];
+  if (selector === 'button[aria-pressed="true"]') return buttons.filter(b => b.getAttribute("aria-pressed") === "true");
+  return buttons;
+}};
+global.location = new URL("https://meny.no/varer");
+global.getComputedStyle = () => ({display:"block", visibility:"visible"});
+global.document = {querySelectorAll(selector) {
+  if (selector === "button") return [visible("Brukermeny")];
+  if (selector === 'dialog,[role="dialog"]') return [dialog];
+  return [];
+}};
+process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
+"""
+        for name, before, after, reread, error, expected in (
+            ("same window", [keep], [keep], label, None, [read_log, clear_log, confirm, dismiss]),
+            ("no keep control", [], [], label, None, [dismiss]),
+            ("duplicate keep", [keep, keep], [keep], label, "changed or is unavailable", []),
+            ("wrong keep", [other_keep], [keep], label, "changed or is unavailable", []),
+            ("confirmation changed", [keep], [other_keep], label, "confirmation changed", []),
+            ("competing confirmation", [keep], [keep, "Bekreft levering"], label, "confirmation changed", []),
+            ("wrong reopened selection", [keep], [keep], alternative, "could not be verified",
+             [read_log, clear_log, confirm]),
+        ):
+            with self.subTest(name=name):
+                client = self.client()
+                client._open_delivery_picker = mock.Mock()
+                client._sleep = mock.Mock()
+                client._invoke = mock.Mock(return_value={})
+                client._wait_delivery_picker_closed = mock.Mock()
+                client._wait_for_delivery_reservation = mock.Mock()
+                observed = {}
 
-        result = client._select_delivery_slot("meny:2026-09-03T10:00/12:00")
+                def evaluate(script):
+                    if script not in observed:
+                        current = (after if "const keepOnly" in script else
+                                   before if "const keepWindow" in script else [])
+                        selected_label = label if "const keep" in script else reread
+                        loaded = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps({
+                            "script": script, "controls": [label, alternative, "Lukk", *current],
+                            "selectedLabel": selected_label,
+                        }), text=True, capture_output=True, check=True, timeout=10)
+                        observed[script] = json.loads(loaded.stdout)
+                    return observed[script]["state"]
 
-        self.assertEqual(result["selected"]["slot_ref"], "meny:2026-09-03T10:00/12:00")
-        self.assertEqual(client._open_delivery_picker.call_count, 3)
-        self.assertEqual(client._invoke.call_args_list, [
-            mock.call("click", '[data-meal-concierge-action="delivery-refresh-slot"]'),
-            mock.call("network", "requests", "--clear"),
-            mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
-            mock.call("click", '[data-meal-concierge-action="delivery-slot"]'),
-            mock.call("network", "requests", "--clear"),
-            mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
-            mock.call("click", '[data-meal-concierge-action="delivery-dismiss"]'),
-        ])
-        self.assertEqual(client._wait_delivery_picker_closed.call_count, 3)
-        self.assertEqual(client._wait_for_delivery_reservation.call_count, 2)
+                client._eval = evaluate
+                if error:
+                    with self.assertRaisesRegex(HouseholdError, error):
+                        client._select_delivery_slot(slot_ref)
+                else:
+                    result = client._select_delivery_slot(slot_ref)
+                    self.assertEqual(result["selected"]["slot_ref"], slot_ref)
+                self.assertEqual(client._invoke.call_args_list, expected)
+                armed = [mark for stage in observed.values() for mark in stage["marks"] if mark[0] != "delivery-dismiss"]
+                if confirm in expected:
+                    self.assertEqual(armed, [["delivery-confirm", keep]])
+                    client._wait_for_delivery_reservation.assert_called_once_with(allow_extend=True)
+                    self.assertEqual(client._open_delivery_picker.call_count, 2)
+                else:
+                    self.assertEqual(armed, [])
+                    client._wait_for_delivery_reservation.assert_not_called()
 
     @mock.patch("meny.datetime")
     def test_already_selected_delivery_waits_until_the_dialog_is_closed(self, clock):
@@ -5441,6 +5489,7 @@ process.stdout.write(eval(script));
         self.assertEqual(client._open_delivery_picker.call_count, 1)
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("click", '[data-meal-concierge-action="delivery-slot"]'),
+            mock.call("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS"),
             mock.call("network", "requests", "--clear"),
             mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
         ])
@@ -8443,6 +8492,56 @@ process.stdout.write(eval(script));
                 self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [request]}))
         with self.assertRaisesRegex(HouseholdError, "delivery request log changed"):
             meny_delivery_reservation_acknowledged({"requests": {}})
+
+    def test_same_window_refresh_requires_both_current_acknowledgements(self):
+        endpoint = "https://api.ngdata.no/sylinder/hentevinduer/reservasjoner/v1/api"
+        renewal = {"url": f"{endpoint}/synthetic-hold/extend", "method": "PUT", "status": 200}
+        household = {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household",
+                     "method": "PUT", "status": 204}
+        holding = {"url": endpoint, "method": "POST", "status": 201}
+        for request in (renewal, holding):
+            self.assertTrue(meny_delivery_reservation_acknowledged(
+                {"requests": [household, request]}, allow_extend=True,
+            ))
+        self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [household, renewal]}))
+        for requests in (
+            [renewal],
+            [household],
+            [household, {**renewal, "method": "POST"}],
+            [household, {**renewal, "url": f"{endpoint}/extend"}],
+            [household, {**renewal, "url": renewal["url"] + "?old=true"}],
+            [household, {**renewal, "url": renewal["url"].replace("api.ngdata.no", "example.test")}],
+            [household, {**renewal, "status": True}],
+            [household, renewal, {**renewal, "status": 500}],
+            [household, renewal, {**holding, "status": None}],
+            [household, renewal, {**household, "status": 403}],
+            [household, renewal, {**household, "status": None}],
+        ):
+            with self.subTest(requests=requests):
+                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": requests}, allow_extend=True))
+        self.assertTrue(meny_delivery_reservation_acknowledged(
+            {"requests": [household, {**renewal, "status": 404}, holding]}, allow_extend=True,
+        ))
+
+    def test_same_window_refresh_with_unknown_outcome_is_not_retried_by_checkout(self):
+        client = self.client()
+        client._invoke = mock.Mock(return_value={"requests": []})
+        client._sleep = mock.Mock()
+        client._delivery_slots = mock.Mock(return_value={"slots": [normalize_meny_delivery_slot({
+            "slot_id": "3. september klokka 07:00 til 08:00",
+            "date": "2026-09-03", "start": "07:00", "end": "08:00",
+            "display": "3. september klokka 07:00 til 08:00", "selected": True,
+        })]})
+        client._select_delivery_slot = mock.Mock(
+            side_effect=lambda _: client._wait_for_delivery_reservation(allow_extend=True),
+        )
+        cart = {"items": [{"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 1, "price": 13.9}],
+                "count": 1, "total": 13.9}
+
+        with self.assertRaisesRegex(HouseholdError, "did not acknowledge renewal"):
+            client._review_checkout(cart)
+
+        client._select_delivery_slot.assert_called_once_with("meny:2026-09-03T07:00/08:00")
 
     def test_delivery_selection_waits_for_the_reservation_response(self):
         client = self.client()
