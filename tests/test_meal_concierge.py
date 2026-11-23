@@ -5069,13 +5069,16 @@ class MenyClientTests(unittest.TestCase):
         client._eval = lambda script: scripts.append(script) or next(results)
         client._invoke = mock.Mock(return_value={})
 
-        client._open_delivery_picker()
+        client._open_delivery_picker(track_reservation=True)
 
         self.assertEqual(client._open.call_args_list, [
             mock.call("https://meny.no/sok?query=levering"),
             mock.call("https://meny.no/varer"),
         ])
-        client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-open"]')
+        self.assertEqual(client._invoke.call_args_list, [
+            mock.call("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS"),
+            mock.call("click", '[data-meal-concierge-action="delivery-open"]'),
+        ])
         self.assertEqual(client._sleep.call_args_list, [mock.call(0.25), mock.call(0.25)])
         self.assertIn("querySelectorAll('dialog,[role=\"dialog\"]')", scripts[-1])
         self.assertIn("'Når skal vi levere til deg?'", scripts[-1])
@@ -5356,12 +5359,11 @@ process.stdout.write(eval(script));
         client._sleep.assert_called_once_with(0.25)
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("click", '[data-meal-concierge-action="delivery-slot"]'),
-            mock.call("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS"),
             mock.call("network", "requests", "--clear"),
             mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
             mock.call("click", '[data-meal-concierge-action="delivery-dismiss"]'),
         ])
-        client._wait_for_delivery_reservation.assert_called_once_with(require_extend=False)
+        client._wait_for_delivery_reservation.assert_called_once_with(keeping_existing=False)
 
     @unittest.skipUnless(shutil.which("node"), "Node executes the MENY picker controls")
     @mock.patch("meny.datetime")
@@ -5373,9 +5375,12 @@ process.stdout.write(eval(script));
         keep = "Behold levering torsdag 3. september klokka 10:00 til 12:00"
         other_keep = keep.replace("10:00 til 12:00", "08:00 til 10:00")
         other_confirmation = other_keep.replace("Behold", "Bekreft")
-        read_log = mock.call("network", "requests", "--filter",
-                             "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS")
+        read_reservation = mock.call("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api")
+        read_household = mock.call("network", "requests", "--filter", "/api/extended-user/", "--method", "PUT")
+        read_refresh = mock.call("network", "requests", "--filter", "/api/auth/getToken", "--method", "GET")
+        refresh_success = {"url": "https://meny.no/api/auth/getToken", "method": "GET", "status": 200}
         clear_log = mock.call("network", "requests", "--clear")
+        prepare_log = [read_reservation, read_household, read_refresh, clear_log]
         confirm = mock.call("click", '[data-meal-concierge-action="delivery-confirm"]')
         dismiss = mock.call("click", '[data-meal-concierge-action="delivery-dismiss"]')
         harness = r"""
@@ -5410,7 +5415,7 @@ global.document = {querySelectorAll(selector) {
 process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
 """
         for name, before, after, reread, error, expected in (
-            ("same window", [keep], [keep], label, None, [read_log, clear_log, confirm, dismiss]),
+            ("same window", [keep], [keep], label, None, [*prepare_log, confirm, dismiss]),
             ("no keep control", [], [], label, None, [dismiss]),
             ("only hidden control", [{"label": keep, "hidden": True}], [], label, None, [dismiss]),
             ("disabled keep", [{"label": keep, "disabled": True}], [], label, "changed or is unavailable", []),
@@ -5421,19 +5426,21 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
             ("initial punctuated confirmation", ["Bekreft levering:"], [], label, "changed or is unavailable", []),
             ("initial competing disabled confirmation", [keep, {"label": other_confirmation, "disabled": True}],
              [keep], label, "changed or is unavailable", []),
-            ("confirmation changed", [keep], [other_keep], label, "confirmation changed", [read_log, clear_log]),
+            ("confirmation changed", [keep], [other_keep], label, "confirmation changed", prepare_log),
             ("competing confirmation", [keep], [keep, "Bekreft levering"], label, "confirmation changed",
-             [read_log, clear_log]),
+             prepare_log),
             ("competing wrong-window confirmation", [keep], [keep, other_confirmation], label,
-             "confirmation changed", [read_log, clear_log]),
+             "confirmation changed", prepare_log),
             ("wrong reopened selection", [keep], [keep], alternative, "could not be verified",
-             [read_log, clear_log, confirm]),
+             [*prepare_log, confirm]),
         ):
             with self.subTest(name=name):
                 client = self.client()
                 client._open_delivery_picker = mock.Mock()
                 client._sleep = mock.Mock()
-                client._invoke = mock.Mock(return_value={})
+                client._invoke = mock.Mock(side_effect=lambda *args: {
+                    "requests": [refresh_success] if args == read_refresh.args else [],
+                })
                 client._wait_delivery_picker_closed = mock.Mock()
                 client._wait_for_delivery_reservation = mock.Mock()
                 observed = {}
@@ -5441,7 +5448,7 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
                 def evaluate(script):
                     if script not in observed:
                         if "const markControl = true" in script:
-                            self.assertEqual(client._invoke.call_args_list, [read_log, clear_log])
+                            self.assertEqual(client._invoke.call_args_list, prepare_log)
                             current = after
                         else:
                             current = before if "const keep" in script else []
@@ -5464,7 +5471,7 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
                 armed = [mark for stage in observed.values() for mark in stage["marks"] if mark[0] != "delivery-dismiss"]
                 if confirm in expected:
                     self.assertEqual(armed, [["delivery-confirm", keep]])
-                    client._wait_for_delivery_reservation.assert_called_once_with(require_extend=True)
+                    client._wait_for_delivery_reservation.assert_called_once_with(keeping_existing=True)
                     self.assertEqual(client._open_delivery_picker.call_count, 2)
                 else:
                     self.assertEqual(armed, [])
@@ -5493,6 +5500,43 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
         client._wait_delivery_picker_closed.assert_called_once_with()
 
     @mock.patch("meny.datetime")
+    def test_same_window_refresh_stops_before_clearing_an_unresolved_update(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
+        ready = {"ready": True, "identity": True, "authenticated": True,
+                 "label": "3. september klokka 10:00 til 12:00"}
+        reservation_path = "/sylinder/hentevinduer/reservasjoner/v1/api"
+        refresh = {"url": "https://meny.no/api/auth/getToken", "method": "GET", "status": None}
+        conflict_requests = (
+            (0, {"url": f"https://api.ngdata.no{reservation_path}/synthetic-hold/extend", "method": "PUT", "status": None}),
+            (1, {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household", "method": "PUT", "status": None}),
+            (2, refresh),
+            (2, {**refresh, "status": 404}),
+            (2, {**refresh, "status": 422}),
+        )
+        read_requests = [
+            mock.call("network", "requests", "--filter", reservation_path),
+            mock.call("network", "requests", "--filter", "/api/extended-user/", "--method", "PUT"),
+            mock.call("network", "requests", "--filter", "/api/auth/getToken", "--method", "GET"),
+        ]
+        for earlier_reads, conflict in conflict_requests:
+            with self.subTest(conflict=conflict):
+                client = self.client()
+                client._open_delivery_picker = mock.Mock()
+                client._eval = mock.Mock(side_effect=[
+                    {**ready, "already_selected": True, "refresh_available": True},
+                    {**ready, "keeping_existing": True},
+                ])
+                client._invoke = mock.Mock(side_effect=[
+                    *({"requests": []} for _ in range(earlier_reads)), {"requests": [conflict]},
+                ])
+
+                with self.assertRaisesRegex(HouseholdError, "unresolved delivery or sign-in update"):
+                    client._select_delivery_slot("meny:2026-09-03T10:00/12:00")
+
+                client._open_delivery_picker.assert_called_once_with(track_reservation=True)
+                self.assertEqual(client._invoke.call_args_list, read_requests[:earlier_reads + 1])
+
+    @mock.patch("meny.datetime")
     def test_delivery_selection_cannot_reuse_a_tentative_open_dialog(self, clock):
         clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
         label = "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"
@@ -5515,7 +5559,6 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
         self.assertEqual(client._open_delivery_picker.call_count, 1)
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("click", '[data-meal-concierge-action="delivery-slot"]'),
-            mock.call("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS"),
             mock.call("network", "requests", "--clear"),
             mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
         ])
@@ -5531,20 +5574,24 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
                 client._open_delivery_picker = mock.Mock()
                 client._eval = mock.Mock(side_effect=[
                     {**ready, "already_selected": already_selected, "refresh_available": already_selected},
-                    ready,
+                    {**ready, "keeping_existing": already_selected},
                     {**ready, "keeping_existing": already_selected, "label": label.replace("3.", "4.")},
                 ])
-                client._invoke = mock.Mock(return_value={})
+                client._invoke = mock.Mock(return_value={"requests": []})
 
                 with self.assertRaisesRegex(HouseholdError, "delivery slot date changed"):
                     client._select_delivery_slot("meny:2026-09-03T10:00/12:00")
 
                 commands = [call.args for call in client._invoke.call_args_list]
-                expected = [] if already_selected else [("click", '[data-meal-concierge-action="delivery-slot"]')]
-                expected.extend([
-                    ("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS"),
-                    ("network", "requests", "--clear"),
-                ])
+                if already_selected:
+                    expected = [
+                        ("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api"),
+                        ("network", "requests", "--filter", "/api/extended-user/", "--method", "PUT"),
+                        ("network", "requests", "--filter", "/api/auth/getToken", "--method", "GET"),
+                    ]
+                else:
+                    expected = [("click", '[data-meal-concierge-action="delivery-slot"]')]
+                expected.append(("network", "requests", "--clear"))
                 self.assertEqual(commands, expected)
 
     @mock.patch("meny.datetime")
@@ -8551,6 +8598,7 @@ process.stdout.write(eval(script));
                      "method": "PUT", "status": 204}
         acknowledged = [holding, household]
         self.assertTrue(meny_delivery_reservation_acknowledged({"requests": [
+            {"url": "https://meny.no/api/auth/getToken", "method": "GET", "status": 404},
             {**holding, "status": 422}, {**household, "status": 403}, *acknowledged,
         ]}))
         for write in (*acknowledged, {"url": f"{endpoint}/synthetic-hold/extend", "method": "PUT"}):
@@ -8564,18 +8612,31 @@ process.stdout.write(eval(script));
         renewal = {"url": f"{endpoint}/synthetic-hold/extend", "method": "PUT", "status": 200}
         household = {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household",
                      "method": "PUT", "status": 204}
-        holding = {"url": endpoint, "method": "POST", "status": 201}
-        self.assertTrue(meny_delivery_reservation_acknowledged(
-            {"requests": [{**household, "status": 403}, renewal, household]}, require_extend=True,
-        ))
+        holding = {"url": endpoint, "method": "POST", "status": 200}
+        refresh = {"url": "https://meny.no/api/auth/getToken", "method": "GET", "status": 200}
+        for reservation in (holding, renewal):
+            with self.subTest(reservation=reservation):
+                self.assertTrue(meny_delivery_reservation_acknowledged({"requests": [
+                    {**household, "status": 403}, {**reservation, "method": "OPTIONS", "status": None},
+                    refresh, reservation, household,
+                ]}, keeping_existing=True))
         self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [household, renewal]}))
         for requests in (
             [renewal],
             [household],
-            [household, holding],
+            [household, holding, renewal],
+            [household, renewal, holding],
+            [household, holding, holding],
             [household, {**renewal, "status": 404}, holding],
             [household, {**renewal, "status": 422}, holding],
             [household, {**holding, "status": 422}, renewal],
+            [household, {**refresh, "status": None}, holding],
+            [household, {**refresh, "status": 404}, holding],
+            [household, {**refresh, "url": refresh["url"] + "?retry=1", "status": 422}, holding],
+            [household, holding, {**refresh, "status": 404}],
+            [household, holding, {**holding, "method": "DELETE", "url": f"{endpoint}/synthetic-hold"}],
+            [household, holding, {**holding, "url": endpoint + "?legacy=true"}],
+            [household, renewal, {**renewal, "method": "PATCH"}],
             [household, {**renewal, "method": "POST"}],
             [household, {**renewal, "url": f"{endpoint}/extend"}],
             [household, {**renewal, "url": renewal["url"] + "?old=true"}],
@@ -8591,7 +8652,7 @@ process.stdout.write(eval(script));
             [household, renewal, {**household, "status": None}],
         ):
             with self.subTest(requests=requests):
-                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": requests}, require_extend=True))
+                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": requests}, keeping_existing=True))
 
     def test_same_window_refresh_with_meny_fallback_is_not_retried_by_checkout(self):
         client = self.client()
@@ -8608,7 +8669,7 @@ process.stdout.write(eval(script));
             "display": "3. september klokka 07:00 til 08:00", "selected": True,
         })]})
         client._select_delivery_slot = mock.Mock(
-            side_effect=lambda _: client._wait_for_delivery_reservation(require_extend=True),
+            side_effect=lambda _: client._wait_for_delivery_reservation(keeping_existing=True),
         )
         client._review_checkout_wizard = mock.Mock()
         cart = {"items": [{"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 1, "price": 13.9}],

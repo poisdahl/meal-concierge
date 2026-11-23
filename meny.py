@@ -69,6 +69,7 @@ MENY_FROM_PRICE = re.compile(
     re.IGNORECASE,
 )
 MENY_RESERVATION_PATH = "/sylinder/hentevinduer/reservasjoner/v1/api"
+MENY_TOKEN_REFRESH_PATH = "/api/auth/getToken"
 MENY_PICKER_PRICE = re.compile(
     r"^(?P<amount>[0-9]{1,7}(?:,[0-9]{2})?)\s+kr\s+(?P=amount)\s+kroner$",
     re.IGNORECASE,
@@ -680,14 +681,10 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
     return result
 
 
-def meny_delivery_reservation_acknowledged(value: Any, *, require_extend: bool = False) -> bool:
-    """Require completed writes, and exactly one extension when renewing."""
-
+def _meny_delivery_request_statuses(value: Any) -> list[tuple[str, Any]]:
     if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
         raise HouseholdError("MENY browser delivery request log changed")
-    required_method = "PUT" if require_extend else "POST"
-    reservation = None
-    household = None
+    observations = []
     for request in value["requests"]:
         if not isinstance(request, Mapping):
             raise HouseholdError("MENY browser delivery request log changed")
@@ -697,30 +694,57 @@ def meny_delivery_reservation_acknowledged(value: Any, *, require_extend: bool =
             parsed = urlparse(str(request.get("url") or ""))
         except ValueError as exc:
             raise HouseholdError("MENY browser delivery request log changed") from exc
-        if parsed.scheme != "https" or parsed.params or parsed.query or parsed.fragment:
+        if parsed.scheme != "https":
             continue
+        exact_url = not (parsed.params or parsed.query or parsed.fragment)
         if (
             parsed.netloc == "api.ngdata.no"
-            and (method == "POST" and parsed.path == MENY_RESERVATION_PATH
-                 or method == "PUT" and re.fullmatch(
-                     re.escape(MENY_RESERVATION_PATH) + r"/[A-Za-z0-9_-]{1,128}/extend", parsed.path,
-                 ))
+            and (parsed.path == MENY_RESERVATION_PATH or parsed.path.startswith(MENY_RESERVATION_PATH + "/"))
+            and method not in {"GET", "HEAD", "OPTIONS"}
         ):
-            # An earlier request can still take effect after a later one.
-            if type(status) is not int:
-                return False
-            if require_extend and (method != required_method or reservation is not None):
-                return False
-            if method == required_method:
-                reservation = status
+            if exact_url and method == "POST" and parsed.path == MENY_RESERVATION_PATH:
+                observations.append(("reservation", status))
+            elif exact_url and method == "PUT" and re.fullmatch(
+                re.escape(MENY_RESERVATION_PATH) + r"/[A-Za-z0-9_-]{1,128}/extend", parsed.path,
+            ):
+                observations.append(("extension", status))
+            else:
+                observations.append(("unqualified", status))
         elif (
-            method == "PUT"
+            exact_url and method == "PUT"
             and parsed.netloc == "platform-rest-prod.ngdata.no"
             and re.fullmatch(r"/api/extended-user/\d{1,20}/household", parsed.path) is not None
         ):
-            if type(status) is not int:
+            observations.append(("household", status))
+        elif (
+            method == "GET" and parsed.netloc == "meny.no" and parsed.path == MENY_TOKEN_REFRESH_PATH
+            and (type(status) is not int or status in {404, 422})
+        ):
+            # MENY can start an equivalent reservation if its token refresh
+            # returns 404 or 422 before the extension request is sent.
+            observations.append(("unsettled_refresh", status))
+    return observations
+
+
+def meny_delivery_reservation_acknowledged(value: Any, *, keeping_existing: bool = False) -> bool:
+    """Require completed writes and a single reservation write when keeping a window."""
+
+    reservation = None
+    household = None
+    for write, status in _meny_delivery_request_statuses(value):
+        if write in {"unqualified", "unsettled_refresh"}:
+            if keeping_existing:
                 return False
+            continue
+        # An earlier request can still take effect after a later one.
+        if type(status) is not int:
+            return False
+        if write == "household":
             household = status
+        elif keeping_existing or write == "reservation":
+            if keeping_existing and reservation is not None:
+                return False
+            reservation = status
     return all(status is not None and 200 <= status < 300 for status in (reservation, household))
 
 
@@ -2734,10 +2758,13 @@ __DELIVERY_BINDING__
             raise HouseholdError("MENY order_id is invalid")
         return order_id
 
-    def _open_delivery_picker(self) -> None:
+    def _open_delivery_picker(self, *, track_reservation: bool = False) -> None:
         self._open(f"{BASE_URL}/sok?{urlencode({'query': 'levering'})}")
         self._open(STORE_URL)
         self._prepare_search()
+        if track_reservation:
+            # Clearing the log does not enable tracking on a fresh browser session.
+            self._invoke("network", "requests", "--filter", MENY_RESERVATION_PATH, "--method", "OPTIONS")
         for _ in range(20):
             result = self._eval(r"""
 (() => {
@@ -2933,21 +2960,21 @@ __DELIVERY_BINDING__
         if isinstance(guard, Mapping) and selected != validate_delivery_slot(guard.get("selected")):
             raise HouseholdError("MENY delivery price changed after review")
 
-    def _wait_for_delivery_reservation(self, *, require_extend: bool = False) -> None:
+    def _wait_for_delivery_reservation(self, *, keeping_existing: bool = False) -> None:
         for attempt in range(120):
             requests = self._invoke("network", "requests")
-            if meny_delivery_reservation_acknowledged(requests, require_extend=require_extend):
+            if meny_delivery_reservation_acknowledged(requests, keeping_existing=keeping_existing):
                 return
             if attempt < 119:
                 self._sleep(0.25)
-        operation = "renewal of the selected window" if require_extend else "the delivery reservation"
+        operation = "renewal of the selected window" if keeping_existing else "the delivery reservation"
         raise HouseholdError(
             f"MENY did not acknowledge {operation}. Inspect the selected slot before retrying."
         )
 
     def _select_delivery_slot(self, value: Any) -> dict[str, Any]:
         slot_ref, expected_suffix = normalize_delivery_slot_ref(value)
-        self._open_delivery_picker()
+        self._open_delivery_picker(track_reservation=True)
         marked: dict[str, Any] = {}
         for _ in range(20):
             marked = self._eval(r"""
@@ -3059,24 +3086,35 @@ __DELIVERY_BINDING__
             return observed
 
         for _ in range(20):
-            if read_confirmation(mark=False).get("ready") is True:
+            confirmation = read_confirmation(mark=False)
+            if confirmation.get("ready") is True:
                 break
             self._sleep(0.25)
         else:
             raise HouseholdError("MENY delivery confirmation changed")
-        # Clearing the log does not enable tracking on a fresh browser session.
-        self._invoke("network", "requests", "--filter", MENY_RESERVATION_PATH, "--method", "OPTIONS")
+        keeping = confirmation.get("keeping_existing") is True
+        if keeping:
+            # Keep can use a fresh POST. Do not discard a known pending write
+            # or relevant refresh that can produce a fallback after clearing.
+            for request_filter in (
+                (MENY_RESERVATION_PATH,),
+                ("/api/extended-user/", "--method", "PUT"),
+                (MENY_TOKEN_REFRESH_PATH, "--method", "GET"),
+            ):
+                requests = self._invoke("network", "requests", "--filter", *request_filter)
+                if any(kind == "unsettled_refresh" or type(status) is not int
+                       for kind, status in _meny_delivery_request_statuses(requests)):
+                    raise HouseholdError("MENY has an unresolved delivery or sign-in update. Inspect the selected slot before retrying.")
         self._invoke("network", "requests", "--clear")
         confirmation = read_confirmation(mark=True)
-        keeping = confirmation.get("keeping_existing") is True
-        if confirmation.get("ready") is not True or (already_selected and not keeping):
+        if confirmation.get("ready") is not True or (confirmation.get("keeping_existing") is True) != keeping:
             raise HouseholdError("MENY delivery confirmation changed")
         if meny_label_slot_ref(confirmation.get("label"))[0] != slot_ref:
             raise HouseholdError("MENY delivery slot date changed; list delivery slots again")
         self._invoke("click", '[data-meal-concierge-action="delivery-confirm"]')
         # The request log establishes write success. The marked control and
         # the reopened picker establish the matching delivery window.
-        self._wait_for_delivery_reservation(require_extend=keeping)
+        self._wait_for_delivery_reservation(keeping_existing=keeping)
         self._wait_delivery_picker_closed()
         self._open_delivery_picker()
         selected: dict[str, Any] = {}
