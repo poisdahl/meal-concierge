@@ -6517,39 +6517,52 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),opened}));
             with self.subTest(label=label):
                 self.assertFalse(meny_checkout_reviews_match(expected, changed(update)))
 
+    ZERO_TOTAL_DRAWER = {
+        "ready": False,
+        "authenticated": True,
+        "root_count": 1,
+        "item_root_count": 1,
+        "control_count": 1,
+        "empty": False,
+        "total_count": 1,
+        "subtotal_count": 1,
+        "subtotal": 0,
+        "delivery_count": 0,
+        "delivery": None,
+        "items": [{"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 1, "price": 19.9}],
+        "count": 1,
+        "total": 0,
+    }
+    OPEN_DRAWER = {"open": True, "ready": True, "authenticated": True, "root_count": 1}
+    CLOSED_DRAWER = {"open": False, "ready": True, "authenticated": True, "root_count": 0, "open_count": 1}
+
+    @contextmanager
+    def drawer_clock(self, client):
+        """Let the client's sleeps move a fake monotonic clock."""
+        clock = {"now": 1000.0}
+        client._sleep = mock.Mock(side_effect=lambda seconds: clock.update(now=clock["now"] + seconds))
+        with mock.patch("meny.time.monotonic", side_effect=lambda: clock["now"]):
+            yield clock
+
     def test_cart_read_reloads_one_nonempty_zero_total_snapshot(self):
+        from meny import MENY_CART_TOTAL_WAIT_SECONDS
         client = self.client()
-        zero = {
-            "ready": False,
-            "authenticated": True,
-            "root_count": 1,
-            "item_root_count": 1,
-            "control_count": 1,
-            "empty": False,
-            "total_count": 1,
-            "subtotal_count": 1,
-            "subtotal": 0,
-            "delivery_count": 0,
-            "delivery": None,
-            "items": [{"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 1, "price": 19.9}],
-            "count": 1,
-            "total": 0,
-        }
+        zero = self.ZERO_TOTAL_DRAWER
         valid = {**zero, "ready": True, "subtotal": 19.9, "total": 19.9}
+        # The zero total outlasts the whole bounded wait, so the page is stale.
+        polls = int(MENY_CART_TOTAL_WAIT_SECONDS / 0.25) + 1
         client._eval = mock.Mock(side_effect=[
-            {"open": True, "ready": True, "authenticated": True, "root_count": 1},
-            zero,
-            {"open": False, "ready": True, "authenticated": True, "root_count": 0, "open_count": 1},
-            valid,
+            self.OPEN_DRAWER, *([zero] * polls), self.CLOSED_DRAWER, valid,
         ])
         client._invoke = mock.Mock(return_value={})
-        client._sleep = mock.Mock()
-        self.assertEqual(client._read_cart()["total"], 19.9)
+        with self.drawer_clock(client):
+            self.assertEqual(client._read_cart()["total"], 19.9)
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("reload"),
             mock.call("click", '[data-meal-concierge-action="open-cart"]'),
         ])
-        self.assertEqual(client._sleep.call_args_list, [mock.call(0.5), mock.call(0.5)])
+        self.assertEqual(client._sleep.call_args_list,
+                         [mock.call(0.25)] * (polls - 1) + [mock.call(0.5), mock.call(0.5)])
         self.assertIn("linePrices.length === 1", client._eval.call_args_list[1].args[0])
         self.assertIn("filter(visible)", client._eval.call_args_list[1].args[0])
 
@@ -6566,6 +6579,59 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),opened}));
         self.assertEqual(observed["total"], 19.9)
         client._sleep.assert_called_once_with(0.25)
         client._invoke.assert_not_called()
+
+    def test_cart_read_waits_for_a_slow_total_without_reloading(self):
+        # MENY lists the items with a zero total until its price calculator
+        # answers. A late answer inside the bounded wait needs no reload.
+        client = self.client()
+        zero = self.ZERO_TOTAL_DRAWER
+        valid = {**zero, "ready": True, "subtotal": 19.9, "total": 19.9}
+        client._eval = mock.Mock(side_effect=[self.OPEN_DRAWER, *([zero] * 40), valid])
+        client._invoke = mock.Mock(return_value={})
+        with self.drawer_clock(client) as clock:
+            self.assertEqual(client._read_cart()["total"], 19.9)
+        client._invoke.assert_not_called()
+        self.assertEqual(client._sleep.call_args_list, [mock.call(0.25)] * 40)
+        self.assertEqual(clock["now"], 1010.0)
+
+    def test_cart_read_stops_when_the_total_stays_zero_after_its_reload(self):
+        from meny import MENY_CART_TOTAL_WAIT_SECONDS
+        client = self.client()
+        zero = self.ZERO_TOTAL_DRAWER
+        polls = int(MENY_CART_TOTAL_WAIT_SECONDS / 0.25) + 1
+        client._eval = mock.Mock(side_effect=[
+            self.OPEN_DRAWER, *([zero] * polls), self.CLOSED_DRAWER, *([zero] * polls),
+        ])
+        client._invoke = mock.Mock(return_value={})
+        with self.drawer_clock(client) as clock:
+            with self.assertRaisesRegex(HouseholdError, "MENY cart did not finish rendering"):
+                client._read_cart()
+        self.assertEqual(client._invoke.call_args_list, [
+            mock.call("reload"),
+            mock.call("click", '[data-meal-concierge-action="open-cart"]'),
+        ])
+        # Two bounded waits, plus the pauses after the reload and the reopen.
+        self.assertEqual(clock["now"] - 1000.0, 2 * MENY_CART_TOTAL_WAIT_SECONDS + 1.0)
+
+    def test_confirmed_batch_with_a_slow_drawer_total_is_not_reported_partial(self):
+        # Both clicks are confirmed on the product page. The batch readback
+        # then sees MENY's zero total for a few seconds before the calculator
+        # answers; that is a settled cart, not a partial change.
+        client = self.client()
+        zero = {**self.ZERO_TOTAL_DRAWER, "items": [
+            {"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 2, "price": 39.8}], "count": 2}
+        valid = {**zero, "ready": True, "subtotal": 39.8, "total": 39.8}
+        client._change_one = mock.Mock()
+        client._eval = mock.Mock(side_effect=[
+            self.OPEN_DRAWER, *([zero] * 24), valid,
+            *([self.OPEN_DRAWER, valid] * 3),
+        ])
+        client._invoke = mock.Mock(return_value={})
+        with self.drawer_clock(client):
+            cart = client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
+        self.assertEqual(client._change_one.call_count, 2)
+        self.assertEqual([(item["product_id"], item["quantity"]) for item in cart["items"]], [(MENY_PRODUCT, 2)])
+        self.assertNotIn(mock.call("reload"), client._invoke.call_args_list)
 
     def test_search_uses_encoded_bound_results_route_and_one_scoped_root(self):
         client = self.client()

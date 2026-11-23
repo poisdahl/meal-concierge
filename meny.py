@@ -120,6 +120,9 @@ CHECKOUT_DELIVERY_BINDING_JS = r"""
 DEFAULT_BROWSER_ARGS = "--disable-gpu,--disable-quic"
 MENY_READ_TIMEOUT = 110
 MENY_CART_TIMEOUT = 240
+# Until MENY's price calculator answers, the cart drawer lists the items with a
+# zero total. Give a slow answer this long before reloading the page.
+MENY_CART_TOTAL_WAIT_SECONDS = 12
 MENY_ORDER_TIMEOUT = 240
 MENY_LOGIN_POLL_ATTEMPTS = 24
 MENY_LOGIN_POLL_INTERVAL = 1.25
@@ -621,6 +624,18 @@ def meny_delivery_reservation_acknowledged(value: Any) -> bool:
         ):
             household = True
     return reservation and household
+
+
+def _zero_total_cart(value: Mapping[str, Any]) -> bool:
+    """A drawer that lists items with a zero total, as MENY shows it before its calculator answers."""
+    return (
+        value.get("authenticated") is True
+        and value.get("item_root_count", 0) > 0
+        and (
+            (value.get("total_count") == 1 and value.get("total") == 0)
+            or (value.get("subtotal_count") == 1 and value.get("subtotal") == 0)
+        )
+    )
 
 
 def normalize_cart_snapshot(value: Any) -> dict[str, Any]:
@@ -2246,6 +2261,7 @@ __DELIVERY_BINDING__
             self._invoke("click", '[data-meal-concierge-action="open-cart"]')
             self._sleep(0.5)
         result: dict[str, Any] = {}
+        zero_since: float | None = None
         for _ in range(60):
             result = self._eval(r"""
 (() => {
@@ -2323,26 +2339,17 @@ __DELIVERY_BINDING__
                 raise HouseholdError(changed)
             if result.get("ready") is True:
                 break
-            if (
-                not observe_order_mode
-                and result.get("authenticated") is True
-                and result.get("item_root_count", 0) > 0
-                and (
-                    (result.get("total_count") == 1 and result.get("total") == 0)
-                    or (result.get("subtotal_count") == 1 and result.get("subtotal") == 0)
-                )
-            ):
-                break
+            if not observe_order_mode and _zero_total_cart(result):
+                # A slow calculator answer is not a stale page. Reload only
+                # once the zero total has lasted the whole bounded wait.
+                now = time.monotonic()
+                zero_since = now if zero_since is None else zero_since
+                if now - zero_since >= MENY_CART_TOTAL_WAIT_SECONDS:
+                    break
+            else:
+                zero_since = None
             self._sleep(0.25)
-        if (
-            allow_reload and not observe_order_mode
-            and result.get("authenticated") is True
-            and result.get("item_root_count", 0) > 0
-            and (
-                (result.get("total_count") == 1 and result.get("total") == 0)
-                or (result.get("subtotal_count") == 1 and result.get("subtotal") == 0)
-            )
-        ):
+        if allow_reload and not observe_order_mode and _zero_total_cart(result):
             self._invoke("reload")
             self._sleep(0.5)
             return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
