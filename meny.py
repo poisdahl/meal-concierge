@@ -1435,7 +1435,8 @@ class MenyClient:
             if previous is not None:
                 expected = previous + delta
                 self._resolve_order_route(order_change_code)
-                observed = self._wait_for_quantity(expected, previous, product)
+                with self._quantity_settle_window():
+                    observed = self._wait_for_quantity(expected, previous, product)
                 if observed != expected:
                     raise _unsettled_click("MENY product quantity did not settle", observed, previous, dispatched_at)
                 self._assert_authenticated()
@@ -1525,7 +1526,8 @@ class MenyClient:
             if current < 1:
                 raise HouseholdError("MENY product is not in the cart")
             self._click_cart_remove_control(product, current, order_change_code, before_dispatch)
-            observed = self._wait_for_cart_quantity(product, current - 1, order_change_code)
+            with self._quantity_settle_window():
+                observed = self._wait_for_cart_quantity(product, current - 1, order_change_code)
             if observed != current - 1:
                 raise _unsettled_click("MENY cart quantity did not settle", observed, current, dispatched_at)
             self._assert_authenticated()
@@ -1590,9 +1592,9 @@ class MenyClient:
 
     def _wait_for_cart_quantity(self, product: str, expected: int, order_change_code: str | None) -> int:
         observed = -1
-        settle_by = time.monotonic() + MENY_QUANTITY_SETTLE_SECONDS
-        # Polls 0.25 s apart; the clock ends the window sooner when reads are slow.
         for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
+            if self.deadline is not None and time.monotonic() + 0.25 >= self.deadline:
+                break
             self._sleep(0.25)
             result = self._eval(r"""
 (() => {
@@ -1623,8 +1625,6 @@ class MenyClient:
                 return expected
             if isinstance(result.get("quantity"), int):
                 observed = result["quantity"]
-            if time.monotonic() >= settle_by:
-                break
         return observed
 
     def _product_control(self, action: str, delta: int, product: str) -> dict[str, Any]:
@@ -2106,9 +2106,9 @@ __DELIVERY_BINDING__
 
     def _wait_for_quantity(self, expected: int, previous: int, product: str) -> int:
         observed = previous
-        settle_by = time.monotonic() + MENY_QUANTITY_SETTLE_SECONDS
-        # Polls 0.25 s apart; the clock ends the window sooner when reads are slow.
         for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
+            if self.deadline is not None and time.monotonic() + 0.25 >= self.deadline:
+                break
             self._sleep(0.25)
             result = self._product_control("read", 1, product)
             if result.get("authenticated") is not True:
@@ -2116,7 +2116,7 @@ __DELIVERY_BINDING__
             observed = result.get("quantity")
             if isinstance(observed, bool) or not isinstance(observed, int) or observed < 0:
                 raise HouseholdError("MENY product quantity is invalid")
-            if observed == expected or time.monotonic() >= settle_by:
+            if observed == expected:
                 break
         return observed
 
@@ -3954,6 +3954,17 @@ __DELIVERY_BINDING__
             self.recovery_allowed = previous_recovery
             self._recovery_consumed = previous_recovery_consumed
             self.lock.release()
+
+    @contextmanager
+    def _quantity_settle_window(self):
+        # The deadline covers browser invocations as well as the sleeps between reads.
+        prior = self.deadline
+        end = time.monotonic() + MENY_QUANTITY_SETTLE_SECONDS
+        self.deadline = end if prior is None else min(prior, end)
+        try:
+            yield
+        finally:
+            self.deadline = prior
 
     def _require_time(self, minimum: float = 0) -> None:
         if self.deadline is not None and self.deadline - time.monotonic() < minimum:

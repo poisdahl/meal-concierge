@@ -169,6 +169,9 @@ class MenyDiagnosticsTests(unittest.TestCase):
         for code in ('quantity_unexpected', 'cart_not_settled'):
             self.assertEqual(normalize_provider_failure({**safe, 'class': code})['class'], code)
         self.assertIsNone(normalize_provider_failure({**safe, 'phase': 'adapter_invocation'}))
+        self.assertIsNone(normalize_provider_failure({**safe, 'source': 'local_timeout', 'phase': 'local_wait'}))
+        self.assertIsNone(normalize_provider_failure({**safe, 'class': 'local_timeout'}))
+        self.assertNotIn('elapsed_ms', normalize_provider_failure({**safe, 'class': 'cart_not_settled'}))
         for bad in (None, True, -1, 3_600_001, 15.5, '15125', SECRET):
             self.assertNotIn('elapsed_ms', normalize_provider_failure({**safe, 'elapsed_ms': bad}))
         reply = _applied_product_result_projection({

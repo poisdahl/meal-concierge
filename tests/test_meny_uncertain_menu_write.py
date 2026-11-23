@@ -367,12 +367,32 @@ class MenyClickSettleTests(unittest.TestCase):
         self.assertEqual(len(self.clicks), 2)
         self.assertLess(self.now, client.deadline)
         waited = self.now - self.clicks[1]
-        self.assertGreaterEqual(waited, MENY_QUANTITY_SETTLE_SECONDS)
-        self.assertLess(waited, MENY_QUANTITY_SETTLE_SECONDS + 1)
+        self.assertGreaterEqual(waited, MENY_QUANTITY_SETTLE_SECONDS - 0.25)
+        self.assertLessEqual(waited, MENY_QUANTITY_SETTLE_SECONDS)
         failure = dict(caught.exception.provider_failure)
         self.assertEqual(failure.pop("elapsed_ms"), round(waited * 1000))
         self.assertEqual(failure, {"provider": "meny", "class": "quantity_not_settled", "source": "cart_readback",
                                    "phase": "post_click_readback", "daemon_request_ending": "unknown"})
+
+    def test_a_stalled_browser_read_is_bounded_by_the_quantity_window(self):
+        from meny import MENY_QUANTITY_SETTLE_SECONDS, MenyBrowserError
+        client = self.page([float("inf")])
+        overall_deadline = client.deadline
+        control = client._product_control
+
+        def stalled_read(*args):
+            if not self.clicks:
+                return control(*args)
+            self.assertEqual(client.deadline, self.clicks[0] + MENY_QUANTITY_SETTLE_SECONDS)
+            self.now = client.deadline
+            raise MenyBrowserError("synthetic browser timeout", failure_class="local_timeout", source="local_timeout")
+
+        client._product_control = stalled_read
+        with self.assertRaisesRegex(MenyBrowserError, "uncertain.*do not retry") as caught:
+            client._change_one(base.MENY_PRODUCT, 1)
+        self.assertEqual(caught.exception.provider_failure["class"], "local_timeout")
+        self.assertEqual(client.deadline, overall_deadline)
+        self.assertEqual(len(self.clicks), 1)
 
     def test_the_last_reading_distinguishes_no_change_from_another_quantity(self):
         for observed, failure_class in ((7, "quantity_not_settled"), (9, "quantity_unexpected")):
@@ -420,7 +440,7 @@ class MenyClickSettleTests(unittest.TestCase):
                     client._remove_one_from_cart(base.MENY_PRODUCT, None)
                 failure = caught.exception.provider_failure
                 self.assertEqual(failure["class"], "quantity_not_settled")
-                self.assertGreaterEqual(failure["elapsed_ms"], MENY_QUANTITY_SETTLE_SECONDS * 1000)
+                self.assertGreaterEqual(failure["elapsed_ms"], (MENY_QUANTITY_SETTLE_SECONDS - 0.25) * 1000)
 
 
 if __name__ == "__main__":
