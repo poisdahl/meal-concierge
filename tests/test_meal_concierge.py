@@ -4878,8 +4878,10 @@ class MenyClientTests(unittest.TestCase):
                 result = client._change_cart(request)
                 delta = 1 if quantity > 0 else -1
                 self.assertEqual(client._change_one.call_args_list, [
-                    mock.call(MENY_PRODUCT, delta, order_change_code=order_code, reuse_ready=False),
-                    mock.call(MENY_PRODUCT, delta, order_change_code=order_code, reuse_ready=reuse),
+                    mock.call(MENY_PRODUCT, delta, order_change_code=order_code, reuse_ready=False,
+                              expected_quantity=None),
+                    mock.call(MENY_PRODUCT, delta, order_change_code=order_code, reuse_ready=reuse,
+                              expected_quantity=None),
                 ])
                 self.assertEqual(result["provider"], "meny")
                 self.assertEqual(client._read_cart.call_count, 4)
@@ -4995,7 +4997,8 @@ class MenyClientTests(unittest.TestCase):
             with self.assertRaises(MenyCartStoppedError) as caught:
                 client.call("manipulate_cart", {"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
         self.assertEqual(caught.exception.applied_operations, [{"productId": MENY_PRODUCT, "quantity": 1}])
-        client._change_one.assert_called_once_with(MENY_PRODUCT, 1, order_change_code=None, reuse_ready=False)
+        client._change_one.assert_called_once_with(MENY_PRODUCT, 1, order_change_code=None, reuse_ready=False,
+                                                   expected_quantity=None)
         client._read_cart.assert_not_called()
         self.assertIsNone(client.deadline)
 
@@ -7402,7 +7405,7 @@ process.stdout.write(eval(script));
         client = self.client()
         client._eval = lambda script: script
         harness = r"""
-const {script, path, subtitle, labels, selected} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const {script, path, subtitle, labels, selected, stepper, marked, blocked} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 global.location = new URL('https://meny.no' + path);
 global.Node = {DOCUMENT_POSITION_FOLLOWING: 4};
 global.getComputedStyle = () => ({display:'block', visibility:'visible'});
@@ -7416,13 +7419,23 @@ function element(text, position) {
 const heading = element('Spaghetti', 1), about = element('Om produktet', 5);
 const select = element('', 3);
 select.selectedOptions = [element(selected, 3)];
+const control = {
+  contains: node => node === select,
+  classList: {contains: name => !selected && !stepper && name === 'ws-add-to-cart--not-added'},
+};
 heading.closest = selector => selector === '.ws-product-details__header' ? {
   querySelectorAll:s => s === ':scope > .ws-product-details__subtitle' && subtitle ? [element(subtitle, 2)] : []
 } : null;
 const buttons = labels.map(label => {
-  const button = element('Kjøp', 3); button.setAttribute('aria-label', label); return button;
+  const button = element('Kjøp', 3);
+  button.setAttribute('aria-label', label);
+  if (marked) button.setAttribute('data-meal-concierge-action', 'cart');
+  button.contains = () => false;
+  button.closest = s => s === '.ws-add-to-cart' ? control : null;
+  button.classList = {contains: name => !stepper && name === 'ws-add-to-cart__button--add'};
+  return button;
 });
-global.document = {querySelectorAll(selector) {
+global.document = {elementFromPoint: () => blocked ? element('Overlay', 3) : buttons[0], querySelectorAll(selector) {
   switch (selector) {
     case 'main h1': return [heading];
     case 'main h2': return [about];
@@ -7447,6 +7460,8 @@ process.stdout.write(eval(script));
             (1, "", "500g Sopps", [full, full], None),
             (1, "1 stk", "500g Sopps", [increase], increase),
             (1, "2 stk", "500g Sopps", [increase], increase),
+            (1, "1,5 kg", "500g Sopps", [increase], increase),
+            (1, "", "500g Sopps", [increase], increase),
             (1, "", "", ["Legg til Spaghetti i handlevognen"], "Legg til Spaghetti i handlevognen"),
             (1, "", "500g Sopps", ["Legg Spaghetti i handlevognen"], "Legg Spaghetti i handlevognen"),
             (-1, "1 stk", "500g Sopps", [remove], remove),
@@ -7459,10 +7474,31 @@ process.stdout.write(eval(script));
                 run = subprocess.run(
                     [shutil.which("node"), "-e", harness], text=True, capture_output=True, check=True,
                     input=json.dumps(dict(script=script, path=MENY_PRODUCT, selected=selected,
-                                          subtitle=subtitle, labels=labels)),
+                                          subtitle=subtitle, labels=labels, stepper=increase in labels)),
                 )
                 result = json.loads(run.stdout)
                 self.assertEqual((result["ready"], result.get("label")), (expected is not None, expected))
+                if expected is not None:
+                    self.assertIs(result["exact_quantity"], selected in {"1 stk", "2 stk"} or not selected and increase not in labels)
+
+        client._eval = mock.Mock(side_effect=[{"ready": True}, {"clear": True}])
+        client._invoke = mock.Mock(return_value={"box": {"x": 5, "y": 5, "width": 30, "height": 20}})
+        client._click_cart_control(MENY_PRODUCT, increase, mock.Mock(), mock.Mock(), reviewed_control=(1, 1))
+        final_hit_script = client._eval.call_args.args[0]
+        for selected, blocked, result in (
+            ("1 stk", False, {"clear": True}),
+            ("2 stk", False, {"quantity_changed": True}),
+            ("1 stk", True, {"blocked": True}),
+            ("", False, {"quantity_changed": True}),
+        ):
+            with self.subTest(selected=selected, blocked=blocked):
+                run = subprocess.run(
+                    [shutil.which("node"), "-e", harness], text=True, capture_output=True, check=True,
+                    input=json.dumps(dict(script=final_hit_script, path=MENY_PRODUCT, selected=selected,
+                                          subtitle="500g Sopps", labels=[increase], stepper=True,
+                                          marked=True, blocked=blocked)),
+                )
+                self.assertEqual(json.loads(run.stdout), result)
 
     def test_cart_click_rechecks_login_before_and_after_mutation(self):
         client = self.client()

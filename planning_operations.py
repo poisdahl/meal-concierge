@@ -20,7 +20,7 @@ import time
 from typing import Any, Mapping
 from core import HouseholdError, cart_contents, cart_summary
 from retail_mcp import RetailPreDispatchError
-from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyBrowserError, MenyCartStoppedError
+from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyBrowserError, MenyCartStoppedError, MenyClient
 from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
 from recipes import recipe_provider_problem, RECIPE_CATEGORIES
 from recipe_selection import history_source_index, family_history_usage, compact_candidate, source_group
@@ -5072,6 +5072,17 @@ class PlanningOperations:
         kwargs = {"deadline": deadline} if deadline is not None else {}
         return self.provider_client.call(tool, arguments, **kwargs)
 
+    def _cart_batch_arguments(self, batch, before, order_change=None):
+        arguments = {"operations": batch}
+        if self.provider == "meny":
+            if order_change:
+                arguments["order_change_code"] = order_change["code"]
+            elif isinstance(self.provider_client, MenyClient):
+                arguments["expected_before_quantities"] = {
+                    item["productId"]: before.get(item["productId"], 0) for item in batch
+                }
+        return arguments
+
     @staticmethod
     def _quantities_after_operations(before, operations):
         updated = dict(before)
@@ -5127,7 +5138,8 @@ class PlanningOperations:
                     raise RetailPreDispatchError("MENY cart ownership or menu changed before dispatch")
                 state["pending_cart_change"] = deepcopy(pending)
             try:
-                changed = self._cart_provider_call("manipulate_cart", {"operations": batch}, deadline=deadline)
+                arguments = self._cart_batch_arguments(batch, before_live)
+                changed = self._cart_provider_call("manipulate_cart", arguments, deadline=deadline)
             except RetailPreDispatchError as exc:
                 with self.store.locked() as state:
                     if state.get("pending_cart_change") != pending:
@@ -6629,9 +6641,7 @@ class PlanningOperations:
                     if action == "clear":
                         locked["product_selection_generation"] = secrets.token_hex(16)
                     locked["pending_cart_change"] = deepcopy(pending)
-                arguments = {"operations": batch}
-                if self.provider == "meny" and change:
-                    arguments["order_change_code"] = change["code"]
+                arguments = self._cart_batch_arguments(batch, pending["before"], change)
                 try:
                     self.provider_client.call("manipulate_cart", arguments, deadline=deadline)
                 except RetailPreDispatchError:

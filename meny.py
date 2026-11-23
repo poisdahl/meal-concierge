@@ -1587,6 +1587,14 @@ class MenyClient:
             if clicks > MAX_CART_CLICKS:
                 raise HouseholdError(f"one MENY cart request can change at most {MAX_CART_CLICKS} units")
             validated.append((product, quantity))
+        reviewed_quantities = None
+        if "expected_before_quantities" in arguments:
+            supplied = arguments["expected_before_quantities"]
+            if (order_change_code is not None or not isinstance(supplied, Mapping)
+                    or set(supplied) != {product for product, _ in validated}
+                    or any(type(quantity) is not int or quantity < 0 for quantity in supplied.values())):
+                raise MenyCartStoppedError("MENY reviewed cart quantities are invalid")
+            reviewed_quantities = dict(supplied)
         applied = 0
         acknowledged = []
         try:
@@ -1604,7 +1612,11 @@ class MenyClient:
                         order_change_code is None and delta == 1 and bool(acknowledged)
                         and acknowledged[-1] == unit
                     )
-                    self._change_one(product, delta, order_change_code=order_change_code, reuse_ready=reuse_ready)
+                    expected_quantity = reviewed_quantities[product] if reviewed_quantities is not None else None
+                    self._change_one(product, delta, order_change_code=order_change_code,
+                                     reuse_ready=reuse_ready, expected_quantity=expected_quantity)
+                    if reviewed_quantities is not None:
+                        reviewed_quantities[product] += delta
                     applied += 1
                     acknowledged.append(unit)
             return self._read_settled_cart()
@@ -1634,7 +1646,7 @@ class MenyClient:
                                source="cart_readback")
 
     def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None,
-                    reuse_ready: bool = False) -> None:
+                    reuse_ready: bool = False, expected_quantity: int | None = None) -> None:
         dispatched_at: float | None = None
 
         def before_dispatch() -> None:
@@ -1647,7 +1659,8 @@ class MenyClient:
         try:
             self._open(BASE_URL + product, reuse_ready=reuse_ready)
             self._assert_authenticated()
-            previous = self._activate_product_control(product, delta, before_dispatch)
+            previous = self._activate_product_control(product, delta, before_dispatch,
+                                                      expected_quantity=expected_quantity)
             if previous is not None:
                 expected = previous + delta
                 self._resolve_order_route(order_change_code)
@@ -1663,11 +1676,12 @@ class MenyClient:
             raise MenyCartStoppedError(str(exc)) from exc
 
         if delta < 0:
-            self._remove_one_from_cart(product, order_change_code)
+            self._remove_one_from_cart(product, order_change_code, expected_quantity=expected_quantity)
             return
         raise MenyCartStoppedError("MENY product control is unavailable")
 
-    def _activate_product_control(self, product: str, delta: int, before_dispatch: Any) -> int | None:
+    def _activate_product_control(self, product: str, delta: int, before_dispatch: Any, *,
+                                  expected_quantity: int | None = None) -> int | None:
         for attempt in range(20):
             before = self._product_control("mark", delta, product)
             if before.get("authenticated") is not True:
@@ -1676,10 +1690,18 @@ class MenyClient:
                 previous = before.get("quantity")
                 if isinstance(previous, bool) or not isinstance(previous, int) or previous < 0:
                     raise HouseholdError("MENY product quantity is invalid")
+                if expected_quantity is not None and (
+                    before.get("exact_quantity") is not True or previous != expected_quantity
+                ):
+                    raise HouseholdError("MENY reviewed product quantity changed or cannot be verified")
+
                 def same_control() -> bool:
                     return self._product_control("verify", delta, product) == before
+
                 try:
-                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch, same_control)
+                    binding = {"reviewed_control": (delta, expected_quantity)} if expected_quantity is not None else {}
+                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch,
+                                             same_control, **binding)
                     return previous
                 except _CartControlReplaced:
                     if attempt == 19:
@@ -1725,7 +1747,8 @@ class MenyClient:
         if remaining != {"clear": True}:
             raise HouseholdError("MENY order routing did not settle")
 
-    def _remove_one_from_cart(self, product: str, order_change_code: str | None) -> None:
+    def _remove_one_from_cart(self, product: str, order_change_code: str | None, *,
+                              expected_quantity: int | None = None) -> None:
         dispatched_at: float | None = None
 
         def before_dispatch() -> None:
@@ -1741,6 +1764,8 @@ class MenyClient:
             current = matches[0]["quantity"]
             if current < 1:
                 raise HouseholdError("MENY product is not in the cart")
+            if expected_quantity is not None and current != expected_quantity:
+                raise HouseholdError("MENY reviewed product quantity changed in the cart drawer")
             self._click_cart_remove_control(product, current, order_change_code, before_dispatch)
             with self._quantity_settle_window():
                 observed = self._wait_for_cart_quantity(product, current - 1, order_change_code)
@@ -1844,7 +1869,11 @@ class MenyClient:
         return observed
 
     def _product_control(self, action: str, delta: int, product: str) -> dict[str, Any]:
-        return self._eval(r"""
+        return self._eval(self._product_control_script(action, delta, product))
+
+    @staticmethod
+    def _product_control_script(action: str, delta: int, product: str) -> str:
+        return r"""
 (() => {
   if (ACTION !== 'verify') document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
@@ -1876,12 +1905,19 @@ class MenyClient:
   if (candidates.length !== 1 || (DELTA < 0 && (quantity < 1 || !/^\d+(?: stk)?$/.test(selected)))) return JSON.stringify({ready:false, page_ready:true, authenticated:authenticated.length === 1, quantity});
   if (ACTION === 'mark') candidates[0].setAttribute('data-meal-concierge-action', 'cart');
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
-  const label = norm(candidates[0].getAttribute('aria-label') || candidates[0].innerText);
-  return JSON.stringify({ready:marked.length === 1 && marked[0] === candidates[0], page_ready:true, authenticated:authenticated.length === 1, quantity, label});
+  const target = candidates[0];
+  const label = norm(target.getAttribute('aria-label') || target.innerText);
+  const control = target.closest('.ws-add-to-cart');
+  const idle = !select && control?.classList.contains('ws-add-to-cart--not-added') &&
+    target.classList.contains('ws-add-to-cart__button--add');
+  const exact_quantity = Boolean(idle || (select && control?.contains(select) &&
+    /^\d+(?: stk)?$/.test(selected) && Number.isSafeInteger(quantity) && quantity > 0));
+  return JSON.stringify({ready:marked.length === 1 && marked[0] === candidates[0], page_ready:true, authenticated:authenticated.length === 1, quantity, exact_quantity, label});
 })()
-""".replace("ACTION", json.dumps(action)).replace("DELTA", str(delta)).replace("PRODUCT", json.dumps(product)))
+""".replace("ACTION", json.dumps(action)).replace("DELTA", str(delta)).replace("PRODUCT", json.dumps(product))
 
-    def _click_cart_control(self, product: str, label: str, before_dispatch: Any, same_control: Any) -> None:
+    def _click_cart_control(self, product: str, label: str, before_dispatch: Any, same_control: Any, *,
+                            reviewed_control: tuple[int, int] | None = None) -> None:
         if not label:
             raise HouseholdError("MENY cart control identity is unavailable")
         selector = '[data-meal-concierge-action="cart"]'
@@ -1900,14 +1936,29 @@ class MenyClient:
   if (!__CHECK_HIT__) return JSON.stringify({ready:bound});
   const hit = document.elementFromPoint(__HIT_X__, __HIT_Y__);
   if (bound && !(hit && (hit === target || target.contains(hit)))) return JSON.stringify({blocked:true});
+  if (bound && __EXPECTED_QUANTITY__ !== null) {
+    const quantity = JSON.parse(__VERIFY_QUANTITY__);
+    if (quantity?.ready !== true || quantity.exact_quantity !== true ||
+        quantity.quantity !== __EXPECTED_QUANTITY__ || quantity.label !== LABEL) {
+      return JSON.stringify({quantity_changed:true});
+    }
+  }
   return JSON.stringify({clear:bound});
 })()
 """
+        expected_quantity = None
+        verification = "'{}'"
+        if reviewed_control is not None:
+            delta, expected_quantity = reviewed_control
+            verification = self._product_control_script("verify", delta, product)
+
         def observe(x: int | None = None, y: int | None = None) -> dict[str, Any]:
             values = {"PRODUCT": product, "LABEL": label, "__CHECK_HIT__": x is not None,
-                      "__HIT_X__": x, "__HIT_Y__": y}
+                      "__HIT_X__": x, "__HIT_Y__": y, "__EXPECTED_QUANTITY__": expected_quantity}
             # Fill in one pass so a product label can contain placeholder text.
-            script = re.sub("|".join(values), lambda match: json.dumps(values[match[0]]), gate)
+            replacements = {key: json.dumps(value) for key, value in values.items()}
+            replacements["__VERIFY_QUANTITY__"] = verification
+            script = re.sub("|".join(replacements), lambda match: replacements[match[0]], gate)
             return self._eval(script)
 
         ready = observe()
@@ -1950,6 +2001,8 @@ class MenyClient:
                 x, y = new_x, new_y
                 self._invoke("mouse", "move", str(x), str(y))
                 clear = observe(x, y) if same_control() else {"clear": False}
+        if clear == {"quantity_changed": True}:
+            raise HouseholdError("MENY reviewed product quantity changed before the click")
         if clear != {"clear": True}:
             raise HouseholdError("MENY cart control is obscured or changed")
         before_dispatch()
