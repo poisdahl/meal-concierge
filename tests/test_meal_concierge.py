@@ -5927,11 +5927,43 @@ process.stdout.write(eval(script));
             {"requests": [old, {**old, "requestId": "new"}]}, order_id,
         ), "new")
 
+    def test_order_detail_recognizes_the_live_meny_route_before_checking_freshness(self):
+        from meny import meny_order_detail_request_id
+
+        order_id = "99990001"
+        base = "https://platform-rest-prod.ngdata.no/api/order/"
+        old = {"url": base + f"store/user/{order_id}", "method": "GET", "status": 200, "requestId": "old"}
+        live = {**old, "url": base + f"1300/1234567/{order_id}", "requestId": "live"}
+
+        for status in (None, 500, 200):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    meny_order_detail_request_id({"requests": [old, {**live, "status": status}]}, order_id),
+                    "live" if status == 200 else None,
+                )
+        self.assertIsNone(
+            meny_order_detail_request_id({"requests": [live, {**old, "status": 404}]}, order_id)
+        )
+        for unrelated in (
+            live["url"].replace("/1300/", "/1301/"),
+            live["url"].replace("/1234567/", "/search/"),
+            live["url"].replace(order_id, "99990002"),
+            live["url"] + "/receipt",
+            live["url"] + "?archived=true",
+            live["url"].replace(".no/", ".no:8443/"),
+        ):
+            with self.subTest(unrelated=unrelated):
+                self.assertEqual(
+                    meny_order_detail_request_id({"requests": [live, {**old, "url": unrelated}]}, order_id),
+                    "live",
+                )
+
     def test_order_details_discard_stale_body_if_a_newer_request_starts(self):
         order_id = "99990001"
         old = {"requestId": "older", "method": "GET", "status": 200,
                "url": f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"}
-        newer = {**old, "requestId": "newer"}
+        newer = {**old, "requestId": "newer",
+                 "url": f"https://platform-rest-prod.ngdata.no/api/order/1300/1234567/{order_id}"}
         for final_status in (200, 500):
             with self.subTest(status=final_status):
                 client = self.client()

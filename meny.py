@@ -626,13 +626,19 @@ def meny_order_detail_request_id(value: Any, order_id: str) -> str | None:
 
     if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
         raise HouseholdError("MENY browser order request log changed")
-    expected_url = f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"
+    # The signed-in MENY page also uses a chain-prefixed order route.
+    expected_url = re.compile(
+        r"https://platform-rest-prod\.ngdata\.no/api/order/(?:store/user|1300/[0-9]{1,20})/"
+        + re.escape(order_id)
+    )
     # agent-browser appends requests at dispatch and updates their status in
     # place, so an unresolved newer request supersedes an older success.
     for request in reversed(value["requests"]):
         if not isinstance(request, Mapping):
             raise HouseholdError("MENY browser order request log changed")
-        if request.get("url") != expected_url or str(request.get("method") or "").upper() != "GET":
+        url = request.get("url")
+        if (not isinstance(url, str) or expected_url.fullmatch(url) is None
+                or str(request.get("method") or "").upper() != "GET"):
             continue
         status = request.get("status")
         request_id = request.get("requestId")
