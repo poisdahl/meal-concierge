@@ -68,6 +68,10 @@ MENY_FROM_PRICE = re.compile(
     r"^fra\s+(?P<amount>[0-9]{1,7}(?:,[0-9]{2})?)\s+kr\s+fra\s+(?P=amount)\s+kroner$",
     re.IGNORECASE,
 )
+MENY_PICKER_PRICE = re.compile(
+    r"^(?P<amount>[0-9]{1,7}(?:,[0-9]{2})?)\s+kr\s+(?P=amount)\s+kroner$",
+    re.IGNORECASE,
+)
 MENY_DELIVERY_WINDOW = re.compile(
     r"^(?P<weekday>man(?:dag)?|tir(?:sdag)?|ons(?:dag)?|tor(?:sdag)?|fre(?:dag)?|lør(?:dag)?|søn(?:dag)?)\s+"
     r"(?P<day>[1-9]|[12]\d|3[01])\.\s+"
@@ -468,6 +472,25 @@ def normalize_meny_delivery_slot(value: Any) -> dict[str, Any]:
         "price_kind": price_kind,
         "selected": value["selected"],
     })
+
+
+def meny_delivery_list_price_display(slot: Mapping[str, Any], label: str) -> str:
+    """Present a paired picker quote without assigning a checkout price."""
+    fallback = delivery_price_display(slot)
+    if slot["price_kind"] != "unavailable":
+        return fallback
+    match = DELIVERY_SLOT.fullmatch(label)
+    price = MENY_PICKER_PRICE.fullmatch(match["price_prefix"] or "") if match else None
+    if price is None:
+        return fallback
+    selection_day = datetime.fromisoformat(slot["start_at"]).astimezone(ZoneInfo("Europe/Oslo")).date()
+    try:
+        label_ref, _ = meny_label_slot_ref(label, today=selection_day)
+    except HouseholdError:
+        return fallback
+    if label_ref != slot["slot_ref"]:
+        return fallback
+    return f"{price['amount']} kr (vist i kalenderen, bekreft prisen i kassen)"
 
 
 def normalized_selected_meny_slot(slot_ref: str, label: Any) -> dict[str, Any]:
