@@ -3205,12 +3205,11 @@ class OrderOperations:
                 else:
                     raise HouseholdError("MENY checkout summary did not settle")
                 if not order_change:
-                    # The cart and the verified payment page expose different
-                    # totals. The difference alone cannot identify a fee or reserve.
+                    # Keep the cart comparison separate from verified checkout rows.
                     cart_total_ore = money_cents(refreshed_summary["total"])
                     checkout_total_ore = money_cents(summary["total"])
                     summary["price_breakdown"] = {
-                        "status": "unitemized",
+                        **summary.get("price_breakdown", {"status": "unitemized"}),
                         "cart_total_ore": cart_total_ore,
                         "cart_to_checkout_difference_ore": (
                             checkout_total_ore - cart_total_ore

@@ -6517,6 +6517,17 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),opened}));
             with self.subTest(label=label):
                 self.assertFalse(meny_checkout_reviews_match(expected, changed(update)))
 
+    def test_checkout_review_requires_the_same_observed_price_rows(self):
+        expected = self.checkout_review()
+        observed = deepcopy(expected)
+        observed["payment_price_rows"] = [False, [["delivery_price", 5900], ["picking_fee", 4900]]]
+        self.assertTrue(meny_checkout_reviews_match(expected, observed))  # Older total-only review.
+        self.assertFalse(meny_checkout_reviews_match(observed, expected))
+        expected["payment_price_rows"] = deepcopy(observed["payment_price_rows"])
+        self.assertTrue(meny_checkout_reviews_match(expected, observed))
+        observed["payment_price_rows"][1] = [["delivery_price", 6900], ["picking_fee", 3900]]
+        self.assertFalse(meny_checkout_reviews_match(expected, observed))
+
     ZERO_TOTAL_DRAWER = {
         "ready": False,
         "authenticated": True,
@@ -7472,6 +7483,10 @@ process.stdout.write(eval(script));
             "total": 99.9,
             "delivery": "torsdag 3. september Kl. 10:00-12:00",
             "submit_controls": 1,
+            "price_rows": [False, [
+                ["delivery_price", 5000], ["discounts", -1300], ["picking_fee", 2000],
+                ["product_subtotal", 1990], ["reserved_total", 9990], ["weight_substitution_reserve", 1000],
+            ]],
         }
         client._eval = mock.Mock(side_effect=[
             step,
@@ -7490,6 +7505,12 @@ process.stdout.write(eval(script));
         review = client._review_checkout(cart)
 
         self.assertEqual(review["summary"]["total"], 99.9)
+        self.assertEqual(review["summary"]["amounts"]["delivery_price"], 50.0)
+        self.assertEqual(review["summary"]["amounts"]["other_fees"], {"picking_fee": 20.0})
+        self.assertIsNone(review["summary"]["amounts"]["discounts"])
+        self.assertEqual(review["summary"]["price_breakdown"]["discounts_ore"], -1300)
+        self.assertEqual(review["summary"]["price_breakdown"]["weight_substitution_reserve_ore"], 1000)
+        self.assertEqual(review["payment_price_rows"], disabled["price_rows"])
         self.assertEqual(review["payment"], "vipps")
         payment_summary_script = client._eval.call_args_list[4].args[0]
         self.assertIn("Endre dato og tid", payment_summary_script)
@@ -10128,6 +10149,9 @@ class FlowTests(unittest.TestCase):
             def changing_review(cart, **kwargs):
                 review = original_review(cart, **kwargs)
                 review["summary"]["total"] = next(totals)
+                review["summary"]["price_breakdown"] = {
+                    "status": "itemized", "weight_substitution_reserve_ore": 600,
+                }
                 return review
 
             provider.review_checkout = changing_review
@@ -10136,6 +10160,10 @@ class FlowTests(unittest.TestCase):
             prepared = app.handle({"operation": "checkout", "action": "prepare"})
 
             self.assertEqual(prepared["summary"]["total"], 41.0)
+            self.assertEqual(prepared["summary"]["price_breakdown"], {
+                "status": "itemized", "weight_substitution_reserve_ore": 600,
+                "cart_total_ore": 3500, "cart_to_checkout_difference_ore": 600,
+            })
             self.assertEqual(store.read()["pending_checkout"]["summary"]["total"], 41.0)
             self.assertEqual(provider.checkout_review_recovery, [True, True, True])
 

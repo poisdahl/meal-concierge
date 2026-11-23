@@ -704,10 +704,13 @@ request or applicable standing authorization is reused; do not add a new ritual.
 When policy requires a fresh confirmation, show the exact current review and use
 its confirmation ID. Stable idempotency keys identify one intent; uncertain
 submit/cancel results are reconciled, never repeated as a new intent.
-For a MENY checkout with `summary.price_breakdown.status=unitemized`, show the
-verified checkout total. If the cart and checkout totals differ, show both and
-say that the individual checkout fees, reserve and discounts could not be
-verified. A quoted delivery slot fee is separate from the checkout breakdown.
+For a MENY checkout, use the verified checkout total and observed components
+in `summary.price_breakdown`. Describe the weight and substitution reserve as
+a temporary reservation and show estimated packaging as an estimate. When
+`discounts_already_in_subtotal=true`, show the discount as already included.
+For a partial or unavailable breakdown, say which components are missing.
+If the cart and checkout totals differ, show both. Treat a delivery slot quote
+as a separate figure from the observed checkout charge.
 
 Read an exact order's current status before describing it as upcoming or active.
 A cancelled order can still appear in order history with a future delivery date;
