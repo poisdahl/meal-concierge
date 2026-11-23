@@ -54,7 +54,7 @@ from oda_browser import (  # noqa: E402
     oda_checkout_amount_minor,
 )
 from service import Application, Server, config, delivery_matches, menu_email_html, meny_order_matches_checkout, oda_order_matches_addition, order_matches_checkout, peer_uid, validate_schedule  # noqa: E402
-from meny import DEFAULT_BROWSER_ARGS as MENY_BROWSER_ARGS, MenyClient, MenyOrderChangeDispatchError, _BrowserTransportError, _CheckoutNotReadyError, _DeliveryReservationError, meny_checkout_reviews_match, meny_delivery_reservation_acknowledged, meny_delivery_window_identity, meny_label_slot_ref, meny_order_card_status, meny_order_search_completed, meny_selected_delivery, normalize_browser_cdp, normalize_cart_snapshot, normalize_checkout_payment_snapshot, normalize_delivery_slot_ref, normalize_meny_delivery_slot, normalize_product_ref, vipps_dispatch_acknowledged, vipps_dispatch_attempted  # noqa: E402
+from meny import DEFAULT_BROWSER_ARGS as MENY_BROWSER_ARGS, MenyClient, MenyOrderChangeDispatchError, _BrowserTransportError, _CheckoutNotReadyError, meny_checkout_reviews_match, meny_delivery_reservation_acknowledged, meny_delivery_window_identity, meny_label_slot_ref, meny_order_card_status, meny_order_search_completed, meny_selected_delivery, normalize_browser_cdp, normalize_cart_snapshot, normalize_checkout_payment_snapshot, normalize_delivery_slot_ref, normalize_meny_delivery_slot, normalize_product_ref, vipps_dispatch_acknowledged, vipps_dispatch_attempted  # noqa: E402
 
 
 CONFIG = {"instance": "test", "household": "Test", "email_automation_profile": "test-email", "profile_overrides": {}}
@@ -5361,7 +5361,7 @@ process.stdout.write(eval(script));
             mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
             mock.call("click", '[data-meal-concierge-action="delivery-dismiss"]'),
         ])
-        client._wait_for_delivery_reservation.assert_called_once_with()
+        client._wait_for_delivery_reservation.assert_called_once_with(require_extend=False)
 
     @unittest.skipUnless(shutil.which("node"), "Node executes the MENY picker controls")
     @mock.patch("meny.datetime")
@@ -5382,12 +5382,18 @@ process.stdout.write(eval(script));
 const fs = require("node:fs");
 const {script, controls, selectedLabel} = JSON.parse(fs.readFileSync(0, "utf8"));
 const marks = [];
-const visible = (label) => ({
-  innerText:label, disabled:false,
-  getAttribute: name => name === "aria-pressed" && label === selectedLabel ? "true" : null,
-  setAttribute: (name, value) => marks.push([value, label]),
-  getBoundingClientRect: () => ({width:40, height:20}),
-});
+const visible = (control) => {
+  const {label, disabled = false, ariaDisabled = false, hidden = false} = typeof control === "string" ? {label:control} : control;
+  return {
+    innerText:label, disabled,
+    getAttribute: name => {
+      if (name === "aria-disabled" && ariaDisabled) return "true";
+      return name === "aria-pressed" && label === selectedLabel ? "true" : null;
+    },
+    setAttribute: (name, value) => marks.push([value, label]),
+    getBoundingClientRect: () => ({width:hidden ? 0 : 40, height:20}),
+  };
+};
 const buttons = controls.map(visible);
 const dialog = {...visible(""), querySelectorAll(selector) {
   if (selector === "h1") return [visible("Når skal vi levere til deg?")];
@@ -5406,8 +5412,15 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
         for name, before, after, reread, error, expected in (
             ("same window", [keep], [keep], label, None, [read_log, clear_log, confirm, dismiss]),
             ("no keep control", [], [], label, None, [dismiss]),
+            ("only hidden control", [{"label": keep, "hidden": True}], [], label, None, [dismiss]),
+            ("disabled keep", [{"label": keep, "disabled": True}], [], label, "changed or is unavailable", []),
+            ("aria-disabled keep", [{"label": keep, "ariaDisabled": True}], [], label, "changed or is unavailable", []),
             ("duplicate keep", [keep, keep], [keep], label, "changed or is unavailable", []),
             ("wrong keep", [other_keep], [keep], label, "changed or is unavailable", []),
+            ("initial confirmation", [other_confirmation], [], label, "changed or is unavailable", []),
+            ("initial punctuated confirmation", ["Bekreft levering:"], [], label, "changed or is unavailable", []),
+            ("initial competing disabled confirmation", [keep, {"label": other_confirmation, "disabled": True}],
+             [keep], label, "changed or is unavailable", []),
             ("confirmation changed", [keep], [other_keep], label, "confirmation changed", [read_log, clear_log]),
             ("competing confirmation", [keep], [keep, "Bekreft levering"], label, "confirmation changed",
              [read_log, clear_log]),
@@ -5451,7 +5464,7 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
                 armed = [mark for stage in observed.values() for mark in stage["marks"] if mark[0] != "delivery-dismiss"]
                 if confirm in expected:
                     self.assertEqual(armed, [["delivery-confirm", keep]])
-                    client._wait_for_delivery_reservation.assert_called_once_with(allow_extend=True)
+                    client._wait_for_delivery_reservation.assert_called_once_with(require_extend=True)
                     self.assertEqual(client._open_delivery_picker.call_count, 2)
                 else:
                     self.assertEqual(armed, [])
@@ -5482,13 +5495,15 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
     @mock.patch("meny.datetime")
     def test_delivery_selection_cannot_reuse_a_tentative_open_dialog(self, clock):
         clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
+        label = "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"
+        ready = {"ready": True, "identity": True, "authenticated": True, "label": label}
         client = self.client()
         client._open_delivery_picker = mock.Mock()
         client._sleep = mock.Mock()
         client._eval = mock.Mock(side_effect=[
-            {"ready": True, "identity": True, "authenticated": True, "already_selected": False, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
-            {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
-            {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
+            ready,
+            ready,
+            ready,
             *([{"ready": False, "identity": True, "authenticated": True, "dialog_count": 1}] * 20),
         ])
         client._invoke = mock.Mock(return_value={})
@@ -5504,6 +5519,33 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
             mock.call("network", "requests", "--clear"),
             mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
         ])
+
+    @mock.patch("meny.datetime")
+    def test_delivery_confirmation_revalidates_the_slot_date_before_dispatch(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
+        label = "3. september klokka 10:00 til 12:00"
+        ready = {"ready": True, "identity": True, "authenticated": True, "label": label}
+        for already_selected in (False, True):
+            with self.subTest(already_selected=already_selected):
+                client = self.client()
+                client._open_delivery_picker = mock.Mock()
+                client._eval = mock.Mock(side_effect=[
+                    {**ready, "already_selected": already_selected, "refresh_available": already_selected},
+                    ready,
+                    {**ready, "keeping_existing": already_selected, "label": label.replace("3.", "4.")},
+                ])
+                client._invoke = mock.Mock(return_value={})
+
+                with self.assertRaisesRegex(HouseholdError, "delivery slot date changed"):
+                    client._select_delivery_slot("meny:2026-09-03T10:00/12:00")
+
+                commands = [call.args for call in client._invoke.call_args_list]
+                expected = [] if already_selected else [("click", '[data-meal-concierge-action="delivery-slot"]')]
+                expected.extend([
+                    ("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api", "--method", "OPTIONS"),
+                    ("network", "requests", "--clear"),
+                ])
+                self.assertEqual(commands, expected)
 
     @mock.patch("meny.datetime")
     def test_delivery_selection_never_confirms_a_mismatched_selected_slot(self, clock):
@@ -7812,13 +7854,7 @@ process.stdout.write(eval(script));
             "display": "3. september klokka 07:00 til 08:00",
             "selected": True,
         })]})
-        client._select_delivery_slot = mock.Mock(side_effect=[
-            _DeliveryReservationError("temporary MENY reservation failure"),
-            {
-                "provider": "meny",
-                "selected": {"slot_id": "3. september klokka 07:00 til 08:00"},
-            },
-        ])
+        client._select_delivery_slot = mock.Mock()
         step = {
             "ready": True,
             "authenticated": True,
@@ -7855,10 +7891,7 @@ process.stdout.write(eval(script));
 
         self.assertEqual(review["summary"]["delivery"]["display"], "torsdag 3. september Kl. 07:00-08:00")
         client._delivery_slots.assert_called_once_with(require_selected=True)
-        self.assertEqual(client._select_delivery_slot.call_args_list, [
-            mock.call("meny:2026-09-03T07:00/08:00"),
-            mock.call("meny:2026-09-03T07:00/08:00"),
-        ])
+        client._select_delivery_slot.assert_called_once_with("meny:2026-09-03T07:00/08:00")
 
     def test_delivery_only_review_uses_verified_selection_without_reserving_again(self):
         client = self.client()
@@ -7927,7 +7960,7 @@ process.stdout.write(eval(script));
                     client._review_checkout(cart, order_change=drifted)
                 client._select_delivery_slot.assert_not_called()
 
-    def test_checkout_review_stops_after_two_delivery_reservation_failures(self):
+    def test_checkout_review_stops_after_one_uncertain_delivery_reservation(self):
         client = self.client()
         client._delivery_slots = mock.Mock(return_value={"slots": [normalize_meny_delivery_slot({
             "slot_id": "3. september klokka 07:00 til 08:00",
@@ -7937,7 +7970,12 @@ process.stdout.write(eval(script));
             "display": "3. september klokka 07:00 til 08:00",
             "selected": True,
         })]})
-        client._select_delivery_slot = mock.Mock(side_effect=_DeliveryReservationError("MENY reservation failed"))
+        client._invoke = mock.Mock(return_value={"requests": [
+            {"url": "https://api.ngdata.no/sylinder/hentevinduer/reservasjoner/v1/api", "method": "POST", "status": None},
+        ]})
+        client._sleep = mock.Mock()
+        client._select_delivery_slot = mock.Mock(side_effect=lambda _: client._wait_for_delivery_reservation())
+        client._review_checkout_wizard = mock.Mock()
         cart = {
             "items": [{"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 1, "price": 13.9}],
             "count": 1,
@@ -7945,10 +7983,11 @@ process.stdout.write(eval(script));
             "delivery": None,
         }
 
-        with self.assertRaisesRegex(_DeliveryReservationError, "reservation failed"):
+        with self.assertRaisesRegex(HouseholdError, "did not acknowledge the delivery reservation"):
             client._review_checkout(cart)
 
-        self.assertEqual(client._select_delivery_slot.call_count, 2)
+        client._select_delivery_slot.assert_called_once_with("meny:2026-09-03T07:00/08:00")
+        client._review_checkout_wizard.assert_not_called()
 
     def test_checkout_submit_rejects_a_changed_selected_delivery_without_reserving_it(self):
         client = self.client()
@@ -8487,10 +8526,11 @@ process.stdout.write(eval(script));
 
     def test_delivery_reservation_requires_the_exact_successful_meny_endpoint(self):
         endpoint = "https://api.ngdata.no/sylinder/hentevinduer/reservasjoner/v1/api"
-        household = "https://platform-rest-prod.ngdata.no/api/extended-user/123456/household"
+        household = {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household",
+                     "method": "PUT", "status": 204}
         self.assertTrue(meny_delivery_reservation_acknowledged({"requests": [
             {"method": "POST", "status": 201, "url": endpoint},
-            {"method": "PUT", "status": 200, "url": household},
+            household,
         ]}))
         for request in (
             {"method": "POST", "status": None, "url": endpoint},
@@ -8500,9 +8540,24 @@ process.stdout.write(eval(script));
             {"method": "POST", "status": 200, "url": "https://example.test/sylinder/hentevinduer/reservasjoner/v1/api"},
         ):
             with self.subTest(request=request):
-                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [request]}))
+                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [request, household]}))
         with self.assertRaisesRegex(HouseholdError, "delivery request log changed"):
             meny_delivery_reservation_acknowledged({"requests": {}})
+
+    def test_delivery_reservation_accepts_the_latest_completed_writes(self):
+        endpoint = "https://api.ngdata.no/sylinder/hentevinduer/reservasjoner/v1/api"
+        holding = {"url": endpoint, "method": "POST", "status": 201}
+        household = {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household",
+                     "method": "PUT", "status": 204}
+        acknowledged = [holding, household]
+        self.assertTrue(meny_delivery_reservation_acknowledged({"requests": [
+            {**holding, "status": 422}, {**household, "status": 403}, *acknowledged,
+        ]}))
+        for write in (*acknowledged, {"url": f"{endpoint}/synthetic-hold/extend", "method": "PUT"}):
+            pending = {**write, "status": None}
+            with self.subTest(write=write):
+                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [pending, *acknowledged]}))
+                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [*acknowledged, pending]}))
 
     def test_same_window_refresh_requires_both_current_acknowledgements(self):
         endpoint = "https://api.ngdata.no/sylinder/hentevinduer/reservasjoner/v1/api"
@@ -8510,37 +8565,42 @@ process.stdout.write(eval(script));
         household = {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household",
                      "method": "PUT", "status": 204}
         holding = {"url": endpoint, "method": "POST", "status": 201}
-        for request in (renewal, holding):
-            self.assertTrue(meny_delivery_reservation_acknowledged(
-                {"requests": [household, request]}, allow_extend=True,
-            ))
+        self.assertTrue(meny_delivery_reservation_acknowledged(
+            {"requests": [{**household, "status": 403}, renewal, household]}, require_extend=True,
+        ))
         self.assertFalse(meny_delivery_reservation_acknowledged({"requests": [household, renewal]}))
         for requests in (
             [renewal],
             [household],
+            [household, holding],
+            [household, {**renewal, "status": 404}, holding],
+            [household, {**renewal, "status": 422}, holding],
+            [household, {**holding, "status": 422}, renewal],
             [household, {**renewal, "method": "POST"}],
             [household, {**renewal, "url": f"{endpoint}/extend"}],
             [household, {**renewal, "url": renewal["url"] + "?old=true"}],
             [household, {**renewal, "url": renewal["url"].replace("api.ngdata.no", "example.test")}],
             [household, {**renewal, "status": True}],
+            [household, renewal, renewal],
             [household, renewal, {**renewal, "status": 500}],
+            [household, {**renewal, "url": f"{endpoint}/other-hold/extend", "status": None}, renewal],
             [household, renewal, {**renewal, "url": f"{endpoint}/other-hold/extend", "status": None}],
             [household, renewal, {**holding, "status": None}],
             [household, renewal, {**household, "status": 403}],
+            [{**household, "status": None}, renewal, household],
             [household, renewal, {**household, "status": None}],
         ):
             with self.subTest(requests=requests):
-                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": requests}, allow_extend=True))
-        self.assertTrue(meny_delivery_reservation_acknowledged(
-            {"requests": [household, {**renewal, "status": 404}, holding]}, allow_extend=True,
-        ))
-        self.assertFalse(meny_delivery_reservation_acknowledged(
-            {"requests": [household, holding, {**holding, "status": None}]},
-        ))
+                self.assertFalse(meny_delivery_reservation_acknowledged({"requests": requests}, require_extend=True))
 
-    def test_same_window_refresh_with_unknown_outcome_is_not_retried_by_checkout(self):
+    def test_same_window_refresh_with_meny_fallback_is_not_retried_by_checkout(self):
         client = self.client()
-        client._invoke = mock.Mock(return_value={"requests": []})
+        endpoint = "https://api.ngdata.no/sylinder/hentevinduer/reservasjoner/v1/api"
+        client._invoke = mock.Mock(return_value={"requests": [
+            {"url": f"{endpoint}/synthetic-hold/extend", "method": "PUT", "status": 404},
+            {"url": endpoint, "method": "POST", "status": 201},
+            {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household", "method": "PUT", "status": 204},
+        ]})
         client._sleep = mock.Mock()
         client._delivery_slots = mock.Mock(return_value={"slots": [normalize_meny_delivery_slot({
             "slot_id": "3. september klokka 07:00 til 08:00",
@@ -8548,8 +8608,9 @@ process.stdout.write(eval(script));
             "display": "3. september klokka 07:00 til 08:00", "selected": True,
         })]})
         client._select_delivery_slot = mock.Mock(
-            side_effect=lambda _: client._wait_for_delivery_reservation(allow_extend=True),
+            side_effect=lambda _: client._wait_for_delivery_reservation(require_extend=True),
         )
+        client._review_checkout_wizard = mock.Mock()
         cart = {"items": [{"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 1, "price": 13.9}],
                 "count": 1, "total": 13.9}
 
@@ -8557,6 +8618,7 @@ process.stdout.write(eval(script));
             client._review_checkout(cart)
 
         client._select_delivery_slot.assert_called_once_with("meny:2026-09-03T07:00/08:00")
+        client._review_checkout_wizard.assert_not_called()
 
     def test_delivery_selection_waits_for_the_reservation_response(self):
         client = self.client()

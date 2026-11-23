@@ -708,11 +708,12 @@ distinct from retrying an uncertain dispatched action.
 
 If MENY reports that the selected delivery reservation has expired, list the
 same date and select the same window once to renew it before preparing checkout
-again. An already chosen window can be renewed through MENY's exact
-keep-delivery control. The browser request log confirms that MENY acknowledged
-the renewal and household update. The exact control and a fresh picker read
-verify the window. When the renewal outcome is uncertain, inspect the selected
-window before attempting another reservation.
+again. Meal Concierge selects only the exact keep-delivery control for an
+already chosen window. Renewal succeeds when the browser log shows a single
+successful extension and a completed household update, and a fresh picker read
+verifies the same window. MENY can attempt its own replacement reservation
+when an extension fails. If a reservation or renewal is uncertain, inspect the
+selected window before attempting another reservation.
 
 ## Provider login and startup
 
