@@ -117,6 +117,49 @@ CHECKOUT_DELIVERY_BINDING_JS = r"""
     }
   }
 """
+# The checkout summary renders price values separately from labels, tooltips and
+# promotion descriptions. Return only known row kinds and integer øre.
+CHECKOUT_PRICE_ROWS_JS = r"""root => {
+  const summaries = [...root.querySelectorAll('.ws-price-summary.ws-checkout-summary__price-summary')].filter(visible);
+  if (summaries.length !== 1) return null;
+  const lines = [...summaries[0].querySelectorAll('.ws-summary-line')].filter(visible);
+  if (lines.length > 60) return null;
+  const readOre = (text, kind) => {
+    if (text === 'Gratis' && ['delivery_price', 'picking_fee'].includes(kind)) return 0;
+    if (kind === 'packaging_estimate') text = text.replace(/^ca\. /, '');
+    const match = text.match(/^([-−] ?)?(\d{1,3}(?:[ .]\d{3})+|\d{1,7}),(\d{2})(?: ?kr)?$/i);
+    if (!match) return null;
+    const ore = Number(match[2].replace(/[ .]/g, '')) * 100 + Number(match[3]);
+    return Number.isSafeInteger(ore) && ore <= 100000000 ? (match[1] ? -ore : ore) : null;
+  };
+  let incomplete = false;
+  const rows = [];
+  for (const line of lines) {
+    const has = type => line.classList.contains(`ws-summary-line--${type}`);
+    if (has('mix-match-reminder')) continue;
+    const prices = [...line.querySelectorAll(':scope > .ws-summary-line__main > .ws-summary-line__price')].filter(visible);
+    const titles = [...line.querySelectorAll(':scope > .ws-summary-line__main > .ws-summary-line__header > .ws-summary-line__title')].filter(visible);
+    const title = titles.length === 1 ? norm(titles[0].innerText) : '';
+    let kind = null;
+    if (has('calculator-total') && /^Sum \d{1,6} varer?$/.test(title)) kind = 'product_subtotal';
+    else if (has('sum') && title === 'Beløp som reserveres*') kind = 'reserved_total';
+    else if (has('buffer') && title === 'Reservert beløp for vekt/erstatningsvarer') kind = 'weight_substitution_reserve';
+    else if (has('recycle') && title === 'Pant') kind = 'deposits';
+    else if ((has('delivery-fee') || has('handover-product')) && title === 'Levering på døren') kind = 'delivery_price';
+    else if ((has('picking-fee') || has('handover-product')) && title === 'Plukk og pakk') kind = 'picking_fee';
+    else if (title && ['discount', 'total-discounts', 'offer-discount', 'coupon-discount'].some(has)) kind = 'discounts';
+    else if (has('static') && line.closest('.ws-summary-line--fee-POSE')) kind = 'packaging_estimate';
+    if (!kind && !prices.length) continue;
+    const ore = kind && prices.length === 1 && !has('is-invalid') ? readOre(norm(prices[0].innerText), kind) : null;
+    if (ore === null || (kind === 'discounts' ? ore > 0 : ore < 0)) {
+      incomplete = true;
+      continue;
+    }
+    rows.push([kind, ore]);
+  }
+  rows.sort(([a, x], [b, y]) => a === b ? x - y : a < b ? -1 : 1);
+  return [incomplete, rows];
+}"""
 DEFAULT_BROWSER_ARGS = "--disable-gpu,--disable-quic"
 MENY_READ_TIMEOUT = 110
 MENY_CART_TIMEOUT = 240
@@ -776,11 +819,53 @@ def normalize_cart_snapshot(value: Any) -> dict[str, Any]:
     }
 
 
+_CHECKOUT_PAYMENT_FIELDS = {"ready", "authenticated", "vipps_checked", "home_delivery", "submit_enabled", "total", "delivery", "submit_controls"}
+_CHECKOUT_PRICE_COMPONENTS = (
+    "product_subtotal", "delivery_price", "picking_fee", "weight_substitution_reserve",
+    "deposits", "packaging_estimate", "discounts",
+)
+
+
+def _checkout_payment_shape(value: Any) -> bool:
+    return (isinstance(value, Mapping) and _CHECKOUT_PAYMENT_FIELDS <= value.keys()
+            and not value.keys() - _CHECKOUT_PAYMENT_FIELDS - {"price_rows"})
+
+
+def _checkout_price_breakdown(observation: Any, total_ore: int) -> dict[str, Any] | None:
+    if (not isinstance(observation, list) or len(observation) != 2 or type(observation[0]) is not bool
+            or not isinstance(observation[1], list) or len(observation[1]) > 60):
+        return None
+    incomplete, rows = observation
+    amounts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 2:
+            return None
+        kind, ore = row
+        if (kind not in (*_CHECKOUT_PRICE_COMPONENTS, "reserved_total") or type(ore) is not int
+                or abs(ore) > 100_000_000 or (ore > 0 if kind == "discounts" else ore < 0)):
+            return None
+        if kind != "discounts" and kind in amounts:
+            return None
+        amounts[kind] = amounts.get(kind, 0) + ore
+    if amounts.pop("reserved_total", None) != total_ore or "product_subtotal" not in amounts:
+        return None
+
+    discounts = amounts.get("discounts")
+    before_discounts = sum(ore for kind, ore in amounts.items() if kind != "discounts")
+    separate_discount_matches = before_discounts + (discounts or 0) == total_ore
+    subtotal_matches = before_discounts == total_ore
+    itemized = not incomplete and (separate_discount_matches or subtotal_matches)
+    return {
+        "status": "itemized" if itemized else "partially_itemized",
+        **{f"{kind}_ore": amounts.get(kind) for kind in _CHECKOUT_PRICE_COMPONENTS},
+        "discounts_already_in_subtotal": subtotal_matches if itemized and discounts else None,
+    }
+
+
 def normalize_checkout_payment_snapshot(value: Any) -> dict[str, Any]:
     """Accept only one complete, enabled home-delivery Vipps summary."""
 
-    required = {"ready", "authenticated", "vipps_checked", "home_delivery", "submit_enabled", "total", "delivery", "submit_controls"}
-    if not isinstance(value, Mapping) or set(value) != required or any(value.get(key) is not True for key in ("ready", "authenticated", "vipps_checked", "home_delivery", "submit_enabled")):
+    if not _checkout_payment_shape(value) or any(value.get(key) is not True for key in ("ready", "authenticated", "vipps_checked", "home_delivery", "submit_enabled")):
         raise HouseholdError("MENY checkout page changed")
     total = value.get("total")
     delivery = " ".join(str(value.get("delivery") or "").split())
@@ -803,7 +888,14 @@ def normalize_checkout_payment_snapshot(value: Any) -> dict[str, Any]:
         meny_delivery_window_identity(delivery)
     except HouseholdError as exc:
         raise HouseholdError("MENY checkout page changed") from exc
-    return {"total": normalized_total, "delivery": delivery}
+    payment = {"total": normalized_total, "delivery": delivery}
+    total_ore = normalized_total * 100
+    if math.isfinite(total_ore):
+        breakdown = _checkout_price_breakdown(value.get("price_rows"), round(total_ore))
+        if breakdown is not None:
+            payment["price_breakdown"] = breakdown
+            payment["price_rows"] = value["price_rows"]
+    return payment
 
 
 def meny_checkout_reviews_match(expected: Any, observed: Any) -> bool:
@@ -892,7 +984,10 @@ def meny_checkout_reviews_match(expected: Any, observed: Any) -> bool:
         }
 
     expected_identity = identity(expected)
-    return expected_identity is not None and expected_identity == identity(observed)
+    if expected_identity is None or expected_identity != identity(observed):
+        return False
+    expected_rows = expected.get("payment_price_rows")
+    return expected_rows is None or expected_rows == observed.get("payment_price_rows")
 
 
 class MenyCartStoppedError(HouseholdError):
@@ -1907,7 +2002,9 @@ class MenyClient:
     }
   }
 __DELIVERY_BINDING__
-  const exact = checked && homeChecked && targetReady && buttons.length === 1 && blockingDialogs.length === 0 && totalLabels.length === 1 && totals.length === 1 && Math.round(totals[0]*100) === __TOTAL__ && deliveryBinding?.root && deliveryBinding.display === __DELIVERY__ && location.href === __URL__;
+  const reviewedRows = __REVIEWED_PRICE_ROWS__;
+  const samePrices = reviewedRows === null || JSON.stringify((__PRICE_ROWS_READER__)(root)) === JSON.stringify(reviewedRows);
+  const exact = checked && homeChecked && targetReady && buttons.length === 1 && blockingDialogs.length === 0 && totalLabels.length === 1 && totals.length === 1 && Math.round(totals[0]*100) === __TOTAL__ && deliveryBinding?.root && deliveryBinding.display === __DELIVERY__ && location.href === __URL__ && samePrices;
   if (!exact) return JSON.stringify({ready:false});
   const target = buttons[0];
   target.setAttribute('data-meal-concierge-action', 'checkout-submit');
@@ -1917,7 +2014,16 @@ __DELIVERY_BINDING__
 })()
 """
         def render_gate(require_hit: bool, x: int = 0, y: int = 0) -> str:
-            return gate.replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__REQUIRE_HIT__", "true" if require_hit else "false").replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y)).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling")).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL))
+            return (gate.replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS)
+                    .replace("__PRICE_ROWS_READER__", CHECKOUT_PRICE_ROWS_JS)
+                    .replace("__REVIEWED_PRICE_ROWS__", json.dumps(review.get("payment_price_rows")))
+                    .replace("__REQUIRE_HIT__", "true" if require_hit else "false")
+                    .replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y))
+                    .replace("__CODE__", json.dumps(review.get("target_order_code")))
+                    .replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling"))
+                    .replace("__TOTAL__", str(round(float(review["summary"]["total"]) * 100)))
+                    .replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False))
+                    .replace("__URL__", json.dumps(CHECKOUT_URL)))
 
         if self._eval(render_gate(False)) != {"ready": True}:
             raise HouseholdError("MENY Vipps payment control changed")
@@ -3602,10 +3708,12 @@ __DELIVERY_BINDING__
     }
   }
 __DELIVERY_BINDING__
-  return JSON.stringify({ready:buttons.length===1 && totalLabels.length===1 && totals.length===1 && Boolean(deliveryBinding?.root) && Boolean(deliveryBinding.display), authenticated:true, vipps_checked:vippsChecked, home_delivery:homeChecked, submit_enabled:enabled, total:totals[0], delivery:deliveryBinding?.display, submit_controls:buttons.length});
+  const priceRows = __IS_NEW_ORDER__ && location.href === 'https://meny.no/kassen' ? (__PRICE_ROWS_READER__)(root) : null;
+  return JSON.stringify({ready:buttons.length===1 && totalLabels.length===1 && totals.length===1 && Boolean(deliveryBinding?.root) && Boolean(deliveryBinding.display), authenticated:true, vipps_checked:vippsChecked, home_delivery:homeChecked, submit_enabled:enabled, total:totals[0], delivery:deliveryBinding?.display, submit_controls:buttons.length, price_rows:priceRows});
 })()
-""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if target_order_id and target_code else "Til betaling"))
-        required = {"ready", "authenticated", "vipps_checked", "home_delivery", "submit_enabled", "total", "delivery", "submit_controls"}
+""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace(
+            "__PRICE_ROWS_READER__", CHECKOUT_PRICE_ROWS_JS).replace("__IS_NEW_ORDER__", json.dumps(not order_change)).replace(
+            "__SUBMIT_LABEL__", json.dumps("Send oppdatering" if target_order_id and target_code else "Til betaling"))
         result: dict[str, Any] = {}
         payment_summary: dict[str, Any] | None = None
         for attempt in range(20):
@@ -3620,13 +3728,15 @@ __DELIVERY_BINDING__
                 break
             if attempt < 19:
                 self._sleep(0.25)
-        if set(result) != required or result.get("authenticated") is not True:
+        if not _checkout_payment_shape(result) or result.get("authenticated") is not True:
             raise HouseholdError("MENY checkout page changed")
         if result.get("ready") is not True or result.get("vipps_checked") is not True or result.get("home_delivery") is not True:
             raise HouseholdError("MENY checkout does not have one verified home-delivery Vipps payment")
         if result.get("submit_enabled") is not True:
             raise _CheckoutNotReadyError("MENY checkout cannot continue; check the home-delivery minimum and cart messages")
         payment_summary = normalize_checkout_payment_snapshot(result)
+        breakdown = payment_summary.get("price_breakdown", {})
+        observed_amounts = {key: ore / 100 for key, ore in breakdown.items() if key.endswith("_ore") and ore is not None}
         expected_delivery = expected.get("delivery")
         if not isinstance(expected_delivery, Mapping) or meny_delivery_window_identity(expected_delivery.get("display")) != meny_delivery_window_identity(payment_summary["delivery"]):
             raise HouseholdError("MENY checkout delivery changed after the cart was reviewed")
@@ -3635,14 +3745,15 @@ __DELIVERY_BINDING__
             "count": expected["count"],
             "total": payment_summary["total"],
             "amounts": {
-                "product_subtotal": (expected.get("amounts") or {}).get("product_subtotal"),
-                "delivery_price": None,
-                "discounts": None,
-                "deposits": None,
+                "product_subtotal": observed_amounts.get("product_subtotal_ore", (expected.get("amounts") or {}).get("product_subtotal")),
+                "delivery_price": observed_amounts.get("delivery_price_ore"),
+                "discounts": observed_amounts.get("discounts_ore") if breakdown.get("discounts_already_in_subtotal") is False else None,
+                "deposits": observed_amounts.get("deposits_ore"),
                 "bags": None,
-                "other_fees": None,
+                "other_fees": {"picking_fee": observed_amounts["picking_fee_ore"]} if "picking_fee_ore" in observed_amounts else None,
                 "provider_total": payment_summary["total"],
             },
+            **({"price_breakdown": breakdown} if breakdown else {}),
             "delivery": {"slot_id": None, "display": payment_summary["delivery"], "address": None, "unattended": None},
             "payment": "vipps",
             "order_lines": order_lines,
@@ -3655,6 +3766,7 @@ __DELIVERY_BINDING__
             "submit_controls": 1,
             "target_order_id": target_order_id or None,
             "target_order_code": target_code or None,
+            **({"payment_price_rows": payment_summary["price_rows"]} if breakdown else {}),
         }
 
     def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Any = None, *, order_change: Mapping[str, Any] | None = None, selected_slot: Mapping[str, Any] | None = None, deadline: float | None = None) -> dict[str, Any]:

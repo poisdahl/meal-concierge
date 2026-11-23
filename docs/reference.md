@@ -673,11 +673,19 @@ saved-menu product apply still blocks checkout. Use `weekly=true` to buy for
 the saved weekly menu. Pick one scope based on the owner's request. `cart_only`
 is available for interactive new orders.
 
-MENY new-order reviews expose `summary.price_breakdown.status=unitemized`
-when the payable total is verified and individual price rows are unavailable.
+MENY new-order reviews read the checkout's price summary and bind its reserved
+total to the verified payment total. `summary.price_breakdown` exposes observed
+goods, delivery and picking charges, weight and substitution reserve, deposits,
+estimated packaging and displayed discounts in øre. An absent component remains
+`null`. `status=itemized` means the observed amounts account for the total.
+`status=partially_itemized` means only the returned components could be read or
+the arithmetic did not reconcile. `status=unitemized` retains the verified
+total when the price summary cannot be bound to it.
+`discounts_already_in_subtotal=true` means the displayed discounts are included
+in the displayed goods subtotal. A `null` basis leaves their treatment unknown.
 `cart_total_ore` comes from the refreshed cart. `cart_to_checkout_difference_ore`
-is the checkout total minus that cart total. Label fees, reserves and discounts
-only when their own rows are verified.
+is the arithmetic difference between the two totals. If the observed checkout
+rows change before dispatch, prepare a fresh review.
 
 Only the checkout tool's bound `submit` or `reconcile` result can establish a
 successful order. A generic order list or order read after checkout returned an
