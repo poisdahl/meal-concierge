@@ -640,6 +640,17 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertEqual(rejected["status"], "rejected_before_write")
         self.assertEqual(rejected["cart"]["parity"], "not_written")
 
+        # Earlier batches landed before a proven stop; nothing is pending.
+        stopped = module._bounded_product_result({
+            **base, "applied": False, "reason": "cart_write_stopped_before_click",
+            "cart_reconciliation_required": True,
+        })
+        self.assertEqual(stopped["status"], "partial_applied")
+        self.assertIs(stopped["checkout_blocked"], True)
+        self.assertEqual(stopped["reason"], "cart_write_stopped_before_click")
+        self.assertEqual(stopped["cart"]["parity"], "reconciliation_required")
+        self.assertNotIn("operation_id", stopped)
+
         unknown = module._bounded_product_result({
             **base, "applied": False, "outcome_unknown": True,
             "reason": "transport acknowledgement lost", "cart_write_pending": True,

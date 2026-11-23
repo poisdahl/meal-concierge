@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import StateStore  # noqa: E402
-from meny import MenyBrowserError  # noqa: E402
+from meny import MenyBrowserError, MenyCartStoppedError  # noqa: E402
 from product_observations import normalize_meny_product_search  # noqa: E402
 from product_planner import menu_requirements  # noqa: E402
 from service import Application  # noqa: E402
@@ -205,6 +205,38 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
                 done, _ = self.finish(app, app.handle({"operation": "products", **prepared[key],
                                                        "cart_change_requested": True}))
                 self.assertTrue(done.get("applied"), done)
+
+    def test_a_fill_that_stops_before_its_next_click_needs_only_the_cart_review(self):
+        store, provider, app, prepared = self.household(approved=3, unresolved=False)
+        original = provider.call
+
+        def stop_after_first_click(tool_name, arguments, **kwargs):
+            if tool_name == "manipulate_cart" and provider.writes() == 0:
+                first = dict(arguments["operations"][0], quantity=1)
+                original(tool_name, {"operations": [first]})
+                raise MenyCartStoppedError("MENY operation deadline reached", [first])
+            return original(tool_name, arguments, **kwargs)
+
+        provider.call = stop_after_first_click
+        apply = {"operation": "products", **prepared["apply_arguments"], "cart_change_requested": True}
+        result, _calls = self.finish(app, app.handle(apply))
+        self.assertIs(result["applied"], False, result)
+        view = app._product_apply_view(result)
+        self.assertEqual(view["status"], "needs_input")
+        self.assertEqual(view["reason"], "cart_write_stopped_before_click")
+        for key in ("outcome_unknown", "cart_write_pending", "operation_id"):
+            self.assertNotIn(key, view)
+        self.assertFalse(store.read().get("pending_cart_change"))
+        self.assertEqual(provider.cart["count"], 1)
+        # The household's review finishes the fill; the next apply then completes.
+        restored = app.handle({"operation": "cart", "action": "reconcile", "decision": "restore_missing",
+                               "menu_ref": result["menu_ref"], "cart_digest": view["cart_plan"]["cart_digest"]})
+        self.assertTrue(restored["reconciled"], restored)
+        self.assertEqual(provider.cart["count"], 3)
+        done, _calls = self.finish(app, app.handle(apply))
+        self.assertTrue(done.get("applied"), done)
+        self.assertEqual(provider.cart["count"], 3)
+        self.assertEqual(provider.writes(), 2)
 
     def test_a_short_apply_budget_still_writes_without_deferring_forever(self):
         store, provider, app, prepared = self.household(approved=12)

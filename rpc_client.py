@@ -24,20 +24,23 @@ class ServiceError(RuntimeError):
                 "recovery": "Read status and reconcile the original attempt/ref/key before any further write; do not repeat the mutation."}
 
 
-def normalize_provider_failure(value: Any) -> dict[str, str] | None:
+def normalize_provider_failure(value: Any) -> dict[str, Any] | None:
     """Optional wire diagnostics contain closed facts, never provider text or authority."""
     if not isinstance(value, dict):
         return None
+    quantity_failures = {"quantity_not_settled", "quantity_unexpected"}
+    cart_failures = quantity_failures | {"cart_not_settled"}
     classes = {
         "client_connect_failed", "client_send_failed", "client_read_failed",
         "client_invalid_response", "cdp_timeout_reported", "cdp_channel_closed_reported",
         "browser_unavailable_reported", "operation_timeout_reported", "adapter_exit_failed",
         "adapter_response_invalid", "adapter_rejected", "local_timeout", "local_spawn_failed",
-    }
+    } | cart_failures
     phases = {
         "adapter_json_error": "adapter_invocation", "adapter_stderr": "adapter_invocation",
         "adapter_exit": "adapter_invocation", "invalid_stdout": "adapter_invocation",
         "local_timeout": "local_wait", "local_spawn": "local_spawn",
+        "cart_readback": "post_click_readback",
     }
     if (value.get("provider") != "meny"
             or not isinstance(value.get("class"), str) or value["class"] not in classes
@@ -45,9 +48,15 @@ def normalize_provider_failure(value: Any) -> dict[str, str] | None:
             or value.get("phase") != phases[value["source"]]
             or value.get("daemon_request_ending") != "unknown"):
         return None
-    return {key: value[key] for key in (
+    if (value["class"] in cart_failures) != (value["source"] == "cart_readback"):
+        return None
+    failure = {key: value[key] for key in (
         "provider", "class", "source", "phase", "daemon_request_ending",
     )}
+    elapsed = value.get("elapsed_ms")
+    if value["class"] in quantity_failures and type(elapsed) is int and 0 <= elapsed <= 3_600_000:
+        failure["elapsed_ms"] = elapsed
+    return failure
 
 
 SOCKET = Path(os.environ.get("MEAL_CONCIERGE_SOCKET", "/run/meal-concierge/service.sock"))

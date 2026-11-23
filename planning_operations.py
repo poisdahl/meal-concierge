@@ -3425,7 +3425,7 @@ class PlanningOperations:
             "menu_ref", "product_plan_digest", "partial_product_plan_digest", "remaining_issue_count",
             "cart_changed", "nothing_to_buy", "nothing_to_buy_for_menu", "price_verification",
             "price_locked", "final_price_authority", "product_plan_stale", "menu_binding_stale",
-            "default_suggestion", "next", "read_failures",
+            "default_suggestion", "next", "read_failures", "provider_failure",
             "continue_arguments", "validation_progress", "product_plan_ref",
         )
         compact = {key: deepcopy(result[key]) for key in fields if key in result}
@@ -5155,6 +5155,13 @@ class PlanningOperations:
                 acknowledged.clear()
                 acknowledged.update(prefix)
                 raise
+            except MenyBrowserError as exc:
+                # The batch stays uncertain; keep its closed reason as evidence.
+                if exc.provider_failure:
+                    with self.store.locked() as state:
+                        if state.get("pending_cart_change") == pending:
+                            state["pending_cart_change"]["provider_failure"] = deepcopy(exc.provider_failure)
+                raise
             with self.store.locked() as state:
                 if state.get("pending_cart_change") != pending:
                     raise HouseholdError("original MENY batch changed after dispatch")
@@ -5260,7 +5267,9 @@ class PlanningOperations:
                 "Use the owner's current explicit instruction if it already resolves this exact cart difference; "
                 "otherwise ask one combined question for this cart digest. Suggest keeping the current cart. "
                 "The owner may name exact exclusions, restore missing menu products, "
-                "or explicitly accept the current missing quantities."
+                "or explicitly accept the current missing quantities. If the owner interactively asked only to buy "
+                "the current cart, independent of the saved menu, prepare checkout with cart_only=true instead; "
+                "that leaves this menu plan unchanged."
             ),
         }
 
@@ -5520,9 +5529,21 @@ class PlanningOperations:
             pending.get("stopped_before_next_click") and pending["expected"] == live
         ):
             return {"outcome_unknown": True, "cart_write_pending": True,
-                    "operation_id": pending["operation_id"]}
+                    "operation_id": pending["operation_id"],
+                    **({"provider_failure": deepcopy(pending["provider_failure"])}
+                       if pending.get("provider_failure") else {})}
         self._finish_managed_cart_journal(state, pending, "read_back")
         return None
+
+    @staticmethod
+    def _managed_cart_write_reason(mutation_error, pending_result, drift_reason):
+        if mutation_error is None:
+            return drift_reason
+        # A proven MENY stop whose earlier clicks were read back leaves nothing
+        # to settle; only a write whose journal is still pending is uncertain.
+        if isinstance(mutation_error, MenyCartStoppedError) and not pending_result:
+            return "cart_write_stopped_before_click"
+        return "cart_write_result_uncertain"
 
     def _cart_sync(self, request: Mapping[str, Any], deadline: float | None) -> dict[str, Any]:
         expected_menu_ref = self._require_cart_menu(request)
@@ -5776,7 +5797,7 @@ class PlanningOperations:
                 **self._cart_question(
                     current,
                     verified_summary,
-                    reason="cart_write_result_uncertain" if mutation_error is not None else "cart_changed_during_sync",
+                    reason=self._managed_cart_write_reason(mutation_error, pending_result, "cart_changed_during_sync"),
                 ),
             }
         with self.store.locked() as state:
@@ -5965,7 +5986,8 @@ class PlanningOperations:
                 **self._cart_question(
                     plan,
                     verified_summary,
-                    reason="cart_write_result_uncertain" if mutation_error is not None else "cart_changed_while_applying_decision",
+                    reason=self._managed_cart_write_reason(mutation_error, pending_result,
+                                                           "cart_changed_while_applying_decision"),
                 ),
             }
         approved_digest = self._cart_digest(verified_live)

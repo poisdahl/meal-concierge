@@ -557,8 +557,12 @@ reads leave less than its cart-write reserve, apply returns `status=validating`
 with `validation_progress.pending_cart_write=1` and writes on the continuation
 with a full time budget. It defers at most once per cycle and never by more
 than a fresh call's budget provides. MENY does not click a unit when less than
-about 25 seconds remain; the batch then stops with a proven ending. A slower
-readback after a click still ends uncertain and can be accepted as below.
+about 40 seconds remain; the batch then stops with a proven ending. After a
+click it waits up to 15 seconds for the new quantity, since a slower browser can
+show a second add late. A readback that still does not confirm the click ends
+uncertain and can be accepted as below. Its journal and result keep a closed
+`provider_failure`, such as `quantity_not_settled` with `elapsed_ms` since the
+click; it grants no retry authority.
 Current menu/profile/ownership are
 checked again near cart sync, including no-op sync. Drift stops before a cart
 write; complete validated whole-package quantities pass to the
@@ -656,6 +660,21 @@ same decision. The cart is reread before applying the decision and again before
 checkout. Any later product or quantity change invalidates the approved digest.
 Scheduled checkout stops in `cart_ready`/`needs_input` while anything is
 unresolved and never treats the suggested default as automatic consent.
+
+An owner can also buy the current cart without the saved menu: manual checkout
+`prepare` or `submit` with `cart_only=true` skips this menu-plan question,
+records the order as `menu_attribution="cart_only"` and leaves a saved menu,
+its cart plan and recipe usage unchanged through purchase, reconciliation and
+cancellation; a menu that already belongs to an order only has its separate
+extras bookkeeping cleared, as without the flag. Renewal, payment switching and
+retries keep the choice; `confirm` or a bound idempotency key with a different
+`cart_only` or `weekly` intent is rejected, and `cart_only=false` means the same
+as omitting it. An incomplete saved-menu product apply still
+blocks checkout. Use
+`weekly=true` for an explicit purchase of the saved weekly menu; the two flags
+are mutually exclusive, and products shared by the cart and the menu do not
+change the chosen attribution. Scheduled, order-change and recovery checkouts
+reject `cart_only`.
 
 Only the checkout tool's bound `submit` or `reconcile` result can establish a
 successful order. A generic order list or order read after checkout returned an
@@ -2168,8 +2187,12 @@ saved again meanwhile, the confirmed units stay owned by the earlier plan and
 the next step is a product prepare/apply for the current menu. A managed MENY
 batch with a proven ending keeps its readback path instead: a finished batch or
 proven stop settles from a fresh read, and a cart that differs from its
-acknowledged clicks goes to the cart review as household drift. MENY order
-edits and payments retain their own reconciliation paths.
+acknowledged clicks goes to the cart review as household drift. When a sync or
+reconcile reads back the clicks made before its stop, it returns
+`reason=cart_write_stopped_before_click` with nothing pending and no
+`operation_id`, so go straight to the cart review. `cart_write_result_uncertain`
+means the original journal is still pending. MENY order edits and payments
+retain their own reconciliation paths.
 
 An unsubmitted checkout review can be discarded with `checkout discard_review`
 and its exact confirmation ID. Discarding an unsubmitted recovery review restores

@@ -1210,6 +1210,7 @@ class OrderOperations:
             automatic_checkout=pending.get("automatic_checkout", bool(occurrence)),
             scheduler_context=pending.get("scheduler_context"),
             payment_override=pending["checkout_payment"] if "payment_preference" in pending else None,
+            cart_only=bool(pending.get("cart_only")),
         )
         if "summary" not in prepared:
             return {"confirmed": False, "reprepared": True, **prepared}
@@ -2414,12 +2415,50 @@ class OrderOperations:
     def _checkout_operation_timeout(self):
         return MENY_CHECKOUT_OPERATION_TIMEOUT if self.provider == "meny" else 240
 
+    def _cart_only_checkout_problem(self, state):
+        plan = state.get("cart_plan") or {}
+        if state.get("managed_product_apply_fence") or (
+                plan.get("provider") == self.provider and plan.get("partial_product_plan_digest")):
+            return {
+                "confirmed": False,
+                "status": "needs_input",
+                "reason": "managed_product_apply_incomplete",
+                "next": "Reconcile the cart and complete or clear the interrupted saved-menu product apply before checkout.",
+            }
+        return None
+
     def _checkout_operation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
         if any(key in request for key in ("expected_checkout_digest", "owner_authorization")) and action != "retire_attempt":
             raise HouseholdError("Local retirement evidence is available only for retire_attempt")
         if "first_meal_date" in request and action != "prepare":
             raise HouseholdError("first_meal_date is a checkout preparation choice")
+        cart_only = request.get("cart_only")
+        if cart_only is not None:
+            if type(cart_only) is not bool:
+                raise HouseholdError("checkout cart_only must be true or false")
+            if action not in {"prepare", "submit", "confirm"}:
+                raise HouseholdError("cart_only is a purchase choice for checkout prepare, submit or confirm")
+            if cart_only and request.get("weekly"):
+                raise HouseholdError("cart_only buys the current cart without the saved menu; weekly buys for that menu. Choose one")
+            if cart_only and request.get("recovery"):
+                raise HouseholdError("cart_only applies to a new order review, not payment recovery")
+            if cart_only and (request.get("occurrence") or request.get("scheduler") or request.get("order_id")):
+                raise HouseholdError("cart_only applies only to an interactive new order of the current cart")
+            pending = self.store.read().get("pending_checkout") or {}
+            # Only an unsubmitted review can be checked against a different
+            # intent. Retries and dispatched attempts reconcile normally.
+            if (action == "confirm" and cart_only and not pending.get("cart_only")
+                    and pending.get("status") == "awaiting_confirmation"
+                    and pending.get("confirmation_id") == request.get("confirmation_id")):
+                raise HouseholdError("This unsubmitted review is linked to the saved menu, not cart_only; nothing was submitted. "
+                                     "Prepare a cart_only review to buy only the cart")
+        if action == "confirm" and request.get("weekly"):
+            pending = self.store.read().get("pending_checkout") or {}
+            if (pending.get("cart_only") and pending.get("status") == "awaiting_confirmation"
+                    and pending.get("confirmation_id") == request.get("confirmation_id")):
+                raise HouseholdError("This unsubmitted review is cart_only, not for the saved weekly menu; nothing was submitted. "
+                                     "Prepare a weekly review to buy for the menu")
         if "delivery_price_approved" in request and (type(request["delivery_price_approved"]) is not bool or action != "confirm"):
             raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
@@ -2570,6 +2609,7 @@ class OrderOperations:
                 requested_order_id=request.get("order_id"),
                 identity_review=request.get("identity_review"),
                 first_meal_date=request.get("first_meal_date"),
+                cart_only=bool(cart_only),
             )
         if action == "confirm":
             return self._checkout_confirm(deadline, str(request.get("confirmation_id") or ""), request=request)
@@ -2591,6 +2631,12 @@ class OrderOperations:
                 if not bound_confirmation:
                     raise HouseholdError("checkout idempotency record is incomplete; reconcile before retrying")
                 if pending and pending.get("confirmation_id") == bound_confirmation and pending.get("status") == "awaiting_confirmation" and not expired_awaiting_confirmation(pending, self._now()):
+                    if cart_only and not pending.get("cart_only"):
+                        raise HouseholdError("checkout idempotency_key is bound to a menu-linked review; nothing was submitted. "
+                                             "Use a new key for a cart_only review")
+                    if request.get("weekly") and pending.get("cart_only"):
+                        raise HouseholdError("checkout idempotency_key is bound to a cart_only review; nothing was submitted. "
+                                             "Use a new key for a weekly review")
                     prepared = {
                         "confirmation_id": bound_confirmation,
                         "summary": deepcopy(pending["summary"]),
@@ -2600,14 +2646,20 @@ class OrderOperations:
                     return self._checkout_reconcile(deadline, bound_confirmation)
             elif request.get("weekly") and (problem := self._weekly_checkout_problem()):
                 return problem
-            elif pending and pending.get("status") == "awaiting_confirmation" and not expired_awaiting_confirmation(pending, self._now()):
+            elif (pending and pending.get("status") == "awaiting_confirmation" and not expired_awaiting_confirmation(pending, self._now())
+                    and (True if cart_only else (False if request.get("weekly") else None)) in (None, bool(pending.get("cart_only")))):
                 prepared = {
                     "confirmation_id": pending["confirmation_id"],
                     "summary": deepcopy(pending["summary"]),
                     "order_change": deepcopy(pending.get("order_change")),
                 }
             else:
-                prepared = self._checkout({"action": "prepare", "occurrence": request.get("occurrence")})
+                # An expired review the owner saw as cart-only keeps that intent.
+                inherited = (not request.get("weekly") and isinstance(pending, Mapping)
+                             and pending.get("status") == "awaiting_confirmation" and pending.get("cart_only"))
+                prepared = self._checkout({"action": "prepare", "occurrence": request.get("occurrence"),
+                                           "weekly": request.get("weekly", False),
+                                           **({"cart_only": True} if cart_only or inherited else {})})
             if prepared.get("cart_reconciliation_required") is True or prepared.get("status") == "needs_input":
                 return {"confirmed": False, **prepared}
             with self.store.locked() as state:
@@ -2821,6 +2873,7 @@ class OrderOperations:
         renew_confirmation_id: str | None = None,
         identity_review: Mapping[str, Any] | None = None,
         first_meal_date: str | None = None,
+        cart_only: bool | None = None,
     ) -> dict[str, Any]:
         if identity_review is not None and (
                 self.provider not in {"oda", "mathem"} or self.browser is None
@@ -2838,10 +2891,15 @@ class OrderOperations:
                 state = self.store.read()
                 if state.get("pending_checkout") or state.get("pending_cancellation") or state.get("order_change"):
                     raise HouseholdError("finish the pending provider operation before manual checkout")
-                self._require_menu_provider(state.get("menu"))
+                if cart_only and (occurrence or scheduler_context or cart_ready_continuation):
+                    raise HouseholdError("cart_only applies only to an interactive new order of the current cart")
+                if cart_only and (problem := self._cart_only_checkout_problem(state)):
+                    return problem
+                if not cart_only:
+                    self._require_menu_provider(state.get("menu"))
                 summary = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
                 plan = state.get("cart_plan")
-                if isinstance(plan, Mapping) and plan.get("provider") == self.provider and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu")):
+                if not cart_only and isinstance(plan, Mapping) and plan.get("provider") == self.provider and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu")):
                     summary["menu_shortfall"] = self._menu_shortfall(plan, summary)
                 summary["dietary_assessment"] = self._checkout_dietary(summary, deadline)
                 return {
@@ -2860,7 +2918,11 @@ class OrderOperations:
                 raise HouseholdError("identity_review cannot resolve an addition or scheduled checkout")
             if state.get("pending_cart_change"):
                 raise HouseholdError("reconcile_change before checkout")
-            if not state.get("order_change"):
+            if cart_only is None:
+                # Renewal and payment switching re-prepare the same intent.
+                cart_only = bool((renew_confirmation_id is not None or _switch_confirmation_id is not None)
+                                 and (state.get("pending_checkout") or {}).get("cart_only"))
+            if not state.get("order_change") and not cart_only:
                 self._require_menu_provider(state.get("menu"))
             if cart_ready_continuation:
                 record = state.get("occurrences", {}).get(occurrence)
@@ -2908,6 +2970,10 @@ class OrderOperations:
             if baseline and baseline.get("status") in UNRESOLVED_CHECKOUT_STATUSES:
                 raise HouseholdError("reconcile the pending checkout before preparing another")
             order_change = deepcopy(state.get("order_change"))
+            if cart_only and (order_change or occurrence or automatic_checkout or scheduler_context or cart_ready_continuation):
+                raise HouseholdError("cart_only applies only to an interactive new order of the current cart")
+            if cart_only and (problem := self._cart_only_checkout_problem(state)):
+                return problem
             if requested_order_id is not None and (
                     self.provider != "oda" or not order_change
                     or order_change.get("status") != "editing"
@@ -2952,13 +3018,13 @@ class OrderOperations:
                 and not order_change and not occurrence and not automatic_checkout
                 and not scheduler_context and not cart_ready_continuation
             )
-            if not order_change and menu_already_ordered and not independent_cart:
+            if not order_change and menu_already_ordered and not independent_cart and not cart_only:
                 raise HouseholdError("the current menu already belongs to an order; save or select a new menu before a new checkout")
             if expired_awaiting_confirmation(state.get("pending_cancellation"), self._now()):
                 state["pending_cancellation"] = None
             pending_cancellation = deepcopy(state.get("pending_cancellation"))
         inherited_start = first_meal_date is None
-        relative_menu = bool(mp.relative(menu_baseline or {}) and not order_change and not independent_cart)
+        relative_menu = bool(mp.relative(menu_baseline or {}) and not order_change and not independent_cart and not cart_only)
         if first_meal_date is not None:
             mp.checked_day(first_meal_date)
             if not relative_menu:
@@ -2988,7 +3054,7 @@ class OrderOperations:
         if order_change and self.provider in {"oda", "mathem"} and self._cart_lines(summary)[0] != order_change.get("expected_cart_quantities", {}):
             raise HouseholdError(f"{self.provider.title()} addition cart changed outside this edit; abort with retain_cart=true and review the goods before checkout")
         cart_plan_baseline = independent_cart_plan if independent_cart else None
-        if not order_change and isinstance(menu_baseline, Mapping) and not independent_cart:
+        if not order_change and isinstance(menu_baseline, Mapping) and not independent_cart and not cart_only:
             cart_gate = self._cart_checkout_gate(summary, menu_baseline)
             if cart_gate is not None:
                 return cart_gate
@@ -3074,7 +3140,7 @@ class OrderOperations:
                             refreshed_summary = cart_summary(refreshed_cart)
                             if quote_contents(refreshed_summary) != original_contents:
                                 raise HouseholdError("Oda cart or delivery changed while refreshing checkout; prepare a new summary")
-                            if isinstance(menu_baseline, Mapping) and not independent_cart:
+                            if isinstance(menu_baseline, Mapping) and not independent_cart and not cart_only:
                                 if canonical(self.store.read().get("cart_plan")) != canonical(cart_plan_baseline):
                                     raise HouseholdError("cart plan changed while preparing checkout; prepare a new summary")
                                 cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
@@ -3087,7 +3153,7 @@ class OrderOperations:
                             refreshed_summary = cart_summary(refreshed_cart)
                             if canonical(refreshed_summary) == canonical(summary):
                                 raise
-                            if isinstance(menu_baseline, Mapping) and not independent_cart:
+                            if isinstance(menu_baseline, Mapping) and not independent_cart and not cart_only:
                                 cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
                                 if cart_gate is not None:
                                     return cart_gate
@@ -3178,7 +3244,7 @@ class OrderOperations:
                 refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                 refreshed_summary = cart_summary(refreshed_cart)
                 if canonical(refreshed_summary) != canonical(summary):
-                    if isinstance(menu_baseline, Mapping) and not independent_cart:
+                    if isinstance(menu_baseline, Mapping) and not independent_cart and not cart_only:
                         cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
                         if cart_gate is not None:
                             return cart_gate
@@ -3231,7 +3297,8 @@ class OrderOperations:
                                                       discount_breakdown=review.get("discount_breakdown"))
             summary["menu_shortfall"] = self._menu_shortfall(cart_plan_baseline, summary)
             if not order_change:
-                summary["menu_attribution"] = self._checkout_menu_attribution(menu_baseline, cart_plan_baseline)
+                summary["menu_attribution"] = (
+                    "cart_only" if cart_only else self._checkout_menu_attribution(menu_baseline, cart_plan_baseline))
                 if menu_baseline and summary["menu_attribution"] == "cart_only":
                     summary["menu_coverage"] = "not_assessed"
                 elif summary["menu_attribution"] == "menu_bound":
@@ -3263,6 +3330,8 @@ class OrderOperations:
             summary["dietary_assessment"] = dietary_assessment
             confirmation_id = secrets.token_urlsafe(18)
             with self.store.locked() as state:
+                if cart_only and (problem := self._cart_only_checkout_problem(state)):
+                    return problem
                 if canonical(state.get("pending_checkout")) != canonical(baseline):
                     raise HouseholdError("checkout state changed while preparing the summary")
                 if canonical(state.get("order_change")) != canonical(order_change):
@@ -3277,6 +3346,10 @@ class OrderOperations:
                 state["pending_checkout"] = {
                     **({"renewed_from": renew_confirmation_id} if renew_confirmation_id else {}),
                     **({"independent_cart": True} if independent_cart else {}),
+                    # An explicit cart-only order never binds the saved menu or
+                    # reconciles its plan; only an already-ordered menu's
+                    # extras-only plan is consumed, as without the flag.
+                    **({"cart_only": True} if cart_only else {}),
                     "checkout_payment": checkout_payment,
                     **({"payment_preference": payment_preference} if checkout_payment != payment_preference else {}),
                     "scheduler_context": deepcopy(scheduler_context),
@@ -3287,13 +3360,13 @@ class OrderOperations:
                     "orders_before": before,
                     "browser_review": review,
                     "expires_at": (self._now() + CHECKOUT_REVIEW_TTL).isoformat(),
-                    "menu": menu_baseline,
+                    "menu": None if cart_only else menu_baseline,
                     "cart_plan": cart_plan_baseline,
                     "menu_ref": {
                         "menu_id": menu_baseline.get("menu_id"),
                         "revision": menu_baseline.get("revision"),
                         "digest": menu_baseline.get("digest"),
-                    } if isinstance(menu_baseline, Mapping) else None,
+                    } if isinstance(menu_baseline, Mapping) and not cart_only else None,
                     "occurrence": occurrence,
                     "automatic_checkout": automatic_checkout,
                     "dietary_assessment": dietary_assessment,
@@ -4711,6 +4784,8 @@ class OrderOperations:
                 return {'confirmed': False, 'status': 'needs_input', 'reason': 'equipment_unavailable', 'issues': issues}
         if confirmation_id != pending.get("confirmation_id"):
             raise HouseholdError("checkout confirmation does not match the prepared summary")
+        if pending.get("cart_only") and (problem := self._cart_only_checkout_problem(self.store.read())):
+            return problem
         if current_payment != pending.get("payment_preference", pending.get("checkout_payment")):
             raise HouseholdError("payment preference changed or was not bound; prepare a new summary")
         if self._now() >= datetime.fromisoformat(pending["expires_at"]):
@@ -4747,7 +4822,8 @@ class OrderOperations:
             return {'confirmed': False, 'reprepared': True, **self._checkout_prepare(deadline,
                 occurrence=pending.get('occurrence'), automatic_checkout=pending.get('automatic_checkout', False),
                 scheduler_context=pending.get('scheduler_context'), delivery_reselections=pending.get('delivery_reselections', 0),
-                payment_override=pending['checkout_payment'] if 'payment_preference' in pending else None)}
+                payment_override=pending['checkout_payment'] if 'payment_preference' in pending else None,
+                cart_only=bool(pending.get('cart_only')))}
         gate = self._dietary_checkout_gate(pending, request)
         if gate:
             return {**gate, 'confirmation_id': pending['confirmation_id'], 'summary': pending['summary']}
@@ -4762,6 +4838,8 @@ class OrderOperations:
             with self._browser_operation(deadline):
                 with self.store.locked() as state:
                     current_pending = state.get("pending_checkout")
+                    if pending.get("cart_only") and (problem := self._cart_only_checkout_problem(state)):
+                        return problem
                     if state.get("pending_cart_change"):
                         raise HouseholdError("reconcile_change before checkout")
                     if not current_pending or current_pending.get("status") != "awaiting_confirmation" or canonical(current_pending) != canonical(pending):
@@ -4831,6 +4909,8 @@ class OrderOperations:
                                 raise CheckoutPreconditionError("the target order changed before the final click")
                     from dietary_assessment import digest
                     with self.store.locked() as state:
+                        if pending.get("cart_only") and (problem := self._cart_only_checkout_problem(state)):
+                            raise CheckoutPreconditionError(problem["next"])
                         if pending.get('dietary_assessment') and digest({'diet': state['profile']['diet'], 'equipment': state['profile']['meals'].get('equipment', [])}) != pending['dietary_assessment']['profile_digest']:
                             raise CheckoutPreconditionError('dietary rules changed before dispatch; prepare a new summary')
                         try:
