@@ -10158,6 +10158,41 @@ class FlowTests(unittest.TestCase):
             self.assertTrue(all(slot["price_kind"] == "from" and slot["price_ore"] == 4900
                                 for slot in result["slots"]))
 
+    def test_meny_delivery_list_shows_plain_picker_quotes_without_promoting_slot_prices(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            amounts = ["49,90 kr 49,90 kroner", "0 kr 0 kroner", "39 kr 49 kroner",
+                       "49 kr fra 49 kroner", "59 kr 59 kroner", "fra 69 kr fra 69 kroner"]
+            windows = []
+            labels = {}
+            for hour, prefix in enumerate(amounts, start=7):
+                start, end = f"{hour:02}:00", f"{hour + 1:02}:00"
+                label = f"{prefix}, 23. november klokka {start} til {end}"
+                slot = normalize_meny_delivery_slot({"slot_id": label, "display": label,
+                    "date": "2026-11-23", "start": start, "end": end, "selected": False})
+                windows.append(slot)
+                labels[slot["slot_ref"]] = label.replace("23. november", "24. november") if hour == 11 else label
+            provider.call = mock.Mock(return_value={"slots": windows, "display": labels})
+
+            result = app.handle({"operation": "delivery", "action": "list"})
+
+            self.assertEqual(result["slots"], windows)
+            self.assertEqual(list(result["price_display"].values()), [
+                "49,90 kr (vist i kalenderen, bekreft prisen i kassen)",
+                "0 kr (vist i kalenderen, bekreft prisen i kassen)",
+                "pris ikke tilgjengelig",
+                "pris ikke tilgjengelig",
+                "pris ikke tilgjengelig",
+                "fra 69 kr",
+            ])
+            self.assertEqual(
+                [(slot["price_kind"], slot["price_ore"]) for slot in result["slots"]],
+                [("unavailable", None)] * 5 + [("from", 6900)],
+            )
+            provider.call.assert_called_once()
+
     def test_provider_delivery_dates_stay_scalar_without_calendar_capability_or_for_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
             store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
