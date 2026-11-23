@@ -47,12 +47,12 @@ source limitation; it does not establish that no suitable recipes exist.
 
 `recipe_search` accepts `query` and `size` (1–20). It returns
 `{provider: "meny", query, recipes: [...]}` from a bounded, ranked first page.
-The service reads the recipe group from MENY's public search and constructs the
-same recipe links as the first-party result cards. Incomplete or incompatible
-responses fall back to identity-checked browser results. The tool has no
-pagination, total, next cursor or
-exhaustion flag. A short result cannot establish source exhaustion, and an empty
-query does not establish that other useful queries have no results.
+The service reads the recipe group from MENY's public search and preserves
+the first-party card links, ratings, time ranges and difficulty. Incomplete or
+incompatible responses fall back to identity-checked browser results. The tool
+has no pagination, total, next cursor or exhaustion flag. A short result cannot
+establish source exhaustion, and an empty query does not establish that other
+useful queries have no results.
 
 `recipe_detail` takes only the exact `recipe_id` path returned by search. It
 first reads the public HTML over bounded, unauthenticated HTTPS. The requested

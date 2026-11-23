@@ -40,10 +40,11 @@ def page():
             "scripts": [json.dumps(recipe)]}
 
 
-def search_hit(slug, title, *, parent="test", identity=None, score=1):
+def search_hit(slug, title, *, parent="test", identity=None, score=1, duration=2, difficulty=1, rating=0):
     identity = identity or "recipe-" + slug
     return {"id": identity, "score": score, "document": {
         "id": identity, "type": "recipe", "slug": slug, "parentSlug": parent, "title": title,
+        "timeEstimate": duration, "difficultyEstimate": difficulty, "avgRating": rating,
         "ingredientEans": ["7038010010187"], "categoryParentSlug": "ignored",
     }}
 
@@ -208,8 +209,8 @@ class MenyRecipeAdapterGateTests(unittest.TestCase):
         client._require_login = mock.Mock()
         client._assert_authenticated = mock.Mock()
         client._open = mock.Mock()
-        first = search_hit("synthetic-rice", "Synthetic rice", score=1)
-        second = search_hit("other", "Other", parent=None, score=5)
+        first = search_hit("synthetic-rice", "Synthetic rice", score=1, rating=4.2516556)
+        second = search_hit("other", "Other", parent=None, score=5, duration=1, difficulty=None, rating=5.0)
         with mock.patch("recipe_import_sources._get_bytes", side_effect=[
             search_response([first, second], total=4), recipe_html(),
         ]) as fetch:
@@ -218,9 +219,10 @@ class MenyRecipeAdapterGateTests(unittest.TestCase):
 
         self.assertEqual(result["query"], "ris & grønt")
         self.assertEqual(result["recipes"], [
-            {"recipe_id": RECIPE_PATH, "recipe_url": RECIPE_URL, "name": "Synthetic rice", "summary": "Synthetic rice"},
+            {"recipe_id": RECIPE_PATH, "recipe_url": RECIPE_URL, "name": "Synthetic rice",
+             "summary": "4.2516556 av 5 stjerner Synthetic rice 20-40 min | Enkel"},
             {"recipe_id": "/oppskrifter/other", "recipe_url": "https://meny.no/oppskrifter/other",
-             "name": "Other", "summary": "Other"},
+             "name": "Other", "summary": "5 av 5 stjerner Other 20 min |"},
         ])
         self.assertEqual(detail["recipe"]["source"]["url"], RECIPE_URL)
         self.assertEqual(detail["recipe"]["source"]["external_id"], RECIPE_PATH)
@@ -247,11 +249,16 @@ class MenyRecipeAdapterGateTests(unittest.TestCase):
         foreign = search_hit("https://evil.invalid/recipe", "Unsafe")
         wrong_identity = {**invalid, "id": "recipe-something-else"}
         wrong_type = {**invalid, "document": {**invalid["document"], "type": "article"}}
+        unknown_duration = search_hit("other", "Other", duration=5)
+        unknown_difficulty = search_hit("other", "Other", difficulty=True)
+        malformed_rating = search_hit("other", "Other", rating="4.5")
         truncated = search_response([invalid], total=2)
         wrong_total = search_response([], total=True)
         for response in (truncated, wrong_total, search_response([invalid, invalid]),
                          search_response([invalid, different_id]), search_response([foreign]),
                          search_response([wrong_identity]), search_response([wrong_type]),
+                         search_response([unknown_duration]), search_response([unknown_difficulty]),
+                         search_response([malformed_rating]),
                          (b'{"recipes":{"totalCount":0,"totalCount":0,"hits":[]}}', "application/json"),
                          (b"{}", "text/html")):
             with self.subTest(response=response), mock.patch("recipe_import_sources._get_bytes", return_value=response):
@@ -273,6 +280,20 @@ class MenyRecipeAdapterGateTests(unittest.TestCase):
         client._open = mock.Mock()
         with mock.patch("recipe_import_sources._get_bytes", return_value=search_response([])):
             self.assertEqual(client.call("recipe_search", {"query": "rice"})["recipes"], [])
+        client._open.assert_not_called()
+
+    def test_public_search_uses_the_card_defaults_and_time_ranges(self):
+        client = self.client()
+        client._require_login = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._open = mock.Mock()
+        hits = [search_hit("default", "Default", duration=None, difficulty=0, rating=None),
+                search_hit("medium", "Medium", duration=3, difficulty=2),
+                search_hit("long", "Long", duration=4, difficulty=3)]
+        with mock.patch("recipe_import_sources._get_bytes", return_value=search_response(hits)):
+            result = client.call("recipe_search", {"query": "rice"})
+        self.assertEqual([hit["summary"] for hit in result["recipes"]],
+                         ["Default 20-40 min |", "Medium 40-60 min | Middels", "Long 60+ min | Vanskelig"])
         client._open.assert_not_called()
 
     def test_public_detail_falls_back_when_identity_or_structure_is_ambiguous(self):

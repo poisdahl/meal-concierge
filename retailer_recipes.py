@@ -18,6 +18,8 @@ MENY_ORIGIN = "https://meny.no"
 MENY_RECIPE_SEARCH = "https://search.trumfnetthandel.prod.trumf.cloud/search/all/1300"
 _MAX_MENY_RECIPE_RESPONSE = 1_000_000
 _MENY_RECIPE_SLUG = re.compile(r"[A-Za-z0-9_-]+")
+_MENY_RECIPE_TIMES = {1: "20 min", 2: "20-40 min", 3: "40-60 min", 4: "60+ min"}
+_MENY_RECIPE_DIFFICULTIES = {1: "Enkel", 2: "Middels", 3: "Vanskelig"}
 MAX_DETAIL_BYTES = 256 * 1024
 MENY_RECIPE_CAPABILITIES = {
     "detail": "website_jsonld",
@@ -227,6 +229,27 @@ def _text(value: Any, field: str, maximum: int) -> str:
     return value
 
 
+def _meny_recipe_summary(document: Mapping[str, Any], name: str) -> str:
+    """Match the culinary facts in MENY's search card."""
+    time_estimate = document.get("timeEstimate")
+    difficulty = document.get("difficultyEstimate")
+    rating = document.get("avgRating")
+    if time_estimate is None:
+        time_estimate = 2  # The card defaults to 20-40 minutes.
+    if (type(time_estimate) is not int or time_estimate not in _MENY_RECIPE_TIMES
+            or difficulty is not None and (type(difficulty) is not int or not 0 <= difficulty <= 3)
+            or rating is not None and (type(rating) not in (int, float) or not (rating == 0 or 1 <= rating <= 5))):
+        raise HouseholdError("MENY public recipe card metadata changed")
+    parts = []
+    if rating:
+        displayed = int(rating) if rating == int(rating) else rating
+        parts.append(f"{displayed} av 5 stjerner")
+    parts.extend((name, _MENY_RECIPE_TIMES[time_estimate], "|"))
+    if difficulty:
+        parts.append(_MENY_RECIPE_DIFFICULTIES[difficulty])
+    return " ".join(parts)
+
+
 def read_meny_recipe_search(query: str, limit: int, *, timeout: float) -> list[dict[str, str]]:
     """Read the ranked, bounded first page of MENY's public recipe search."""
     from recipe_import_sources import _get_bytes
@@ -268,7 +291,8 @@ def read_meny_recipe_search(query: str, limit: int, *, timeout: float) -> list[d
         seen_ids.add(identity)
         seen_paths.add(path)
         name = " ".join(normalize("NFC", _text(document.get("title"), "search title", 300)).split())
-        result.append({"recipe_id": path, "recipe_url": MENY_ORIGIN + path, "name": name, "summary": name})
+        result.append({"recipe_id": path, "recipe_url": MENY_ORIGIN + path,
+                       "name": name, "summary": _meny_recipe_summary(document, name)})
     return result
 
 
