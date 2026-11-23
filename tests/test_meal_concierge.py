@@ -5584,7 +5584,7 @@ process.stdout.write(eval(script));
         }]}
         client._invoke = mock.Mock(side_effect=lambda *arguments: (
             completed if arguments[:2] == ("network", "requests") else
-            {"responseBody": json.dumps({"status": 40, "statusDescription": "DELIVERED"})}
+            {**completed["requests"][0], "responseBody": json.dumps({"status": 40, "statusDescription": "DELIVERED"})}
             if arguments[:2] == ("network", "request") else {}
         ))
 
@@ -5599,6 +5599,7 @@ process.stdout.write(eval(script));
             mock.call("click", '[data-meal-concierge-action="order-items"]'),
             mock.call("network", "requests", "--filter", "/api/order/"),
             mock.call("network", "request", "order-detail-1"),
+            mock.call("network", "requests", "--filter", "/api/order/"),
         ])
         self.assertEqual(client._sleep.call_args_list, [mock.call(1.5), mock.call(0.25), mock.call(0.25)])
         self.assertIn("valueAfter('Betalt beløp (kort)')", scripts[-1])
@@ -5676,10 +5677,11 @@ process.stdout.write(eval(script));
                 client._invoke = mock.Mock(side_effect=[
                     {},
                     *([{"requests": []}] * empty_reads),
-                    *([{}] if reloaded else []),
+                    *([{}, {}] if reloaded else []),
                     completed,
                     completed,
-                    {"responseBody": json.dumps({"status": 99, "statusDescription": "DELETED"})},
+                    {**completed["requests"][0], "responseBody": json.dumps({"status": 99, "statusDescription": "DELETED"})},
+                    completed,
                 ])
 
                 order = client._get_order("99990001")
@@ -5688,10 +5690,11 @@ process.stdout.write(eval(script));
                 self.assertEqual(client._invoke.call_args_list, [
                     mock.call("network", "requests", "--clear"),
                     *([mock.call("network", "requests", "--filter", "/api/order/")] * empty_reads),
-                    *([mock.call("reload")] if reloaded else []),
+                    *([mock.call("network", "requests", "--clear"), mock.call("reload")] if reloaded else []),
                     mock.call("network", "requests", "--filter", "/api/order/"),
                     mock.call("network", "requests", "--filter", "/api/order/"),
                     mock.call("network", "request", "order-detail-2"),
+                    mock.call("network", "requests", "--filter", "/api/order/"),
                 ])
                 self.assertEqual(client._sleep.call_args_list, [
                     *([mock.call(0.25)] * (empty_reads - 1 if reloaded else empty_reads)),
@@ -5728,8 +5731,8 @@ process.stdout.write(eval(script));
                         if args[2] == "old":
                             # The first response is initially unavailable. Once
                             # a newer request exists, its stale OPEN is unusable.
-                            return {} if reads == 1 else {"responseBody": '{"statusDescription":"OPEN"}'}
-                        return final_body if reads >= 3 else {}
+                            return old if reads == 1 else {**old, "responseBody": '{"statusDescription":"OPEN"}'}
+                        return {**latest, **final_body} if reads >= 3 else latest
                     raise AssertionError(args)
 
                 client._invoke = mock.Mock(side_effect=invoke)
@@ -5744,6 +5747,95 @@ process.stdout.write(eval(script));
                 self.assertTrue(all(value == "latest" for value in body_reads[1:]))
                 self.assertLessEqual(len(body_reads), 8)
                 self.assertFalse(any(call.args[0] == "reload" for call in client._invoke.call_args_list))
+
+    def test_order_detail_selects_the_newest_exact_request_before_checking_success(self):
+        from meny import meny_order_detail_request_id
+
+        order_id = "99990001"
+        url = f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"
+        old = {"url": url, "method": "GET", "status": 200, "requestId": "old"}
+        for latest_status in (None, False, 304, 404, 500):
+            with self.subTest(status=latest_status):
+                self.assertIsNone(meny_order_detail_request_id(
+                    {"requests": [old, {**old, "requestId": "new", "status": latest_status}]}, order_id,
+                ))
+        for url_variant in (
+            url + "/payment", url + "?order=99990002",
+            url.replace("store/user", "search/store/user"),
+            url.replace("store/user", "some-subresource"),
+            url.replace(".no/", ".no:8443/"),
+            url.replace("https://", "https://unrelated@"),
+            url.replace(order_id, "99990002"),
+        ):
+            with self.subTest(url=url_variant):
+                self.assertEqual(meny_order_detail_request_id(
+                    {"requests": [old, {**old, "requestId": "other", "url": url_variant}]}, order_id,
+                ), "old")
+        self.assertEqual(meny_order_detail_request_id(
+            {"requests": [old, {**old, "requestId": "new"}]}, order_id,
+        ), "new")
+
+    def test_order_details_discard_stale_body_if_a_newer_request_starts(self):
+        order_id = "99990001"
+        old = {"requestId": "older", "method": "GET", "status": 200,
+               "url": f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"}
+        newer = {**old, "requestId": "newer"}
+        for final_status in (200, 500):
+            with self.subTest(status=final_status):
+                client = self.client()
+                client._require_login = mock.Mock()
+                client._open = mock.Mock()
+                client._sleep = mock.Mock()
+                client._eval = mock.Mock(return_value={
+                    "ready": True, "authenticated": True, "order_number": order_id,
+                    "code": "TEST-CODE-1", "status": "confirmed", "total": 123.45,
+                    "delivery": "2. september 2026", "item_count": 1,
+                    "products": [{"identity": "Testprodukt", "quantity": 1}],
+                })
+                lists = iter([
+                    [old], [old], [old, {**newer, "status": None}],
+                    [old, {**newer, "status": None}],
+                ])
+
+                def invoke(*args):
+                    if args == ("network", "requests", "--clear"):
+                        return {}
+                    if args[:2] == ("network", "requests"):
+                        return {"requests": next(lists, [old, {**newer, "status": final_status}])}
+                    if args == ("network", "request", "older"):
+                        return {**old, "responseBody": '{"statusDescription":"DELETED"}'}
+                    if args == ("network", "request", "newer"):
+                        return {**newer, "responseBody": '{"statusDescription":"OPEN"}'}
+                    raise AssertionError(args)
+
+                client._invoke = mock.Mock(side_effect=invoke)
+                if final_status == 200:
+                    self.assertEqual(client.call("get_order", {"order_number": order_id})["status"], "confirmed")
+                else:
+                    with self.assertRaisesRegex(HouseholdError, "status did not refresh"):
+                        client.call("get_order", {"order_number": order_id})
+                body_reads = [call.args[2] for call in client._invoke.call_args_list
+                              if call.args[:2] == ("network", "request")]
+                self.assertEqual(body_reads, ["older", "newer"] if final_status == 200 else ["older"])
+                client._require_login.assert_called_once_with()
+
+    def test_order_details_reject_unbound_response_metadata(self):
+        order_id = "99990001"
+        record = {"requestId": "detail", "method": "GET", "status": 200,
+                  "url": f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"}
+        for mismatch in ({"requestId": "other"}, {"url": record["url"] + "/payment"},
+                         {"method": "POST"}, {"status": 500}):
+            with self.subTest(mismatch=mismatch):
+                client = self.client()
+                client._open = mock.Mock()
+                client._sleep = mock.Mock()
+                client._eval = mock.Mock(return_value={"ready": True, "authenticated": True})
+                client._invoke = mock.Mock(side_effect=[
+                    {}, {"requests": [record]}, {"requests": [record]},
+                    {**record, "responseBody": '{"statusDescription":"DELETED"}', **mismatch},
+                ])
+                with self.assertRaisesRegex(HouseholdError, "response identity changed"):
+                    client._get_order(order_id)
 
     def test_deleted_order_discovery_uses_bound_creation_time(self):
         from meny import meny_order_provider_details
@@ -5795,7 +5887,8 @@ process.stdout.write(eval(script));
                            "payments": [{"reservedAmount": 600.0}]}
                 client._invoke = mock.Mock(side_effect=lambda *args: (
                     completed if args[:2] == ("network", "requests") else
-                    {"responseBody": json.dumps(payload)} if args[:2] == ("network", "request") else {}
+                    {**completed["requests"][0], "responseBody": json.dumps(payload)}
+                    if args[:2] == ("network", "request") else {}
                 ))
                 if error:
                     with self.assertRaisesRegex(HouseholdError, error):

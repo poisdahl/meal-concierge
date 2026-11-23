@@ -601,31 +601,23 @@ def meny_order_card_status(value: Any) -> str:
 
 
 def meny_order_detail_request_id(value: Any, order_id: str) -> str | None:
-    """Return the completed provider request for one exact MENY order."""
+    """Return the newest exact order GET only once it has succeeded."""
 
     if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
         raise HouseholdError("MENY browser order request log changed")
+    expected_url = f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"
+    # agent-browser appends requests at dispatch and updates their status in
+    # place, so an unresolved newer request supersedes an older success.
     for request in reversed(value["requests"]):
         if not isinstance(request, Mapping):
             raise HouseholdError("MENY browser order request log changed")
+        if request.get("url") != expected_url or str(request.get("method") or "").upper() != "GET":
+            continue
         status = request.get("status")
-        parsed = urlparse(str(request.get("url") or ""))
-        path = parsed.path.casefold()
         request_id = request.get("requestId")
-        if (
-            str(request.get("method") or "").upper() == "GET"
-            and not isinstance(status, bool)
-            and isinstance(status, int)
-            and 200 <= status < 300
-            and parsed.scheme == "https"
-            and parsed.hostname == "platform-rest-prod.ngdata.no"
-            and path.startswith("/api/order/")
-            and not path.startswith("/api/order/search/")
-            and order_id in parsed.path.split("/")
-            and isinstance(request_id, str)
-            and request_id
-        ):
+        if type(status) is int and 200 <= status < 300 and isinstance(request_id, str) and request_id:
             return request_id
+        return None
     return None
 
 
@@ -3123,6 +3115,7 @@ __DELIVERY_BINDING__
             if request_id is not None:
                 break
             if phase == 0:
+                self._invoke("network", "requests", "--clear")
                 self._invoke("reload")
                 self._sleep(0.5)
         if request_id is None:
@@ -3209,14 +3202,22 @@ __DELIVERY_BINDING__
             request_id = meny_order_detail_request_id(
                 self._invoke("network", "requests", "--filter", "/api/order/"), order_id,
             )
-            if request_id is None:
-                raise HouseholdError("MENY order status did not refresh")
-            response = self._invoke("network", "request", request_id)
-            if isinstance(response, Mapping) and "responseBody" not in response and attempt < 7:
+            if request_id is not None:
+                response = self._invoke("network", "request", request_id)
+                if (not isinstance(response, Mapping)
+                        or meny_order_detail_request_id({"requests": [response]}, order_id) != request_id):
+                    raise HouseholdError("MENY browser order response identity changed")
+                if "responseBody" in response or attempt == 7:
+                    latest_id = meny_order_detail_request_id(
+                        self._invoke("network", "requests", "--filter", "/api/order/"), order_id,
+                    )
+                    if latest_id == request_id:
+                        provider_details = meny_order_provider_details(response, order_id)
+                        break
+            if attempt < 7:
                 self._sleep(0.25)
-                continue
-            provider_details = meny_order_provider_details(response, order_id)
-            break
+        else:
+            raise HouseholdError("MENY order status did not refresh")
         order_total = provider_details.get("order_total", result.get("order_total"))
         if (provider_details.get("order_total") is not None and result.get("order_total") is not None
                 and round(provider_details["order_total"] * 100) != round(result["order_total"] * 100)):
