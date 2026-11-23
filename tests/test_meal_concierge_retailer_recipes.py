@@ -8,6 +8,7 @@ import subprocess
 import sys
 import unittest
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from core import HouseholdError
 from meny import MenyClient
+from recipe_import_sources import RecipeImportSourceError
 from retailer_recipes import MAX_DETAIL_BYTES, meny_recipe_input, meny_recipe_jsonld, meny_recipe_path
 
 
@@ -36,6 +38,27 @@ def page():
     }
     return {"ready": True, "url": RECIPE_URL, "canonical_urls": [RECIPE_URL],
             "scripts": [json.dumps(recipe)]}
+
+
+def search_hit(slug, title, *, parent="test", identity=None, score=1, duration=2, difficulty=1, rating=0):
+    identity = identity or "recipe-" + slug
+    return {"id": identity, "score": score, "document": {
+        "id": identity, "type": "recipe", "slug": slug, "parentSlug": parent, "title": title,
+        "timeEstimate": duration, "difficultyEstimate": difficulty, "avgRating": rating,
+        "ingredientEans": ["7038010010187"], "categoryParentSlug": "ignored",
+    }}
+
+
+def search_response(hits, total=None):
+    value = {"recipes": {"hits": hits, "totalCount": len(hits) if total is None else total}}
+    return json.dumps(value).encode(), "application/json"
+
+
+def recipe_html(*, canonical=None, scripts=None):
+    links = (f'<link rel="canonical" href="{RECIPE_URL}">'.encode() if canonical is None else canonical)
+    if scripts is None:
+        scripts = '<script type="application/ld+json">' + page()["scripts"][0] + '</script>'
+    return b"<html><head>" + links + b"</head><body>" + scripts.encode() + b"</body></html>", "text/html"
 
 
 def browser_evaluate(script, observation):
@@ -139,8 +162,12 @@ class MenyRecipeAdapterGateTests(unittest.TestCase):
         client._require_login = mock.Mock(side_effect=HouseholdError("login required"))
         client._open = mock.Mock()
         client._change_cart = mock.Mock()
-        with self.assertRaisesRegex(HouseholdError, "login required"):
-            client.call("recipe_detail", {"recipe_id": RECIPE_PATH})
+        with mock.patch("recipe_import_sources._get_bytes") as fetch:
+            for tool, arguments in (("recipe_detail", {"recipe_id": RECIPE_PATH}),
+                                    ("recipe_search", {"query": "synthetic"})):
+                with self.subTest(tool=tool), self.assertRaisesRegex(HouseholdError, "login required"):
+                    client.call(tool, arguments)
+            fetch.assert_not_called()
         client._open.assert_not_called()
         client._change_cart.assert_not_called()
 
@@ -171,9 +198,146 @@ class MenyRecipeAdapterGateTests(unittest.TestCase):
             extracted.append(result)
             return result
         client._eval = evaluate
-        with self.assertRaisesRegex(HouseholdError, "login lost"):
-            client.call("recipe_detail", {"recipe_id": RECIPE_PATH})
+        with mock.patch("recipe_import_sources._get_bytes", side_effect=RecipeImportSourceError("unavailable")):
+            with self.assertRaisesRegex(HouseholdError, "login lost"):
+                client.call("recipe_detail", {"recipe_id": RECIPE_PATH})
         self.assertEqual(extracted, [page()])
+        client._open.assert_called_once_with(RECIPE_URL)
+
+    def test_public_search_preserves_rank_and_gives_exact_detail_reference(self):
+        client = self.client()
+        client._require_login = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._open = mock.Mock()
+        first = search_hit("synthetic-rice", "Synthetic rice", score=1, rating=4.2516556)
+        second = search_hit("other", "Other", parent=None, score=5, duration=1, difficulty=None, rating=5.0)
+        with mock.patch("recipe_import_sources._get_bytes", side_effect=[
+            search_response([first, second], total=4), recipe_html(),
+        ]) as fetch:
+            result = client.call("recipe_search", {"query": "  ris  &  grønt ", "size": 2})
+            detail = client.call("recipe_detail", {"recipe_id": result["recipes"][0]["recipe_id"]})
+
+        self.assertEqual(result["query"], "ris & grønt")
+        self.assertEqual(result["recipes"], [
+            {"recipe_id": RECIPE_PATH, "recipe_url": RECIPE_URL, "name": "Synthetic rice",
+             "summary": "4.2516556 av 5 stjerner Synthetic rice 20-40 min | Enkel"},
+            {"recipe_id": "/oppskrifter/other", "recipe_url": "https://meny.no/oppskrifter/other",
+             "name": "Other", "summary": "5 av 5 stjerner Other 20 min |"},
+        ])
+        self.assertEqual(detail["recipe"]["source"]["url"], RECIPE_URL)
+        self.assertEqual(detail["recipe"]["source"]["external_id"], RECIPE_PATH)
+        self.assertEqual(detail["recipe"]["portions"], 4)
+        self.assertEqual(detail["recipe"]["steps"], json.loads(page()["scripts"][0])["recipeInstructions"])
+        self.assertEqual(detail["capabilities"]["product_associations"], "unsupported")
+        search_url = urlsplit(fetch.call_args_list[0].args[0])
+        self.assertEqual((search_url.scheme, search_url.netloc, search_url.path),
+                         ("https", "search.trumfnetthandel.prod.trumf.cloud", "/search/all/1300"))
+        self.assertEqual(parse_qs(search_url.query), {"query": ["ris & grønt"], "include": ["recipes"],
+                                                     "page": ["1"], "size": ["2"]})
+        self.assertEqual(fetch.call_args_list[1].args[0], RECIPE_URL)
+        for call in fetch.call_args_list:
+            self.assertEqual(set(call.kwargs), {"maximum", "accept", "timeout"})
+            self.assertGreater(call.kwargs["timeout"], 0)
+            self.assertLessEqual(call.kwargs["timeout"], 2)
+        self.assertEqual(client._require_login.call_count, 2)
+        self.assertEqual(client._assert_authenticated.call_count, 2)
+        client._open.assert_not_called()
+
+    def test_public_search_accepts_only_scoped_empty_or_complete_prefix(self):
+        invalid = search_hit("synthetic-rice", "Synthetic rice")
+        different_id = search_hit("synthetic-rice", "Synthetic rice", identity="recipe-other")
+        foreign = search_hit("https://evil.invalid/recipe", "Unsafe")
+        wrong_identity = {**invalid, "id": "recipe-something-else"}
+        wrong_type = {**invalid, "document": {**invalid["document"], "type": "article"}}
+        unknown_duration = search_hit("other", "Other", duration=5)
+        unknown_difficulty = search_hit("other", "Other", difficulty=True)
+        malformed_rating = search_hit("other", "Other", rating="4.5")
+        truncated = search_response([invalid], total=2)
+        wrong_total = search_response([], total=True)
+        for response in (truncated, wrong_total, search_response([invalid, invalid]),
+                         search_response([invalid, different_id]), search_response([foreign]),
+                         search_response([wrong_identity]), search_response([wrong_type]),
+                         search_response([unknown_duration]), search_response([unknown_difficulty]),
+                         search_response([malformed_rating]),
+                         (b'{"recipes":{"totalCount":0,"totalCount":0,"hits":[]}}', "application/json"),
+                         (b"{}", "text/html")):
+            with self.subTest(response=response), mock.patch("recipe_import_sources._get_bytes", return_value=response):
+                client = self.client()
+                client._require_login = mock.Mock()
+                client._open = mock.Mock()
+                client._select_recipe_results = mock.Mock()
+                client._eval = mock.Mock(return_value={
+                    "identity": True, "ready": True, "authenticated": True, "root_count": 1, "state_root_count": 1,
+                    "query_count": 1, "heading_count": 1, "recipes": [{"recipe_id": RECIPE_PATH, "name": "Browser rice"}],
+                })
+                self.assertEqual(client.call("recipe_search", {"query": "rice", "size": 2})["recipes"][0]["name"],
+                                 "Browser rice")
+                client._open.assert_called_once_with("https://meny.no/sok?query=rice")
+                client._select_recipe_results.assert_called_once_with("rice")
+        client = self.client()
+        client._require_login = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._open = mock.Mock()
+        with mock.patch("recipe_import_sources._get_bytes", return_value=search_response([])):
+            self.assertEqual(client.call("recipe_search", {"query": "rice"})["recipes"], [])
+        client._open.assert_not_called()
+
+    def test_public_search_uses_the_card_defaults_and_time_ranges(self):
+        client = self.client()
+        client._require_login = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._open = mock.Mock()
+        hits = [search_hit("default", "Default", duration=None, difficulty=0, rating=None),
+                search_hit("medium", "Medium", duration=3, difficulty=2),
+                search_hit("long", "Long", duration=4, difficulty=3)]
+        with mock.patch("recipe_import_sources._get_bytes", return_value=search_response(hits)):
+            result = client.call("recipe_search", {"query": "rice"})
+        self.assertEqual([hit["summary"] for hit in result["recipes"]],
+                         ["Default 20-40 min |", "Medium 40-60 min | Middels", "Long 60+ min | Vanskelig"])
+        client._open.assert_not_called()
+
+    def test_public_detail_falls_back_when_identity_or_structure_is_ambiguous(self):
+        script = '<script type="application/ld+json">' + page()["scripts"][0] + '</script>'
+        link = f'<link rel="canonical" href="{RECIPE_URL}">'.encode()
+        wrong = b'https://evil.invalid/recipe'
+        for response in (recipe_html(canonical=link * 2), recipe_html(canonical=link.replace(RECIPE_URL.encode(), wrong)),
+                         recipe_html(canonical=link.replace(b'href=', b'href="https://evil.invalid/recipe" href=')),
+                         recipe_html(scripts=script * 2), recipe_html(scripts=script.replace(RECIPE_URL, "https://evil.invalid")),
+                         recipe_html(scripts='<template>' + script + '</template>'),
+                         recipe_html(scripts='<template />' + script + '</template>'),
+                         recipe_html(scripts='<textarea>' + script + '</textarea>')):
+            with self.subTest(response=response), mock.patch("recipe_import_sources._get_bytes", return_value=response):
+                client = self.client()
+                client._require_login = mock.Mock()
+                client._assert_authenticated = mock.Mock()
+                client._open = mock.Mock()
+                client._eval = mock.Mock(return_value=page())
+                result = client.call("recipe_detail", {"recipe_id": RECIPE_PATH})
+                client._open.assert_called_once_with(RECIPE_URL)
+                self.assertEqual(result["recipe"]["source"]["url"], RECIPE_URL)
+
+    def test_public_detail_keeps_the_post_read_login_check(self):
+        client = self.client()
+        client._require_login = mock.Mock()
+        client._assert_authenticated = mock.Mock(side_effect=HouseholdError("login lost"))
+        client._open = mock.Mock()
+        with mock.patch("recipe_import_sources._get_bytes", return_value=recipe_html()):
+            with self.assertRaisesRegex(HouseholdError, "login lost"):
+                client.call("recipe_detail", {"recipe_id": RECIPE_PATH})
+        client._open.assert_not_called()
+
+    def test_short_deadline_spares_time_for_the_browser(self):
+        from time import monotonic
+
+        client = self.client()
+        client._require_login = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._open = mock.Mock()
+        client._eval = mock.Mock(return_value=page())
+        with mock.patch("recipe_import_sources._get_bytes") as fetch:
+            result = client.call("recipe_detail", {"recipe_id": RECIPE_PATH}, deadline=monotonic() + 2)
+            fetch.assert_not_called()
+        self.assertEqual(result["recipe"]["source"]["url"], RECIPE_URL)
         client._open.assert_called_once_with(RECIPE_URL)
 
 

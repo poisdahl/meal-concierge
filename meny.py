@@ -170,6 +170,7 @@ CHECKOUT_PRICE_ROWS_JS = r"""root => {
 DEFAULT_BROWSER_ARGS = "--disable-gpu,--disable-quic"
 MENY_READ_TIMEOUT = 110
 MENY_CATALOG_TIMEOUT = 1.5
+MENY_RECIPE_HTTP_TIMEOUT = 1.0
 MENY_CATALOG_COOLDOWN = 60
 MENY_CART_TIMEOUT = 240
 # Until MENY's price calculator answers, the cart drawer lists the items with a
@@ -1159,9 +1160,19 @@ class MenyClient:
 
     def _recipe_detail(self, recipe_id: Any) -> dict[str, Any]:
         from recipes import normalize_recipe
-        from retailer_recipes import MENY_RECIPE_CAPABILITIES, meny_recipe_input, meny_recipe_path
+        from retailer_recipes import (
+            MENY_RECIPE_CAPABILITIES, meny_recipe_input, meny_recipe_path, read_meny_recipe_detail,
+        )
 
         path = meny_recipe_path(recipe_id)
+        if self._recipe_http_has_time():
+            try:
+                recipe = normalize_recipe(read_meny_recipe_detail(path, timeout=MENY_RECIPE_HTTP_TIMEOUT))
+            except HouseholdError:
+                pass
+            else:
+                self._assert_authenticated()
+                return {"provider": "meny", "recipe": recipe, "capabilities": dict(MENY_RECIPE_CAPABILITIES)}
         self._open(BASE_URL + path)
         self._assert_authenticated()
         observation = self._eval(r"""
@@ -1179,6 +1190,9 @@ class MenyClient:
         self._assert_authenticated()
         recipe = normalize_recipe(meny_recipe_input(observation, path))
         return {"provider": "meny", "recipe": recipe, "capabilities": dict(MENY_RECIPE_CAPABILITIES)}
+
+    def _recipe_http_has_time(self) -> bool:
+        return self.deadline is not None and self.deadline - time.monotonic() >= MENY_RECIPE_HTTP_TIMEOUT + 2.0
 
     @staticmethod
     def _limit(value: Any) -> int:
@@ -1199,6 +1213,16 @@ class MenyClient:
         expanded = {"products": "products", "recipes": "recipes"}.get(kind)
         if expanded is None:
             raise HouseholdError("MENY search kind is invalid")
+        if kind == "recipes" and self._recipe_http_has_time():
+            from retailer_recipes import read_meny_recipe_search
+
+            try:
+                recipes = read_meny_recipe_search(query, limit, timeout=MENY_RECIPE_HTTP_TIMEOUT)
+            except HouseholdError:
+                pass
+            else:
+                self._assert_authenticated()
+                return {"provider": "meny", "query": query, "recipes": recipes}
         self._open(f"{BASE_URL}/sok?{urlencode({'query': query})}")
         if kind == "recipes":
             self._select_recipe_results(query)
