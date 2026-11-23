@@ -606,10 +606,17 @@ class OrderOperations:
         require_selected: bool = False,
         availability: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        calls = dates or [None]
+        batch_dates = (
+            self.provider == "meny" and not require_selected and address_id is None
+            and len(dates or ()) > 1
+            and getattr(self.provider_client, "supports_delivery_date_batch", False) is True
+        )
+        calls = [None] if batch_dates else dates or [None]
         slots: list[dict[str, Any]] = []
         for delivery_date in calls:
             arguments = {"delivery_date": delivery_date} if delivery_date else {}
+            if batch_dates:
+                arguments["delivery_dates"] = dates
             if address_id is not None:
                 arguments["delivery_address_id"] = address_id
             if self.provider == "meny":
