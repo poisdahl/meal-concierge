@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError, StateStore, cart_summary
+from meny import MenyCartStoppedError
 from service import Application
 import test_meal_concierge as base
 
@@ -45,6 +48,7 @@ class UncertainMenuMenyWriteTests(unittest.TestCase):
         self.assertEqual(result["reason"], "cart_write_result_uncertain")
         self.assertTrue(result["outcome_unknown"])
         pending = app.store.read()["pending_cart_change"]
+        self.assertEqual(result["operation_id"], pending["operation_id"])
         self.assertTrue(pending["managed_menu"])
         self.assertFalse(pending.get("dispatch_finished"))
         self.assertFalse(pending.get("stopped_before_next_click"))
@@ -118,6 +122,96 @@ class UncertainMenuMenyWriteTests(unittest.TestCase):
         with store.locked() as state:
             state["pending_cart_change"] = deepcopy(journal)
         self.assertEqual(app.handle(accept)["status"], "owner_accepted_cart")
+
+
+class StoppedMenuMenyBatchTests(unittest.TestCase):
+    """A menu batch that stopped before its next click and was read back has nothing to settle."""
+
+    def household(self, stops, *, household_edit=False):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        store, provider, _browser, app, product = base.CartPlanTests.app(temp.name, "meny")
+        original = provider.call
+        self.writes = 0
+
+        def call(tool, arguments, **kwargs):
+            if tool == "manipulate_cart":
+                self.writes += 1
+                if self.writes in stops:
+                    # The adapter clicked these units, then stopped before its next click.
+                    landed = [dict(operation, quantity=1) for operation in arguments["operations"]
+                              for _ in range(operation["quantity"])][:stops[self.writes]]
+                    if landed:
+                        provider._mutate_cart({"operations": landed})
+                    if household_edit:
+                        provider._mutate_cart({"operations": [{"productId": product, "quantity": 1}]})
+                    raise MenyCartStoppedError("MENY operation deadline reached", landed)
+            return original(tool, arguments, **kwargs)
+
+        provider.call = call
+        return store, provider, app, product
+
+    @staticmethod
+    def quantity(app, provider, product):
+        return app._cart_lines(cart_summary(provider.cart))[0].get(product, 0)
+
+    def assert_nothing_to_settle(self, result, store):
+        self.assertEqual(result["reason"], "cart_write_stopped_before_click")
+        self.assertTrue(result["cart_reconciliation_required"])
+        for key in ("outcome_unknown", "cart_write_pending", "operation_id"):
+            self.assertNotIn(key, result)
+        state = store.read()
+        self.assertFalse(state.get("pending_cart_change"))
+        self.assertEqual({receipt["status"] for receipt in state["cart_change_receipts"].values()}, {"read_back"})
+        self.assertEqual(state["cart_plan"]["status"], "needs_input")
+
+    def test_a_stopped_sync_that_was_read_back_is_reviewed_without_accepting_anything(self):
+        # Stop after the first click of a same-product two-click batch, or before
+        # the first click of a later batch.
+        for stop_at, clicks, confirmed in ((1, 1, 1), (2, 0, 2)):
+            with self.subTest(stop_at=stop_at, clicks=clicks):
+                store, provider, app, product = self.household({stop_at: clicks})
+                start = self.quantity(app, provider, product)
+                stopped = base.CartPlanTests.sync(app, product, start + 4)
+                self.assertIs(stopped["synced"], False)
+                self.assert_nothing_to_settle(stopped, store)
+                self.assertEqual(self.quantity(app, provider, product), start + confirmed)
+                self.assertEqual(store.read()["cart_plan"]["added_quantities"], {product: confirmed})
+                self.assertNotIn("accept_current_available", app.handle({"operation": "cart", "action": "get"}))
+                restored = app.handle({"operation": "cart", "action": "reconcile", "decision": "restore_missing",
+                                       "menu_ref": app._cart_menu_ref(store.read()["menu"]),
+                                       "cart_digest": stopped["cart_plan"]["cart_digest"]})
+                self.assertTrue(restored["reconciled"], restored)
+                self.assertEqual(self.quantity(app, provider, product), start + 4)
+
+    def test_a_stopped_reconcile_that_was_read_back_is_reviewed_again(self):
+        store, provider, app, product = self.household({1: 1, 2: 1})
+        start = self.quantity(app, provider, product)
+        menu_ref = app._cart_menu_ref(store.read()["menu"])
+        stopped = base.CartPlanTests.sync(app, product, start + 4)
+        self.assert_nothing_to_settle(stopped, store)
+        again = app.handle({"operation": "cart", "action": "reconcile", "decision": "restore_missing",
+                            "menu_ref": menu_ref, "cart_digest": stopped["cart_plan"]["cart_digest"]})
+        self.assertIs(again["reconciled"], False)
+        self.assert_nothing_to_settle(again, store)
+        self.assertEqual(self.quantity(app, provider, product), start + 2)
+        restored = app.handle({"operation": "cart", "action": "reconcile", "decision": "restore_missing",
+                               "menu_ref": menu_ref, "cart_digest": again["cart_plan"]["cart_digest"]})
+        self.assertTrue(restored["reconciled"], restored)
+        self.assertEqual(self.quantity(app, provider, product), start + 4)
+        self.assertEqual(self.writes, 3)
+
+    def test_a_stop_whose_clicks_are_not_read_back_stays_uncertain_with_its_operation(self):
+        # The household changes the cart before the stopped batch is read back.
+        store, provider, app, product = self.household({1: 1}, household_edit=True)
+        start = self.quantity(app, provider, product)
+        result = base.CartPlanTests.sync(app, product, start + 2)
+        pending = store.read()["pending_cart_change"]
+        self.assertTrue(pending["stopped_before_next_click"])
+        self.assertIsNone(result["synced"])
+        self.assertEqual(result["reason"], "cart_write_result_uncertain")
+        self.assertTrue(result["outcome_unknown"])
+        self.assertEqual(result["operation_id"], pending["operation_id"])
 
 
 class MenyRecoveryEdgeTests(unittest.TestCase):
@@ -225,6 +319,42 @@ class MenyRecoveryEdgeTests(unittest.TestCase):
         self.assertNotIn("next", accepted)
         self.assertEqual(store.read()["cart_plan"]["status"], "active")
 
+    def test_an_unconfirmed_click_keeps_its_closed_reason_through_acceptance(self):
+        from agent_views import project_agent_result
+        from meny import MenyBrowserError
+        store, provider, _browser, app, product = self.app()
+        _original, observed = self.observed(provider)
+        failure = MenyBrowserError("synthetic-secret https://private.invalid/?token=hidden",
+                                   failure_class="quantity_not_settled", source="cart_readback", elapsed_ms=15125)
+
+        def call(tool, arguments, **kwargs):
+            if tool == "manipulate_cart":
+                # The batch's first click landed; its second was not confirmed.
+                provider._mutate_cart({"operations": [dict(arguments["operations"][0], quantity=1)]})
+                raise failure
+            return observed(tool, arguments, **kwargs)
+
+        provider.call = call
+        start = app._cart_lines(cart_summary(provider.cart))[0][product]
+        result = base.CartPlanTests.sync(app, product, start + 2)
+        self.assertEqual(result["reason"], "cart_write_result_uncertain")
+        self.assertEqual(result["provider_failure"], failure.provider_failure)
+        # Both agent views of the uncertain write keep the closed reason.
+        views = [project_agent_result("cart", "sync", result),
+                 app._product_apply_view({"applied": False, "reason": "cart reconciliation required", **result})]
+        for view in views:
+            self.assertEqual(view["provider_failure"], failure.provider_failure)
+        self.assertEqual(views[1]["status"], "outcome_unknown")
+        pending = store.read()["pending_cart_change"]
+        self.assertEqual(pending["provider_failure"], failure.provider_failure)
+        shown = app.handle({"operation": "cart", "action": "get"})
+        app.handle({"operation": "cart", "action": "accept_current",
+                    "operation_id": shown["operation_id"], "cart_digest": shown["cart_digest"]})
+        state = store.read()
+        receipt = state["cart_change_receipts"][pending["operation_id"]]
+        self.assertEqual(receipt["original_operation"]["provider_failure"], failure.provider_failure)
+        self.assertNotIn("synthetic-secret", json.dumps(state) + json.dumps(result) + json.dumps(views))
+
     def test_the_partial_continuation_reference_is_internal_only(self):
         _store, _provider, _browser, app, _product = self.app()
         with self.assertRaisesRegex(HouseholdError, "internal-only"):
@@ -261,6 +391,148 @@ class MenyClickDeadlineTests(unittest.TestCase):
         client._resolve_order_route = mock.Mock()
         client._change_cart({"operations": [{"productId": base.MENY_PRODUCT, "quantity": 1}]})
         self.assertEqual(dispatched, ["mouse down"])
+
+
+class MenyClickSettleTests(unittest.TestCase):
+    """A dispatched unit gets a bounded settle window that its click guard reserves (#422)."""
+
+    LABEL = "Legg til 1 stk Brokkoli i handlevognen"
+
+    def setUp(self):
+        self.now = 1000.0
+        clock = mock.patch("meny.time.monotonic", side_effect=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def page(self, delays, *, budget=240.0):
+        """A product page that shows each dispatched add only after that click's delay."""
+        client = base.MenyClientTests().client()
+        client.deadline = self.now + budget
+        self.clicks = []
+        shown_at = []
+
+        def shown():
+            return sum(at <= self.now for at in shown_at)
+
+        def sleep(seconds):
+            client._require_time(seconds)
+            self.now += seconds
+
+        def product_control(_action, _delta, _product):
+            self.now += 0.05  # each browser read takes a little time
+            return {"authenticated": True, "ready": True, "page_ready": True,
+                    "quantity": shown(), "label": self.LABEL}
+
+        def click(_product, _label, before_dispatch, _same_control):
+            before_dispatch()
+            self.clicks.append(self.now)
+            shown_at.append(self.now + delays[len(self.clicks) - 1])
+
+        client._open = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._resolve_order_route = mock.Mock()
+        client._sleep = sleep
+        client._product_control = product_control
+        client._click_cart_control = click
+        client._read_cart = lambda: {"provider": "meny", "items": [
+            {"product_id": base.MENY_PRODUCT, "quantity": shown()}]}
+        return client
+
+    @staticmethod
+    def change(client):
+        return client._change_cart({"operations": [{"productId": base.MENY_PRODUCT, "quantity": 2}]})
+
+    def test_a_second_add_shown_after_several_seconds_is_confirmed(self):
+        for delay in (4, 6, 8):
+            with self.subTest(delay=delay):
+                cart = self.change(self.page([0.5, delay]))
+                self.assertEqual(cart["items"], [{"product_id": base.MENY_PRODUCT, "quantity": 2}])
+                self.assertEqual(len(self.clicks), 2)
+
+    def test_a_quantity_that_never_settles_ends_uncertain_with_closed_evidence(self):
+        from meny import MENY_POST_CLICK_SECONDS, MENY_QUANTITY_SETTLE_SECONDS, MenyBrowserError, MenyCartStoppedError
+        # Just enough time for the guard to allow the second click.
+        client = self.page([0.5, float("inf")], budget=MENY_POST_CLICK_SECONDS + 5)
+        with self.assertRaisesRegex(MenyBrowserError, "changed partially.*do not retry") as caught:
+            self.change(client)
+        self.assertNotIsInstance(caught.exception, MenyCartStoppedError)
+        self.assertEqual(len(self.clicks), 2)
+        self.assertLess(self.now, client.deadline)
+        waited = self.now - self.clicks[1]
+        self.assertGreaterEqual(waited, MENY_QUANTITY_SETTLE_SECONDS - 0.25)
+        self.assertLessEqual(waited, MENY_QUANTITY_SETTLE_SECONDS)
+        failure = dict(caught.exception.provider_failure)
+        self.assertEqual(failure.pop("elapsed_ms"), round(waited * 1000))
+        self.assertEqual(failure, {"provider": "meny", "class": "quantity_not_settled", "source": "cart_readback",
+                                   "phase": "post_click_readback", "daemon_request_ending": "unknown"})
+
+    def test_a_stalled_browser_read_is_bounded_by_the_quantity_window(self):
+        from meny import MENY_QUANTITY_SETTLE_SECONDS, MenyBrowserError
+        client = self.page([float("inf")])
+        overall_deadline = client.deadline
+        control = client._product_control
+
+        def stalled_read(*args):
+            if not self.clicks:
+                return control(*args)
+            self.assertEqual(client.deadline, self.clicks[0] + MENY_QUANTITY_SETTLE_SECONDS)
+            self.now = client.deadline
+            raise MenyBrowserError("synthetic browser timeout", failure_class="local_timeout", source="local_timeout")
+
+        client._product_control = stalled_read
+        with self.assertRaisesRegex(MenyBrowserError, "uncertain.*do not retry") as caught:
+            client._change_one(base.MENY_PRODUCT, 1)
+        self.assertEqual(caught.exception.provider_failure["class"], "local_timeout")
+        self.assertEqual(client.deadline, overall_deadline)
+        self.assertEqual(len(self.clicks), 1)
+
+    def test_the_last_reading_distinguishes_no_change_from_another_quantity(self):
+        for observed, failure_class in ((7, "quantity_not_settled"), (9, "quantity_unexpected")):
+            with self.subTest(observed=observed):
+                client = self.page([float("inf")])
+                client._product_control = lambda *_: {"authenticated": True, "ready": True,
+                                                      "quantity": 7, "label": self.LABEL}
+                client._wait_for_quantity = mock.Mock(return_value=observed)
+                with self.assertRaisesRegex(HouseholdError, "uncertain.*do not retry") as caught:
+                    client._change_one(base.MENY_PRODUCT, 1)
+                self.assertEqual(caught.exception.provider_failure["class"], failure_class)
+
+    def test_the_click_guard_still_stops_a_unit_without_time_to_settle(self):
+        from meny import MENY_POST_CLICK_SECONDS, MenyCartStoppedError
+        # The first add shows after 12 s, so the second unit lacks its reserve.
+        client = self.page([12, 0.5], budget=MENY_POST_CLICK_SECONDS + 10)
+        with self.assertRaises(MenyCartStoppedError) as caught:
+            self.change(client)
+        self.assertEqual(caught.exception.applied_operations, [{"productId": base.MENY_PRODUCT, "quantity": 1}])
+        self.assertEqual(len(self.clicks), 1)
+
+    def test_a_removal_uses_the_same_settle_window(self):
+        from meny import MENY_QUANTITY_SETTLE_SECONDS
+        for delay in (6, float("inf")):
+            with self.subTest(delay=delay):
+                client = self.page([])
+                client._read_cart = lambda: {"items": [{"product_id": base.MENY_PRODUCT, "quantity": 2}]}
+                removed_at = []
+
+                def remove(_product, _quantity, _code, before_dispatch):
+                    before_dispatch()
+                    removed_at.append(self.now + delay)
+
+                def drawer(_script):
+                    self.now += 0.05
+                    return {"ready": True, "authenticated": True,
+                            "quantity": 2 - sum(at <= self.now for at in removed_at)}
+
+                client._click_cart_remove_control = remove
+                client._eval = drawer
+                if delay == 6:
+                    client._remove_one_from_cart(base.MENY_PRODUCT, None)
+                    continue
+                with self.assertRaisesRegex(HouseholdError, "uncertain.*do not retry") as caught:
+                    client._remove_one_from_cart(base.MENY_PRODUCT, None)
+                failure = caught.exception.provider_failure
+                self.assertEqual(failure["class"], "quantity_not_settled")
+                self.assertGreaterEqual(failure["elapsed_ms"], (MENY_QUANTITY_SETTLE_SECONDS - 0.25) * 1000)
 
 
 if __name__ == "__main__":

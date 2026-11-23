@@ -557,8 +557,12 @@ reads leave less than its cart-write reserve, apply returns `status=validating`
 with `validation_progress.pending_cart_write=1` and writes on the continuation
 with a full time budget. It defers at most once per cycle and never by more
 than a fresh call's budget provides. MENY does not click a unit when less than
-about 25 seconds remain; the batch then stops with a proven ending. A slower
-readback after a click still ends uncertain and can be accepted as below.
+about 40 seconds remain; the batch then stops with a proven ending. After a
+click it waits up to 15 seconds for the new quantity, since a slower browser can
+show a second add late. A readback that still does not confirm the click ends
+uncertain and can be accepted as below. Its journal and result keep a closed
+`provider_failure`, such as `quantity_not_settled` with `elapsed_ms` since the
+click; it grants no retry authority.
 Current menu/profile/ownership are
 checked again near cart sync, including no-op sync. Drift stops before a cart
 write; complete validated whole-package quantities pass to the
@@ -656,6 +660,24 @@ same decision. The cart is reread before applying the decision and again before
 checkout. Any later product or quantity change invalidates the approved digest.
 Scheduled checkout stops in `cart_ready`/`needs_input` while anything is
 unresolved and never treats the suggested default as automatic consent.
+
+Use `cart_only=true` with manual checkout `prepare` or `submit` to buy the
+current cart independently. The order is recorded as
+`menu_attribution="cart_only"`. The saved draft menu, its cart plan and recipe
+usage are preserved through purchase, reconciliation and cancellation. For a
+menu that already belongs to an order, checkout clears only its separate extras
+bookkeeping. Renewal, payment switching and retries preserve the purchase
+intent. `confirm` and bound idempotency keys require a matching intent. Omitting
+`cart_only` and passing `cart_only=false` are equivalent. An incomplete
+saved-menu product apply still blocks checkout. Use `weekly=true` to buy for
+the saved weekly menu. Pick one scope based on the owner's request. `cart_only`
+is available for interactive new orders.
+
+MENY new-order reviews expose `summary.price_breakdown.status=unitemized`
+when the payable total is verified and individual price rows are unavailable.
+`cart_total_ore` comes from the refreshed cart. `cart_to_checkout_difference_ore`
+is the checkout total minus that cart total. Label fees, reserves and discounts
+only when their own rows are verified.
 
 Only the checkout tool's bound `submit` or `reconcile` result can establish a
 successful order. A generic order list or order read after checkout returned an
@@ -2168,8 +2190,12 @@ saved again meanwhile, the confirmed units stay owned by the earlier plan and
 the next step is a product prepare/apply for the current menu. A managed MENY
 batch with a proven ending keeps its readback path instead: a finished batch or
 proven stop settles from a fresh read, and a cart that differs from its
-acknowledged clicks goes to the cart review as household drift. MENY order
-edits and payments retain their own reconciliation paths.
+acknowledged clicks goes to the cart review as household drift. When a sync or
+reconcile reads back the clicks made before its stop, it returns
+`reason=cart_write_stopped_before_click` with nothing pending and no
+`operation_id`, so go straight to the cart review. `cart_write_result_uncertain`
+means the original journal is still pending. MENY order edits and payments
+retain their own reconciliation paths.
 
 An unsubmitted checkout review can be discarded with `checkout discard_review`
 and its exact confirmation ID. Discarding an unsubmitted recovery review restores
@@ -2242,6 +2268,11 @@ ensures a minimum package count without duplicate additions on repeated calls.
 Use `change` for explicit additional quantity deltas. Both actions accept an
 active menu; verified household extras are tracked as supplemental quantities
 and remain separate when menu requirements change. They do not rewrite recipes.
+For a separate shop, pass `cart_only=true` to `cart change` for positive deltas
+or to `cart ensure` for minimum quantities. This stages the goods without adding
+them to the saved menu's supplemental quantities. Use the same scope for later
+`ensure` calls. Normal cart-write reconciliation keeps the original scope. Use
+`checkout prepare` with `cart_only=true` to review a separate order.
 
 ### Delivery-only changes and price authority
 

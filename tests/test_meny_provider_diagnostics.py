@@ -159,6 +159,28 @@ class MenyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(str(ServiceError('ordinary')), 'ordinary')
         self.assertIsNone(ServiceError('ordinary').provider_failure)
 
+    def test_cart_readback_failures_keep_only_closed_facts_and_bounded_elapsed_time(self):
+        from mcp_server import _applied_product_result_projection
+        safe = MenyBrowserError(SECRET, failure_class='quantity_not_settled', source='cart_readback',
+                                elapsed_ms=15125).provider_failure
+        self.assertEqual(safe, {'provider': 'meny', 'class': 'quantity_not_settled', 'source': 'cart_readback',
+                                'phase': 'post_click_readback', 'daemon_request_ending': 'unknown',
+                                'elapsed_ms': 15125})
+        for code in ('quantity_unexpected', 'cart_not_settled'):
+            self.assertEqual(normalize_provider_failure({**safe, 'class': code})['class'], code)
+        self.assertIsNone(normalize_provider_failure({**safe, 'phase': 'adapter_invocation'}))
+        self.assertIsNone(normalize_provider_failure({**safe, 'source': 'local_timeout', 'phase': 'local_wait'}))
+        self.assertIsNone(normalize_provider_failure({**safe, 'class': 'local_timeout'}))
+        self.assertNotIn('elapsed_ms', normalize_provider_failure({**safe, 'class': 'cart_not_settled'}))
+        for bad in (None, True, -1, 3_600_001, 15.5, '15125', SECRET):
+            self.assertNotIn('elapsed_ms', normalize_provider_failure({**safe, 'elapsed_ms': bad}))
+        reply = _applied_product_result_projection({
+            'applied': False, 'status': 'needs_input', 'reason': 'cart_write_result_uncertain',
+            'outcome_unknown': True, 'cart_write_pending': True, 'provider_failure': {**safe, 'raw_error': SECRET}})
+        self.assertEqual(reply['status'], 'outcome_unknown')
+        self.assertEqual(reply['provider_failure'], safe)
+        self.assertNotIn('synthetic-secret', json.dumps(reply))
+
     def test_diagnostics_do_not_change_full_or_partial_authority(self):
         plan = {'binding': {'menu_ref': 'synthetic'}, 'requirements': [
             {'status': 'selected', 'requirement_id': 'selected', 'quantity': 2,

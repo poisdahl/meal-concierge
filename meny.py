@@ -120,25 +120,49 @@ CHECKOUT_DELIVERY_BINDING_JS = r"""
 DEFAULT_BROWSER_ARGS = "--disable-gpu,--disable-quic"
 MENY_READ_TIMEOUT = 110
 MENY_CART_TIMEOUT = 240
+# Until MENY's price calculator answers, the cart drawer lists the items with a
+# zero total. Give a slow answer this long before reloading the page.
+MENY_CART_TOTAL_WAIT_SECONDS = 12
 MENY_ORDER_TIMEOUT = 240
 MENY_LOGIN_POLL_ATTEMPTS = 24
 MENY_LOGIN_POLL_INTERVAL = 1.25
 MAX_CART_CLICKS = 2
-# Time a dispatched unit needs to settle and pass its final cart reads before the deadline.
-MENY_POST_CLICK_SECONDS = 25
+# How long a dispatched unit may take to show its new quantity. A slower browser
+# can show a second add late while MENY still applies the first one.
+MENY_QUANTITY_SETTLE_SECONDS = 15
+# Time a dispatched unit needs before the deadline: its settle window, then the
+# order-route, login and final settled-cart reads that follow it.
+MENY_POST_CLICK_SECONDS = MENY_QUANTITY_SETTLE_SECONDS + 25
 MENY_VIEWPORT = (1280, 900)
 
 
 class MenyBrowserError(HouseholdError):
     def __init__(self, message: str, *, failure_class: str | None = None,
-                 source: str | None = None):
+                 source: str | None = None, elapsed_ms: int | None = None):
         super().__init__(message)
         self.provider_failure = normalize_provider_failure({
             "provider": "meny", "class": failure_class, "source": source,
-            "phase": {"local_timeout": "local_wait", "local_spawn": "local_spawn"}.get(
-                source, "adapter_invocation"),
-            "daemon_request_ending": "unknown",
+            "phase": {"local_timeout": "local_wait", "local_spawn": "local_spawn",
+                      "cart_readback": "post_click_readback"}.get(source, "adapter_invocation"),
+            "daemon_request_ending": "unknown", "elapsed_ms": elapsed_ms,
         })
+
+
+def _unsettled_click(message: str, observed: int, before: int, dispatched_at: float | None) -> MenyBrowserError:
+    # Closed evidence only: whether the last read still showed the pre-click
+    # quantity (or none), and how long after mouse-down the bounded wait ended.
+    return MenyBrowserError(
+        message, failure_class="quantity_not_settled" if observed in {before, -1} else "quantity_unexpected",
+        source="cart_readback",
+        elapsed_ms=None if dispatched_at is None else round((time.monotonic() - dispatched_at) * 1000))
+
+
+def _dispatched_error(message: str, cause: HouseholdError) -> MenyBrowserError:
+    """An unconfirmed dispatched change keeps its cause's closed facts, never its text."""
+    error = MenyBrowserError(message)
+    if isinstance(cause, MenyBrowserError):
+        error.provider_failure = cause.provider_failure
+    return error
 
 
 class _BrowserTransportError(MenyBrowserError):
@@ -623,6 +647,18 @@ def meny_delivery_reservation_acknowledged(value: Any) -> bool:
     return reservation and household
 
 
+def _zero_total_cart(value: Mapping[str, Any]) -> bool:
+    """A drawer that lists items with a zero total, as MENY shows it before its calculator answers."""
+    return (
+        value.get("authenticated") is True
+        and value.get("item_root_count", 0) > 0
+        and (
+            (value.get("total_count") == 1 and value.get("total") == 0)
+            or (value.get("subtotal_count") == 1 and value.get("subtotal") == 0)
+        )
+    )
+
+
 def normalize_cart_snapshot(value: Any) -> dict[str, Any]:
     """Reject incomplete or ambiguous MENY cart DOM snapshots."""
 
@@ -1089,6 +1125,26 @@ class MenyClient:
   const queryHeadings = visibleQueryHeaderElements.filter(x => norm(x.innerText) === `Resultater for "${query}"`);
   const queryHeadingValid = queryHeaders.length === 0 || (queryHeaders.length === 1 && visibleQueryHeaders.length === 1 && queryHeaderElements.length === 1 && visibleQueryHeaderElements.length === 1 && queryHeadings.length === 1);
   const headings = roots.length === 1 ? [...roots[0].querySelectorAll(':scope > h2')].filter(visible).filter(x => norm(x.innerText) === heading) : [];
+  const fallback = new Map([['recipes', 'Oppskrifter'], ['articles', 'Artikler']]).get(expandedValues[0]);
+  if (kind === 'products' && identity && fallback && authenticated.length === 1 && roots.length === 1 &&
+      stateRoots.length === 1 && stateRoots[0] === roots[0] && queryHeadingValid && queryHeadings.length === 1) {
+    // MENY can select another result kind when there are no products. Check
+    // the loaded tabs and exact query before treating it as an empty search.
+    const tabs = [...queryHeaders[0].querySelectorAll(':scope > #search-result-tab')].filter(visible);
+    const radio = value => tabs.length === 1 ? [...tabs[0].querySelectorAll('input[type="radio"]')].filter(x => x.value === value) : [];
+    const products = radio('products');
+    const selected = radio(expandedValues[0]);
+    const productLabels = products.length === 1 ? [...products[0].labels].filter(visible) : [];
+    const selectedLabels = selected.length === 1 ? [...selected[0].labels].filter(visible) : [];
+    const fallbackHeading = [...roots[0].querySelectorAll(':scope > h2')].filter(visible);
+    if (productLabels.length === 1 && norm(productLabels[0].innerText) === 'Varer' && !products[0].checked &&
+        selectedLabels.length === 1 && selected[0].checked &&
+        new RegExp(`^${fallback} \\([1-9]\\d*\\)$`).test(norm(selectedLabels[0].innerText)) &&
+        fallbackHeading.length === 1 && norm(fallbackHeading[0].innerText) === fallback &&
+        !roots[0].querySelectorAll('li.ws-product-list-vertical__item').length) {
+      return JSON.stringify({ready:true, identity:true, route:false, authenticated:true, root_count:1, state_root_count:1, query_header_count:1, query_count:1, heading_count:1, products:[], recipes:[]});
+    }
+  }
   if (!route || authenticated.length !== 1 || mains.length !== 1 || roots.length !== 1 || stateRoots.length !== 1 || stateRoots[0] !== roots[0] || !queryHeadingValid || headings.length !== 1) {
     return JSON.stringify({ready:false, identity, route, authenticated:authenticated.length === 1, root_count:roots.length, state_root_count:stateRoots.length, query_header_count:queryHeaders.length, query_count:queryHeadings.length, heading_count:headings.length, products:[], recipes:[]});
   }
@@ -1376,7 +1432,7 @@ class MenyClient:
             raise MenyCartStoppedError(str(exc), acknowledged + exc.applied_operations) from exc
         except HouseholdError as exc:
             if applied:
-                raise HouseholdError("MENY cart changed partially; read the cart and do not retry this request") from exc
+                raise _dispatched_error("MENY cart changed partially; read the cart and do not retry this request", exc) from exc
             raise
 
     def _read_settled_cart(self) -> dict[str, Any]:
@@ -1394,17 +1450,18 @@ class MenyClient:
         ]
         if signatures[-2] == signatures[-1]:
             return snapshots[-1]
-        raise HouseholdError("MENY cart quantities did not settle")
+        raise MenyBrowserError("MENY cart quantities did not settle", failure_class="cart_not_settled",
+                               source="cart_readback")
 
     def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None) -> None:
-        dispatched = False
+        dispatched_at: float | None = None
 
         def before_dispatch() -> None:
-            nonlocal dispatched
+            nonlocal dispatched_at
             # A click the deadline cuts off cannot be read back. Stopping here
             # is a proven zero-click ending for this unit.
             self._require_time(MENY_POST_CLICK_SECONDS)
-            dispatched = True
+            dispatched_at = time.monotonic()
 
         try:
             self._open(BASE_URL + product)
@@ -1413,13 +1470,15 @@ class MenyClient:
             if previous is not None:
                 expected = previous + delta
                 self._resolve_order_route(order_change_code)
-                if self._wait_for_quantity(expected, previous, product) != expected:
-                    raise HouseholdError("MENY product quantity did not settle")
+                with self._quantity_settle_window():
+                    observed = self._wait_for_quantity(expected, previous, product)
+                if observed != expected:
+                    raise _unsettled_click("MENY product quantity did not settle", observed, previous, dispatched_at)
                 self._assert_authenticated()
                 return
         except HouseholdError as exc:
-            if dispatched:
-                raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
+            if dispatched_at is not None:
+                raise _dispatched_error("MENY cart change is uncertain; read the cart and do not retry this request", exc) from exc
             raise MenyCartStoppedError(str(exc)) from exc
 
         if delta < 0:
@@ -1486,12 +1545,12 @@ class MenyClient:
             raise HouseholdError("MENY order routing did not settle")
 
     def _remove_one_from_cart(self, product: str, order_change_code: str | None) -> None:
-        dispatched = False
+        dispatched_at: float | None = None
 
         def before_dispatch() -> None:
-            nonlocal dispatched
+            nonlocal dispatched_at
             self._require_time(MENY_POST_CLICK_SECONDS)
-            dispatched = True
+            dispatched_at = time.monotonic()
 
         try:
             cart = self._read_cart()
@@ -1502,13 +1561,14 @@ class MenyClient:
             if current < 1:
                 raise HouseholdError("MENY product is not in the cart")
             self._click_cart_remove_control(product, current, order_change_code, before_dispatch)
-            observed = self._wait_for_cart_quantity(product, current - 1, order_change_code)
+            with self._quantity_settle_window():
+                observed = self._wait_for_cart_quantity(product, current - 1, order_change_code)
             if observed != current - 1:
-                raise HouseholdError("MENY cart quantity did not settle")
+                raise _unsettled_click("MENY cart quantity did not settle", observed, current, dispatched_at)
             self._assert_authenticated()
         except HouseholdError as exc:
-            if dispatched:
-                raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
+            if dispatched_at is not None:
+                raise _dispatched_error("MENY cart change is uncertain; read the cart and do not retry this request", exc) from exc
             raise MenyCartStoppedError(str(exc)) from exc
 
     def _click_cart_remove_control(self, product: str, quantity: int, order_change_code: str | None, before_dispatch: Any) -> None:
@@ -1567,7 +1627,9 @@ class MenyClient:
 
     def _wait_for_cart_quantity(self, product: str, expected: int, order_change_code: str | None) -> int:
         observed = -1
-        for _ in range(12):
+        for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
+            if self.deadline is not None and time.monotonic() + 0.25 >= self.deadline:
+                break
             self._sleep(0.25)
             result = self._eval(r"""
 (() => {
@@ -2079,7 +2141,9 @@ __DELIVERY_BINDING__
 
     def _wait_for_quantity(self, expected: int, previous: int, product: str) -> int:
         observed = previous
-        for _ in range(12):
+        for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
+            if self.deadline is not None and time.monotonic() + 0.25 >= self.deadline:
+                break
             self._sleep(0.25)
             result = self._product_control("read", 1, product)
             if result.get("authenticated") is not True:
@@ -2246,6 +2310,7 @@ __DELIVERY_BINDING__
             self._invoke("click", '[data-meal-concierge-action="open-cart"]')
             self._sleep(0.5)
         result: dict[str, Any] = {}
+        zero_since: float | None = None
         for _ in range(60):
             result = self._eval(r"""
 (() => {
@@ -2323,26 +2388,17 @@ __DELIVERY_BINDING__
                 raise HouseholdError(changed)
             if result.get("ready") is True:
                 break
-            if (
-                not observe_order_mode
-                and result.get("authenticated") is True
-                and result.get("item_root_count", 0) > 0
-                and (
-                    (result.get("total_count") == 1 and result.get("total") == 0)
-                    or (result.get("subtotal_count") == 1 and result.get("subtotal") == 0)
-                )
-            ):
-                break
+            if not observe_order_mode and _zero_total_cart(result):
+                # A slow calculator answer is not a stale page. Reload only
+                # once the zero total has lasted the whole bounded wait.
+                now = time.monotonic()
+                zero_since = now if zero_since is None else zero_since
+                if now - zero_since >= MENY_CART_TOTAL_WAIT_SECONDS:
+                    break
+            else:
+                zero_since = None
             self._sleep(0.25)
-        if (
-            allow_reload and not observe_order_mode
-            and result.get("authenticated") is True
-            and result.get("item_root_count", 0) > 0
-            and (
-                (result.get("total_count") == 1 and result.get("total") == 0)
-                or (result.get("subtotal_count") == 1 and result.get("subtotal") == 0)
-            )
-        ):
+        if allow_reload and not observe_order_mode and _zero_total_cart(result):
             self._invoke("reload")
             self._sleep(0.5)
             return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
@@ -3925,6 +3981,17 @@ __DELIVERY_BINDING__
             self.recovery_allowed = previous_recovery
             self._recovery_consumed = previous_recovery_consumed
             self.lock.release()
+
+    @contextmanager
+    def _quantity_settle_window(self):
+        # The deadline covers browser invocations as well as the sleeps between reads.
+        prior = self.deadline
+        end = time.monotonic() + MENY_QUANTITY_SETTLE_SECONDS
+        self.deadline = end if prior is None else min(prior, end)
+        try:
+            yield
+        finally:
+            self.deadline = prior
 
     def _require_time(self, minimum: float = 0) -> None:
         if self.deadline is not None and self.deadline - time.monotonic() < minimum:

@@ -815,6 +815,9 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
                                  "changed", "outcome_unknown", "operation_id", "cart_observation", "cart_target_observed", "accept_current_available", "dispatch_outcome", "cart_reconciliation_required", "decision",
                                  "product_plan_stale", "menu_binding_stale", "order_id", "applied_operations",
                                  "excluded_product_ids", "accepted_missing_product_ids", "default_suggestion")))
+    from rpc_client import normalize_provider_failure
+    if failure := normalize_provider_failure(result.get("provider_failure")):
+        view["provider_failure"] = failure
     if isinstance(result.get("cart_plan"), dict):
         view["cart_plan"] = _fields(result["cart_plan"], ("provider", "status", "menu_ref", "cart_digest", "approved", "ownership_review"))
         view["cart_plan"]["items"] = _cart_plan_items(result["cart_plan"], offset, limit)

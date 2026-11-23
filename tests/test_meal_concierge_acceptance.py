@@ -1013,6 +1013,8 @@ class GroceryTopupTests(unittest.TestCase):
                 else:
                     stopped = flow_fixture.CartPlanTests.sync(app, product, 6)
                     self.assertFalse(stopped["synced"])
+                    self.assertEqual(stopped["reason"], "cart_write_stopped_before_click")
+                    self.assertNotIn("outcome_unknown", stopped)
                     self.assertEqual(store.read()["cart_plan"]["added_quantities"], {product: 2})
                 self.assertFalse(store.read().get("pending_cart_change"))
                 receipt = store.read()["cart_change_receipts"][attempts[-1]["operation_id"]]
