@@ -657,6 +657,12 @@ checkout. Any later product or quantity change invalidates the approved digest.
 Scheduled checkout stops in `cart_ready`/`needs_input` while anything is
 unresolved and never treats the suggested default as automatic consent.
 
+MENY new-order reviews expose `summary.price_breakdown.status=unitemized`
+when the payable total is verified and individual price rows are unavailable.
+`cart_total_ore` comes from the refreshed cart. `cart_to_checkout_difference_ore`
+is the checkout total minus that cart total. Label fees, reserves and discounts
+only when their own rows are verified.
+
 Only the checkout tool's bound `submit` or `reconcile` result can establish a
 successful order. A generic order list or order read after checkout returned an
 error is not proof that the current attempt succeeded. A dispatched click that
