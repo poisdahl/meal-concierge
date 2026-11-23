@@ -2265,6 +2265,11 @@ ensures a minimum package count without duplicate additions on repeated calls.
 Use `change` for explicit additional quantity deltas. Both actions accept an
 active menu; verified household extras are tracked as supplemental quantities
 and remain separate when menu requirements change. They do not rewrite recipes.
+For a separate shop, pass `cart_only=true` to `cart change` for positive deltas
+or to `cart ensure` for minimum quantities. This stages the goods without adding
+them to the saved menu's supplemental quantities. Use the same scope for later
+`ensure` calls. Normal cart-write reconciliation keeps the original scope. Use
+`checkout prepare` with `cart_only=true` to review a separate order.
 
 ### Delivery-only changes and price authority
 

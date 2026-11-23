@@ -688,8 +688,10 @@ payment keeps the relative menu and the frozen review. Reconciliation must not
 shift dates based on today, and later delivery changes must not rewrite sent
 recipes or silently send them again.
 
-When the owner asks to buy what is in the cart, or groceries they did not ask
-to buy for the saved menu, prepare or submit checkout with `cart_only=true`.
+When the owner asks to buy what is in the cart, or asks for a separate grocery
+shop, prepare or submit checkout with `cart_only=true`. Use `cart_only=true` on
+`cart change` when adding goods, or on `cart ensure` when targeting minimum
+quantities, so their additions are separate from the draft menu's extras.
 That order is not linked to the menu; it needs no menu-plan reconciliation and
 leaves the menu and its cart plan unchanged. Use `weekly=true` only when the
 owner explicitly buys the saved weekly menu's groceries. Products shared by the
