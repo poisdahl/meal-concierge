@@ -124,6 +124,8 @@ MENY_ORDER_TIMEOUT = 240
 MENY_LOGIN_POLL_ATTEMPTS = 24
 MENY_LOGIN_POLL_INTERVAL = 1.25
 MAX_CART_CLICKS = 2
+# Time a dispatched unit needs to settle and pass its final cart reads before the deadline.
+MENY_POST_CLICK_SECONDS = 25
 MENY_VIEWPORT = (1280, 900)
 
 
@@ -1399,6 +1401,9 @@ class MenyClient:
 
         def before_dispatch() -> None:
             nonlocal dispatched
+            # A click the deadline cuts off cannot be read back. Stopping here
+            # is a proven zero-click ending for this unit.
+            self._require_time(MENY_POST_CLICK_SECONDS)
             dispatched = True
 
         try:
@@ -1485,6 +1490,7 @@ class MenyClient:
 
         def before_dispatch() -> None:
             nonlocal dispatched
+            self._require_time(MENY_POST_CLICK_SECONDS)
             dispatched = True
 
         try:

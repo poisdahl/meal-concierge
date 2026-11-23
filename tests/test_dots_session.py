@@ -178,8 +178,8 @@ class DotsSessionTests(unittest.TestCase):
             reply["result"].update(semantics="bounded_personalized", sort_label="Anbefalt for deg")
         return reply
 
-    def timed_managed_apply(self, enclosing_limit=None):
-        request = self.managed_request()
+    def timed_managed_apply(self, enclosing_limit=None, request=None):
+        request = request or self.managed_request()
         # Only this child gets a controlled monotonic clock. The real CLI,
         # correlated stdin/stdout replies, planner and pending journal still run.
         launch_code = f"""
@@ -244,16 +244,24 @@ raise SystemExit(client.main())
         self.assertEqual(state["cart_plan"]["added_quantities"], {PRODUCT: 3})
         self.assertNotIn("pending_cart_change", state)
 
-    def test_default_application_budget_stops_slow_apply_before_write(self):
+    def test_default_application_budget_defers_slow_meny_write_to_a_full_budget(self):
         code, result = self.timed_managed_apply("application_default")
         self.assertEqual(code, 0, result)
-        self.assertFalse(result["result"]["applied"])
-        self.assertEqual(result["result"]["status"], "rejected_before_write")
-        self.assertFalse(result["result"]["cart_write_pending"])
-        self.assertEqual(result["result"]["reason"], "cart_read_failed_before_first_batch")
+        first = result["result"]
+        # Reads left less than the MENY cart-write reserve: no write is started.
+        self.assertFalse(first["applied"])
+        self.assertEqual(first["status"], "validating", first)
+        self.assertEqual(first["validation_progress"]["pending_cart_write"], 1)
         self.assertFalse(any(frame["effect"] == "cart_write" for frame in self.frames))
-        self.assertGreater(result["test_elapsed_seconds"], 240)
         self.assertEqual((self.quantity, self.writes), (0, 0))
+        self.assertNotIn("pending_cart_change", self.state())
+        # The continuation reuses the completed reads and writes with a full budget.
+        code, result = self.timed_managed_apply(
+            "application_default", request={"operation": "products", **first["continue_arguments"]})
+        self.assertEqual(code, 0, result)
+        self.assertTrue(result["result"]["applied"], result)
+        self.assertNotIn("product_search", [frame["operation"] for frame in self.frames])
+        self.assertEqual((self.quantity, self.writes), (3, 2))
         self.assertNotIn("pending_cart_change", self.state())
 
     def test_earlier_native_deadline_stops_slow_apply_before_write(self):
