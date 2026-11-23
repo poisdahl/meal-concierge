@@ -178,7 +178,8 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
                authorization: str | None = None,
                search_api_key: str | None = None,
                accept: str = "application/json, text/html, application/xhtml+xml",
-               json_body: dict | None = None, public_product_validator: dict | None = None) -> tuple[bytes, str]:
+               json_body: dict | None = None, public_product_validator: dict | None = None,
+               timeout: float | None = None) -> tuple[bytes, str]:
     """Fixed-origin GET. Only an independently configured origin permits private IPs."""
     checked = _url(url, "source URL")
     if not checked:
@@ -209,9 +210,10 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
     # source-controlled URL, configured account or arbitrary remote action.
     if json_body is not None and checked not in {"https://api.firecrawl.dev/v2/search", "https://api.firecrawl.dev/v2/scrape", "https://www.godfisk.no/sok/_Search"}:
         raise RecipeImportSourceError("unsupported public source POST")
-    timeout = 30.0 if json_body is not None else TIMEOUT
-    connection = _PinnedConnection(host, port, tls=parsed.scheme == "https", public_only=configured_origin is None,
-                                   **({"timeout": timeout} if json_body is not None else {}))
+    if timeout is None:
+        timeout = 30.0 if json_body is not None else TIMEOUT
+    connection = _PinnedConnection(host, port, tls=parsed.scheme == "https",
+                                   public_only=configured_origin is None, timeout=timeout)
     path = quote(parsed.path or "/", safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
         path += "?" + quote(parsed.query, safe="=&?/%:@!$'()*+,;~-._")
