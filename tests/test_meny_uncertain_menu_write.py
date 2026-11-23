@@ -12,6 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError, StateStore, cart_summary
 from meny import MenyCartStoppedError
+from retail_mcp import RetailPreDispatchError
 from service import Application
 import test_meal_concierge as base
 
@@ -391,6 +392,144 @@ class MenyClickDeadlineTests(unittest.TestCase):
         client._resolve_order_route = mock.Mock()
         client._change_cart({"operations": [{"productId": base.MENY_PRODUCT, "quantity": 1}]})
         self.assertEqual(dispatched, ["mouse down"])
+
+
+class MenyReviewedCartQuantityTests(unittest.TestCase):
+    PRODUCT = base.MENY_PRODUCT
+    LABEL = "Legg til 1 stk Brokkoli i handlevognen"
+
+    def client(self):
+        client = base.MenyClientTests().client()
+        client._open = mock.Mock()
+        client._require_login = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._resolve_order_route = mock.Mock()
+        client.verify_order_change = mock.Mock()
+        client._sleep = mock.Mock()
+        return client
+
+    def arguments(self, delta, before=1):
+        return {"operations": [{"productId": self.PRODUCT, "quantity": delta}],
+                "expected_before_quantities": {self.PRODUCT: before}}
+
+    def control(self, quantity, *, exact=True):
+        return {"ready": True, "authenticated": True, "quantity": quantity,
+                "exact_quantity": exact, "label": self.LABEL}
+
+    def test_a_reviewed_increment_stops_at_stationary_hover_when_the_quantity_changes(self):
+        for observed in (1, 2):
+            with self.subTest(observed=observed):
+                client = self.client()
+                client._product_control = mock.Mock(return_value=self.control(1))
+                hit = {"quantity_changed": True} if observed == 2 else {"clear": True}
+                client._eval = mock.Mock(side_effect=[{"ready": True}, hit])
+                client._invoke = mock.Mock(return_value={"box": {"x": 1, "y": 2, "width": 20, "height": 10}})
+                client._wait_for_quantity = mock.Mock(return_value=2)
+                client._read_settled_cart = mock.Mock(return_value={"items": []})
+                if observed == 2:
+                    with self.assertRaisesRegex(MenyCartStoppedError, "quantity changed before the click") as caught:
+                        client._change_cart(self.arguments(1))
+                    self.assertEqual(caught.exception.applied_operations, [])
+                    client._wait_for_quantity.assert_not_called()
+                else:
+                    client._change_cart(self.arguments(1))
+                    client._wait_for_quantity.assert_called_once_with(2, 1, self.PRODUCT)
+                client._product_control.assert_called_once_with("mark", 1, self.PRODUCT)
+                self.assertEqual(client._eval.call_count, 2)
+                self.assertEqual(client._invoke.call_args_list.count(mock.call("mouse", "down")), int(observed == 1))
+
+    def test_an_unproven_zero_quantity_cannot_satisfy_an_empty_review(self):
+        client = self.client()
+        client._product_control = mock.Mock(return_value=self.control(0, exact=False))
+        client._click_cart_control = mock.Mock()
+        with self.assertRaisesRegex(MenyCartStoppedError, "quantity changed or cannot be verified"):
+            client._change_cart(self.arguments(1, before=0))
+        client._click_cart_control.assert_not_called()
+
+    def test_cart_drawer_removal_requires_the_reviewed_quantity(self):
+        for observed in (1, 2):
+            with self.subTest(observed=observed):
+                client = self.client()
+                client._product_control = mock.Mock(return_value={"ready": False, "authenticated": True})
+                client._read_cart = mock.Mock(return_value={"items": [{"product_id": self.PRODUCT, "quantity": observed}]})
+                client._click_cart_remove_control = mock.Mock(side_effect=lambda _product, _quantity, _code, dispatch: dispatch())
+                client._wait_for_cart_quantity = mock.Mock(return_value=0)
+                if observed == 2:
+                    with self.assertRaisesRegex(MenyCartStoppedError, "quantity changed in the cart drawer") as caught:
+                        client._change_cart(self.arguments(-1))
+                    self.assertEqual(caught.exception.applied_operations, [])
+                    client._click_cart_remove_control.assert_not_called()
+                else:
+                    client._change_cart(self.arguments(-1))
+                    client._click_cart_remove_control.assert_called_once_with(self.PRODUCT, 1, None, mock.ANY)
+
+    def household(self, directory, *, drift_after):
+        store, fake, _browser, _app, product = base.CartPlanTests.app(directory, "meny")
+        client = self.client()
+        app = Application(store, client, None)
+        clicks = []
+        drifted = False
+
+        def product_control(action, _delta, _product):
+            nonlocal drifted
+            if action == "mark" and not drifted and len(clicks) == drift_after:
+                fake._mutate_cart({"operations": [{"productId": product, "quantity": 1}]})
+                drifted = True
+            return self.control(fake.cart["items"][0]["quantity"])
+
+        def click(product, _label, dispatch, _verify, *, reviewed_control):
+            self.assertEqual(reviewed_control, (1, fake.cart["items"][0]["quantity"]))
+            dispatch()
+            clicks.append(product)
+            fake._mutate_cart({"operations": [{"productId": product, "quantity": 1}]})
+
+        client._read_cart = mock.Mock(side_effect=lambda **_: deepcopy(fake.cart))
+        client._product_control = product_control
+        client._click_cart_control = click
+        client.call = mock.Mock(wraps=client.call)
+        return app, client, fake, clicks
+
+    def test_raw_and_managed_writes_stop_at_the_visible_drift_and_keep_the_exact_prefix(self):
+        for managed in (False, True):
+            for prefix in (0, 1):
+                with self.subTest(managed=managed, prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                    app, client, fake, clicks = self.household(directory, drift_after=prefix)
+                    if managed and prefix == 0:
+                        with self.assertRaisesRegex(RetailPreDispatchError, "stopped before its first managed click"):
+                            base.CartPlanTests.sync(app, self.PRODUCT, 3)
+                    elif managed:
+                        result = base.CartPlanTests.sync(app, self.PRODUCT, 3)
+                        self.assertTrue(result["outcome_unknown"])
+                    elif prefix:
+                        with self.assertRaisesRegex(HouseholdError, "stopped cart batch is still uncertain"):
+                            app.handle({"operation": "cart", "action": "change",
+                                        "operations": self.arguments(2)["operations"]})
+                    else:
+                        result = app.handle({"operation": "cart", "action": "change",
+                                             "operations": self.arguments(2)["operations"]})
+                        self.assertEqual(result["status"], "not_dispatched")
+                    self.assertEqual(clicks, [self.PRODUCT] * prefix)
+                    self.assertEqual(fake.cart["items"][0]["quantity"], 2 + prefix)
+                    writes = [call.args[1] for call in client.call.call_args_list if call.args[0] == "manipulate_cart"]
+                    self.assertEqual(writes, [self.arguments(2)])
+                    state = app.store.read()
+                    if prefix:
+                        pending = state["pending_cart_change"]
+                        self.assertTrue(pending["stopped_before_next_click"])
+                        self.assertEqual(pending["expected"], {self.PRODUCT: 2})
+                    else:
+                        self.assertNotIn("pending_cart_change", state)
+                        self.assertEqual([entry["status"] for entry in state["cart_change_receipts"].values()],
+                                         ["not_dispatched"])
+
+    def test_managed_later_batches_use_the_current_reviewed_quantities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app, client, _fake, clicks = self.household(directory, drift_after=None)
+            result = base.CartPlanTests.sync(app, self.PRODUCT, 4)
+            self.assertTrue(result["synced"])
+            self.assertEqual(clicks, [self.PRODUCT] * 3)
+            writes = [call.args[1] for call in client.call.call_args_list if call.args[0] == "manipulate_cart"]
+            self.assertEqual(writes, [self.arguments(2), self.arguments(1, before=3)])
 
 
 class MenyClickSettleTests(unittest.TestCase):

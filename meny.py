@@ -68,6 +68,8 @@ MENY_FROM_PRICE = re.compile(
     r"^fra\s+(?P<amount>[0-9]{1,7}(?:,[0-9]{2})?)\s+kr\s+fra\s+(?P=amount)\s+kroner$",
     re.IGNORECASE,
 )
+MENY_RESERVATION_PATH = "/sylinder/hentevinduer/reservasjoner/v1/api"
+MENY_TOKEN_REFRESH_PATH = "/api/auth/getToken"
 MENY_PICKER_PRICE = re.compile(
     r"^(?P<amount>[0-9]{1,7}(?:,[0-9]{2})?)\s+kr\s+(?P=amount)\s+kroner$",
     re.IGNORECASE,
@@ -287,10 +289,6 @@ class _CartPanelNotReady(HouseholdError):
 
 class _CartControlReplaced(HouseholdError):
     """The product page replaced the marked control before mouse dispatch."""
-
-
-class _DeliveryReservationError(HouseholdError):
-    pass
 
 
 class _CheckoutNotReadyError(HouseholdError):
@@ -624,31 +622,23 @@ def meny_order_card_status(value: Any) -> str:
 
 
 def meny_order_detail_request_id(value: Any, order_id: str) -> str | None:
-    """Return the completed provider request for one exact MENY order."""
+    """Return the newest exact order GET only once it has succeeded."""
 
     if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
         raise HouseholdError("MENY browser order request log changed")
+    expected_url = f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"
+    # agent-browser appends requests at dispatch and updates their status in
+    # place, so an unresolved newer request supersedes an older success.
     for request in reversed(value["requests"]):
         if not isinstance(request, Mapping):
             raise HouseholdError("MENY browser order request log changed")
+        if request.get("url") != expected_url or str(request.get("method") or "").upper() != "GET":
+            continue
         status = request.get("status")
-        parsed = urlparse(str(request.get("url") or ""))
-        path = parsed.path.casefold()
         request_id = request.get("requestId")
-        if (
-            str(request.get("method") or "").upper() == "GET"
-            and not isinstance(status, bool)
-            and isinstance(status, int)
-            and 200 <= status < 300
-            and parsed.scheme == "https"
-            and parsed.hostname == "platform-rest-prod.ngdata.no"
-            and path.startswith("/api/order/")
-            and not path.startswith("/api/order/search/")
-            and order_id in parsed.path.split("/")
-            and isinstance(request_id, str)
-            and request_id
-        ):
+        if type(status) is int and 200 <= status < 300 and isinstance(request_id, str) and request_id:
             return request_id
+        return None
     return None
 
 
@@ -691,39 +681,71 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
     return result
 
 
-def meny_delivery_reservation_acknowledged(value: Any) -> bool:
-    """Require both the delivery reservation and household selection writes."""
-
+def _meny_delivery_request_statuses(value: Any) -> list[tuple[str, Any]]:
     if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
         raise HouseholdError("MENY browser delivery request log changed")
-    reservation = False
-    household = False
+    observations = []
     for request in value["requests"]:
         if not isinstance(request, Mapping):
             raise HouseholdError("MENY browser delivery request log changed")
         status = request.get("status")
-        parsed = urlparse(str(request.get("url") or ""))
+        method = str(request.get("method") or "").upper()
+        try:
+            parsed = urlparse(str(request.get("url") or ""))
+        except ValueError as exc:
+            raise HouseholdError("MENY browser delivery request log changed") from exc
+        if parsed.scheme != "https":
+            continue
+        exact_url = not (parsed.params or parsed.query or parsed.fragment)
         if (
-            str(request.get("method") or "").upper() == "POST"
-            and not isinstance(status, bool)
-            and isinstance(status, int)
-            and 200 <= status < 300
-            and parsed.scheme == "https"
-            and parsed.hostname == "api.ngdata.no"
-            and parsed.path == "/sylinder/hentevinduer/reservasjoner/v1/api"
+            parsed.netloc == "api.ngdata.no"
+            and (parsed.path == MENY_RESERVATION_PATH or parsed.path.startswith(MENY_RESERVATION_PATH + "/"))
+            and method not in {"GET", "HEAD", "OPTIONS"}
         ):
-            reservation = True
-        if (
-            str(request.get("method") or "").upper() == "PUT"
-            and not isinstance(status, bool)
-            and isinstance(status, int)
-            and 200 <= status < 300
-            and parsed.scheme == "https"
-            and parsed.hostname == "platform-rest-prod.ngdata.no"
+            if exact_url and method == "POST" and parsed.path == MENY_RESERVATION_PATH:
+                observations.append(("reservation", status))
+            elif exact_url and method == "PUT" and re.fullmatch(
+                re.escape(MENY_RESERVATION_PATH) + r"/[A-Za-z0-9_-]{1,128}/extend", parsed.path,
+            ):
+                observations.append(("extension", status))
+            else:
+                observations.append(("unqualified", status))
+        elif (
+            exact_url and method == "PUT"
+            and parsed.netloc == "platform-rest-prod.ngdata.no"
             and re.fullmatch(r"/api/extended-user/\d{1,20}/household", parsed.path) is not None
         ):
-            household = True
-    return reservation and household
+            observations.append(("household", status))
+        elif (
+            method == "GET" and parsed.netloc == "meny.no" and parsed.path == MENY_TOKEN_REFRESH_PATH
+            and (type(status) is not int or status in {404, 422})
+        ):
+            # MENY can start an equivalent reservation if its token refresh
+            # returns 404 or 422 before the extension request is sent.
+            observations.append(("unsettled_refresh", status))
+    return observations
+
+
+def meny_delivery_reservation_acknowledged(value: Any, *, keeping_existing: bool = False) -> bool:
+    """Require completed writes and a single reservation write when keeping a window."""
+
+    reservation = None
+    household = None
+    for write, status in _meny_delivery_request_statuses(value):
+        if write in {"unqualified", "unsettled_refresh"}:
+            if keeping_existing:
+                return False
+            continue
+        # An earlier request can still take effect after a later one.
+        if type(status) is not int:
+            return False
+        if write == "household":
+            household = status
+        elif keeping_existing or write == "reservation":
+            if keeping_existing and reservation is not None:
+                return False
+            reservation = status
+    return all(status is not None and 200 <= status < 300 for status in (reservation, household))
 
 
 def _zero_total_cart(value: Mapping[str, Any]) -> bool:
@@ -1618,6 +1640,14 @@ class MenyClient:
             if clicks > MAX_CART_CLICKS:
                 raise HouseholdError(f"one MENY cart request can change at most {MAX_CART_CLICKS} units")
             validated.append((product, quantity))
+        reviewed_quantities = None
+        if "expected_before_quantities" in arguments:
+            supplied = arguments["expected_before_quantities"]
+            if (order_change_code is not None or not isinstance(supplied, Mapping)
+                    or set(supplied) != {product for product, _ in validated}
+                    or any(type(quantity) is not int or quantity < 0 for quantity in supplied.values())):
+                raise MenyCartStoppedError("MENY reviewed cart quantities are invalid")
+            reviewed_quantities = dict(supplied)
         applied = 0
         acknowledged = []
         try:
@@ -1635,7 +1665,11 @@ class MenyClient:
                         order_change_code is None and delta == 1 and bool(acknowledged)
                         and acknowledged[-1] == unit
                     )
-                    self._change_one(product, delta, order_change_code=order_change_code, reuse_ready=reuse_ready)
+                    expected_quantity = reviewed_quantities[product] if reviewed_quantities is not None else None
+                    self._change_one(product, delta, order_change_code=order_change_code,
+                                     reuse_ready=reuse_ready, expected_quantity=expected_quantity)
+                    if reviewed_quantities is not None:
+                        reviewed_quantities[product] += delta
                     applied += 1
                     acknowledged.append(unit)
             return self._read_settled_cart()
@@ -1665,7 +1699,7 @@ class MenyClient:
                                source="cart_readback")
 
     def _change_one(self, product: str, delta: int, *, order_change_code: str | None = None,
-                    reuse_ready: bool = False) -> None:
+                    reuse_ready: bool = False, expected_quantity: int | None = None) -> None:
         dispatched_at: float | None = None
 
         def before_dispatch() -> None:
@@ -1678,7 +1712,8 @@ class MenyClient:
         try:
             self._open(BASE_URL + product, reuse_ready=reuse_ready)
             self._assert_authenticated()
-            previous = self._activate_product_control(product, delta, before_dispatch)
+            previous = self._activate_product_control(product, delta, before_dispatch,
+                                                      expected_quantity=expected_quantity)
             if previous is not None:
                 expected = previous + delta
                 self._resolve_order_route(order_change_code)
@@ -1694,11 +1729,12 @@ class MenyClient:
             raise MenyCartStoppedError(str(exc)) from exc
 
         if delta < 0:
-            self._remove_one_from_cart(product, order_change_code)
+            self._remove_one_from_cart(product, order_change_code, expected_quantity=expected_quantity)
             return
         raise MenyCartStoppedError("MENY product control is unavailable")
 
-    def _activate_product_control(self, product: str, delta: int, before_dispatch: Any) -> int | None:
+    def _activate_product_control(self, product: str, delta: int, before_dispatch: Any, *,
+                                  expected_quantity: int | None = None) -> int | None:
         for attempt in range(20):
             before = self._product_control("mark", delta, product)
             if before.get("authenticated") is not True:
@@ -1707,10 +1743,18 @@ class MenyClient:
                 previous = before.get("quantity")
                 if isinstance(previous, bool) or not isinstance(previous, int) or previous < 0:
                     raise HouseholdError("MENY product quantity is invalid")
+                if expected_quantity is not None and (
+                    before.get("exact_quantity") is not True or previous != expected_quantity
+                ):
+                    raise HouseholdError("MENY reviewed product quantity changed or cannot be verified")
+
                 def same_control() -> bool:
                     return self._product_control("verify", delta, product) == before
+
                 try:
-                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch, same_control)
+                    binding = {"reviewed_control": (delta, expected_quantity)} if expected_quantity is not None else {}
+                    self._click_cart_control(product, str(before.get("label") or ""), before_dispatch,
+                                             same_control, **binding)
                     return previous
                 except _CartControlReplaced:
                     if attempt == 19:
@@ -1756,7 +1800,8 @@ class MenyClient:
         if remaining != {"clear": True}:
             raise HouseholdError("MENY order routing did not settle")
 
-    def _remove_one_from_cart(self, product: str, order_change_code: str | None) -> None:
+    def _remove_one_from_cart(self, product: str, order_change_code: str | None, *,
+                              expected_quantity: int | None = None) -> None:
         dispatched_at: float | None = None
 
         def before_dispatch() -> None:
@@ -1772,6 +1817,8 @@ class MenyClient:
             current = matches[0]["quantity"]
             if current < 1:
                 raise HouseholdError("MENY product is not in the cart")
+            if expected_quantity is not None and current != expected_quantity:
+                raise HouseholdError("MENY reviewed product quantity changed in the cart drawer")
             self._click_cart_remove_control(product, current, order_change_code, before_dispatch)
             with self._quantity_settle_window():
                 observed = self._wait_for_cart_quantity(product, current - 1, order_change_code)
@@ -1875,7 +1922,11 @@ class MenyClient:
         return observed
 
     def _product_control(self, action: str, delta: int, product: str) -> dict[str, Any]:
-        return self._eval(r"""
+        return self._eval(self._product_control_script(action, delta, product))
+
+    @staticmethod
+    def _product_control_script(action: str, delta: int, product: str) -> str:
+        return r"""
 (() => {
   if (ACTION !== 'verify') document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
@@ -1907,12 +1958,19 @@ class MenyClient:
   if (candidates.length !== 1 || (DELTA < 0 && (quantity < 1 || !/^\d+(?: stk)?$/.test(selected)))) return JSON.stringify({ready:false, page_ready:true, authenticated:authenticated.length === 1, quantity});
   if (ACTION === 'mark') candidates[0].setAttribute('data-meal-concierge-action', 'cart');
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
-  const label = norm(candidates[0].getAttribute('aria-label') || candidates[0].innerText);
-  return JSON.stringify({ready:marked.length === 1 && marked[0] === candidates[0], page_ready:true, authenticated:authenticated.length === 1, quantity, label});
+  const target = candidates[0];
+  const label = norm(target.getAttribute('aria-label') || target.innerText);
+  const control = target.closest('.ws-add-to-cart');
+  const idle = !select && control?.classList.contains('ws-add-to-cart--not-added') &&
+    target.classList.contains('ws-add-to-cart__button--add');
+  const exact_quantity = Boolean(idle || (select && control?.contains(select) &&
+    /^\d+(?: stk)?$/.test(selected) && Number.isSafeInteger(quantity) && quantity > 0));
+  return JSON.stringify({ready:marked.length === 1 && marked[0] === candidates[0], page_ready:true, authenticated:authenticated.length === 1, quantity, exact_quantity, label});
 })()
-""".replace("ACTION", json.dumps(action)).replace("DELTA", str(delta)).replace("PRODUCT", json.dumps(product)))
+""".replace("ACTION", json.dumps(action)).replace("DELTA", str(delta)).replace("PRODUCT", json.dumps(product))
 
-    def _click_cart_control(self, product: str, label: str, before_dispatch: Any, same_control: Any) -> None:
+    def _click_cart_control(self, product: str, label: str, before_dispatch: Any, same_control: Any, *,
+                            reviewed_control: tuple[int, int] | None = None) -> None:
         if not label:
             raise HouseholdError("MENY cart control identity is unavailable")
         selector = '[data-meal-concierge-action="cart"]'
@@ -1931,14 +1989,29 @@ class MenyClient:
   if (!__CHECK_HIT__) return JSON.stringify({ready:bound});
   const hit = document.elementFromPoint(__HIT_X__, __HIT_Y__);
   if (bound && !(hit && (hit === target || target.contains(hit)))) return JSON.stringify({blocked:true});
+  if (bound && __EXPECTED_QUANTITY__ !== null) {
+    const quantity = JSON.parse(__VERIFY_QUANTITY__);
+    if (quantity?.ready !== true || quantity.exact_quantity !== true ||
+        quantity.quantity !== __EXPECTED_QUANTITY__ || quantity.label !== LABEL) {
+      return JSON.stringify({quantity_changed:true});
+    }
+  }
   return JSON.stringify({clear:bound});
 })()
 """
+        expected_quantity = None
+        verification = "'{}'"
+        if reviewed_control is not None:
+            delta, expected_quantity = reviewed_control
+            verification = self._product_control_script("verify", delta, product)
+
         def observe(x: int | None = None, y: int | None = None) -> dict[str, Any]:
             values = {"PRODUCT": product, "LABEL": label, "__CHECK_HIT__": x is not None,
-                      "__HIT_X__": x, "__HIT_Y__": y}
+                      "__HIT_X__": x, "__HIT_Y__": y, "__EXPECTED_QUANTITY__": expected_quantity}
             # Fill in one pass so a product label can contain placeholder text.
-            script = re.sub("|".join(values), lambda match: json.dumps(values[match[0]]), gate)
+            replacements = {key: json.dumps(value) for key, value in values.items()}
+            replacements["__VERIFY_QUANTITY__"] = verification
+            script = re.sub("|".join(replacements), lambda match: replacements[match[0]], gate)
             return self._eval(script)
 
         ready = observe()
@@ -1981,6 +2054,8 @@ class MenyClient:
                 x, y = new_x, new_y
                 self._invoke("mouse", "move", str(x), str(y))
                 clear = observe(x, y) if same_control() else {"clear": False}
+        if clear == {"quantity_changed": True}:
+            raise HouseholdError("MENY reviewed product quantity changed before the click")
         if clear != {"clear": True}:
             raise HouseholdError("MENY cart control is obscured or changed")
         before_dispatch()
@@ -2683,10 +2758,13 @@ __DELIVERY_BINDING__
             raise HouseholdError("MENY order_id is invalid")
         return order_id
 
-    def _open_delivery_picker(self) -> None:
+    def _open_delivery_picker(self, *, track_reservation: bool = False) -> None:
         self._open(f"{BASE_URL}/sok?{urlencode({'query': 'levering'})}")
         self._open(STORE_URL)
         self._prepare_search()
+        if track_reservation:
+            # Clearing the log does not enable tracking on a fresh browser session.
+            self._invoke("network", "requests", "--filter", MENY_RESERVATION_PATH, "--method", "OPTIONS")
         for _ in range(20):
             result = self._eval(r"""
 (() => {
@@ -2882,21 +2960,21 @@ __DELIVERY_BINDING__
         if isinstance(guard, Mapping) and selected != validate_delivery_slot(guard.get("selected")):
             raise HouseholdError("MENY delivery price changed after review")
 
-    def _wait_for_delivery_reservation(self) -> None:
-        requests: Any = {"requests": []}
+    def _wait_for_delivery_reservation(self, *, keeping_existing: bool = False) -> None:
         for attempt in range(120):
             requests = self._invoke("network", "requests")
-            if meny_delivery_reservation_acknowledged(requests):
+            if meny_delivery_reservation_acknowledged(requests, keeping_existing=keeping_existing):
                 return
             if attempt < 119:
                 self._sleep(0.25)
-        raise _DeliveryReservationError(
-            "MENY did not acknowledge the delivery reservation; inspect the selected slot before retrying"
+        operation = "renewal of the selected window" if keeping_existing else "the delivery reservation"
+        raise HouseholdError(
+            f"MENY did not acknowledge {operation}. Inspect the selected slot before retrying."
         )
 
-    def _select_delivery_slot(self, value: Any, *, _allow_refresh: bool = True) -> dict[str, Any]:
+    def _select_delivery_slot(self, value: Any) -> dict[str, Any]:
         slot_ref, expected_suffix = normalize_delivery_slot_ref(value)
-        self._open_delivery_picker()
+        self._open_delivery_picker(track_reservation=True)
         marked: dict[str, Any] = {}
         for _ in range(20):
             marked = self._eval(r"""
@@ -2909,30 +2987,32 @@ __DELIVERY_BINDING__
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const dialogs = [...document.querySelectorAll('dialog,[role="dialog"]')].filter(visible).filter(x => [...x.querySelectorAll('h1')].filter(visible).filter(h => norm(h.innerText) === 'Når skal vi levere til deg?').length === 1);
   if (!identity || authenticated.length !== 1 || dialogs.length !== 1) return JSON.stringify({ready:false, identity, authenticated:authenticated.length === 1});
-  const dismiss = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText) === 'Lukk');
+  const controls = [...dialogs[0].querySelectorAll('button')].filter(visible);
+  const labelFor = x => norm(x.getAttribute('aria-label') || x.innerText);
+  const dismiss = controls.filter(x => labelFor(x) === 'Lukk');
   const slotPattern = /^(?:(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner),\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
-  const buttons = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
-    const label = norm(x.getAttribute('aria-label') || x.innerText);
+  const enabled = x => !x.disabled && x.getAttribute('aria-disabled') !== 'true';
+  const buttons = controls.filter(enabled).filter(x => {
+    const label = labelFor(x);
     return slotPattern.test(label) && label.split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix;
   });
   if (dismiss.length !== 1 || buttons.length !== 1) return JSON.stringify({ready:false, identity, authenticated:true});
+  const label = labelFor(buttons[0]);
   if (buttons[0].getAttribute('aria-pressed') === 'true') {
-    const selected = [...dialogs[0].querySelectorAll('button[aria-pressed="true"]')].filter(visible).filter(x => slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
-    const keep = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
-      const parts = norm(x.getAttribute('aria-label') || x.innerText).match(/^Behold levering (?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(.+)$/i);
-      return parts && parts[1].toLocaleLowerCase('nb-NO') === expectedSuffix;
-    });
-    const alternatives = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => x !== buttons[0] && slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
-    if (selected.length !== 1 || keep.length > 1 || (keep.length === 1 && alternatives.length === 0)) return JSON.stringify({ready:false, identity, authenticated:true, selected_count:selected.length});
-    if (keep.length === 1) {
-      alternatives[0].setAttribute('data-meal-concierge-action', 'delivery-refresh-slot');
-      return JSON.stringify({ready:true, identity, authenticated:true, already_selected:true, refresh_available:true, refresh_slot:norm(alternatives[0].getAttribute('aria-label') || alternatives[0].innerText), label:norm(buttons[0].getAttribute('aria-label') || buttons[0].innerText)});
+    const selected = controls.filter(x => x.getAttribute('aria-pressed') === 'true' && slotPattern.test(labelFor(x)));
+    const confirmPresent = controls.some(x => /^Bekreft levering\b/i.test(labelFor(x)));
+    const keep = controls.filter(x => /^Behold levering\b/i.test(labelFor(x)));
+    const keepWindow = keep.length === 1 && enabled(keep[0]) &&
+      labelFor(keep[0]).match(/^Behold levering (?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(.+)$/i)?.[1];
+    if (selected.length !== 1 || confirmPresent || keep.length > 1 ||
+        (keep.length === 1 && (!keepWindow || keepWindow.toLocaleLowerCase('nb-NO') !== expectedSuffix))) {
+      return JSON.stringify({ready:false, identity, authenticated:true, selected_count:selected.length});
     }
-    dismiss[0].setAttribute('data-meal-concierge-action', 'delivery-dismiss');
-    return JSON.stringify({ready:true, identity, authenticated:true, already_selected:true, refresh_available:false, label:norm(buttons[0].getAttribute('aria-label') || buttons[0].innerText)});
+    if (keep.length === 0) dismiss[0].setAttribute('data-meal-concierge-action', 'delivery-dismiss');
+    return JSON.stringify({ready:true, identity, authenticated:true, already_selected:true, refresh_available:keep.length === 1, label});
   }
   buttons[0].setAttribute('data-meal-concierge-action', 'delivery-slot');
-  return JSON.stringify({ready:true, identity, authenticated:true, already_selected:false, label:norm(buttons[0].getAttribute('aria-label') || buttons[0].innerText)});
+  return JSON.stringify({ready:true, identity, authenticated:true, already_selected:false, label});
 })()
 """.replace("EXPECTED_SUFFIX", json.dumps(expected_suffix, ensure_ascii=False)))
             if marked.get("identity") is not True:
@@ -2946,10 +3026,8 @@ __DELIVERY_BINDING__
             raise HouseholdError("MENY delivery slot changed or is unavailable")
         if meny_label_slot_ref(marked.get("label"))[0] != slot_ref:
             raise HouseholdError("MENY delivery slot date changed; list delivery slots again")
-        selected_slot_ref = slot_ref
-        selected_suffix = expected_suffix
-        refreshing = False
-        if marked.get("already_selected") is True and marked.get("refresh_available") is not True:
+        already_selected = marked.get("already_selected") is True
+        if already_selected and marked.get("refresh_available") is not True:
             self._invoke("click", '[data-meal-concierge-action="delivery-dismiss"]')
             self._wait_delivery_picker_closed()
             selected = normalized_selected_meny_slot(slot_ref, marked.get("label"))
@@ -2958,21 +3036,14 @@ __DELIVERY_BINDING__
                 "selected": selected,
                 "price_display": delivery_price_display(selected),
             }
-        if marked.get("already_selected") is True:
-            if not _allow_refresh:
-                raise HouseholdError("MENY delivery reservation could not be refreshed")
-            selected_slot_ref, selected_suffix = meny_label_slot_ref(marked.get("refresh_slot"))
-            if selected_slot_ref == slot_ref:
-                raise HouseholdError("MENY delivery refresh slot is invalid")
-            refreshing = True
-            self._invoke("click", '[data-meal-concierge-action="delivery-refresh-slot"]')
-        else:
+        if not already_selected:
             self._invoke("click", '[data-meal-concierge-action="delivery-slot"]')
-        for _ in range(20):
-            confirmation = self._eval(r"""
+        confirmation_script = r"""
 (() => {
   document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const expectedSuffix = EXPECTED_SUFFIX.toLocaleLowerCase('nb-NO');
+  const keepOnly = KEEP_ONLY;
+  const markControl = MARK_CONTROL;
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const identity = location.origin === 'https://meny.no' && location.pathname === '/varer' && !location.search && !location.hash;
@@ -2982,41 +3053,69 @@ __DELIVERY_BINDING__
   const slotPattern = /^(?:(?:[^,\r\n]{1,200}|(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kr\s+(?:fra\s+)?[0-9]{1,7},[0-9]{2}\s+kroner),\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const allSelected = [...dialogs[0].querySelectorAll('button[aria-pressed="true"]')].filter(visible).filter(x => slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
   const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix);
-  const confirm = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
+  const controls = [...dialogs[0].querySelectorAll('button')].filter(visible);
+  const enabled = x => !x.disabled && x.getAttribute('aria-disabled') !== 'true';
+  const confirmControls = controls.filter(x => /^Bekreft levering\b/i.test(norm(x.getAttribute('aria-label') || x.innerText)));
+  const confirm = confirmControls.filter(enabled).filter(x => {
     const label = norm(x.getAttribute('aria-label') || x.innerText);
     const parts = label.match(/^Bekreft levering (?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(.+)$/i);
     return label === 'Bekreft levering' || (parts && parts[1].toLocaleLowerCase('nb-NO') === expectedSuffix);
   });
-  const keep = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
+  const keepControls = controls.filter(x => /^Behold levering\b/i.test(norm(x.getAttribute('aria-label') || x.innerText)));
+  const keep = keepControls.filter(enabled).filter(x => {
     const label = norm(x.getAttribute('aria-label') || x.innerText);
     const parts = label.match(/^Behold levering (?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(.+)$/i);
     return parts && parts[1].toLocaleLowerCase('nb-NO') === expectedSuffix;
   });
-  if (allSelected.length !== 1 || selected.length !== 1 || confirm.length + keep.length !== 1) return JSON.stringify({ready:false, identity, authenticated:true, selected_count:selected.length, total_selected_count:allSelected.length});
-  (confirm[0] || keep[0]).setAttribute('data-meal-concierge-action', 'delivery-confirm');
-  return JSON.stringify({ready:true, identity, authenticated:true, selected_count:1, total_selected_count:1, keeping_existing:keep.length === 1});
+  if (allSelected.length !== 1 || selected.length !== 1 || confirm.length + keep.length !== 1 ||
+      confirmControls.length !== confirm.length || keepControls.length !== keep.length ||
+      (keepOnly && keep.length !== 1)) {
+    return JSON.stringify({ready:false, identity, authenticated:true, selected_count:selected.length, total_selected_count:allSelected.length});
+  }
+  if (markControl) (confirm[0] || keep[0]).setAttribute('data-meal-concierge-action', 'delivery-confirm');
+  return JSON.stringify({ready:true, identity, authenticated:true, selected_count:1, total_selected_count:1, keeping_existing:keep.length === 1, label:norm(selected[0].getAttribute('aria-label') || selected[0].innerText)});
 })()
-""".replace("EXPECTED_SUFFIX", json.dumps(selected_suffix, ensure_ascii=False)))
-            if confirmation.get("identity") is not True:
+""".replace("EXPECTED_SUFFIX", json.dumps(expected_suffix, ensure_ascii=False)).replace("KEEP_ONLY", json.dumps(already_selected))
+
+        def read_confirmation(*, mark: bool) -> dict[str, Any]:
+            observed = self._eval(confirmation_script.replace("MARK_CONTROL", json.dumps(mark)))
+            if observed.get("identity") is not True:
                 raise HouseholdError("MENY delivery route changed")
-            if confirmation.get("authenticated") is not True:
+            if observed.get("authenticated") is not True:
                 raise HouseholdError("MENY login is required in the configured browser profile")
+            return observed
+
+        for _ in range(20):
+            confirmation = read_confirmation(mark=False)
             if confirmation.get("ready") is True:
                 break
             self._sleep(0.25)
         else:
             raise HouseholdError("MENY delivery confirmation changed")
+        keeping = confirmation.get("keeping_existing") is True
+        if keeping:
+            # Keep can use a fresh POST. Do not discard a known pending write
+            # or relevant refresh that can produce a fallback after clearing.
+            for request_filter in (
+                (MENY_RESERVATION_PATH,),
+                ("/api/extended-user/", "--method", "PUT"),
+                (MENY_TOKEN_REFRESH_PATH, "--method", "GET"),
+            ):
+                requests = self._invoke("network", "requests", "--filter", *request_filter)
+                if any(kind == "unsettled_refresh" or type(status) is not int
+                       for kind, status in _meny_delivery_request_statuses(requests)):
+                    raise HouseholdError("MENY has an unresolved delivery or sign-in update. Inspect the selected slot before retrying.")
         self._invoke("network", "requests", "--clear")
+        confirmation = read_confirmation(mark=True)
+        if confirmation.get("ready") is not True or (confirmation.get("keeping_existing") is True) != keeping:
+            raise HouseholdError("MENY delivery confirmation changed")
+        if meny_label_slot_ref(confirmation.get("label"))[0] != slot_ref:
+            raise HouseholdError("MENY delivery slot date changed; list delivery slots again")
         self._invoke("click", '[data-meal-concierge-action="delivery-confirm"]')
-        self._wait_for_delivery_reservation()
+        # The request log establishes write success. The marked control and
+        # the reopened picker establish the matching delivery window.
+        self._wait_for_delivery_reservation(keeping_existing=keeping)
         self._wait_delivery_picker_closed()
-        if refreshing:
-            try:
-                return self._select_delivery_slot(slot_ref, _allow_refresh=False)
-            except HouseholdError as exc:
-                raise HouseholdError(
-                    "MENY delivery refresh stopped on a temporary slot; select the requested slot again"
-                ) from exc
         self._open_delivery_picker()
         selected: dict[str, Any] = {}
         for _ in range(20):
@@ -3146,6 +3245,7 @@ __DELIVERY_BINDING__
             if request_id is not None:
                 break
             if phase == 0:
+                self._invoke("network", "requests", "--clear")
                 self._invoke("reload")
                 self._sleep(0.5)
         if request_id is None:
@@ -3232,14 +3332,22 @@ __DELIVERY_BINDING__
             request_id = meny_order_detail_request_id(
                 self._invoke("network", "requests", "--filter", "/api/order/"), order_id,
             )
-            if request_id is None:
-                raise HouseholdError("MENY order status did not refresh")
-            response = self._invoke("network", "request", request_id)
-            if isinstance(response, Mapping) and "responseBody" not in response and attempt < 7:
+            if request_id is not None:
+                response = self._invoke("network", "request", request_id)
+                if (not isinstance(response, Mapping)
+                        or meny_order_detail_request_id({"requests": [response]}, order_id) != request_id):
+                    raise HouseholdError("MENY browser order response identity changed")
+                if "responseBody" in response or attempt == 7:
+                    latest_id = meny_order_detail_request_id(
+                        self._invoke("network", "requests", "--filter", "/api/order/"), order_id,
+                    )
+                    if latest_id == request_id:
+                        provider_details = meny_order_provider_details(response, order_id)
+                        break
+            if attempt < 7:
                 self._sleep(0.25)
-                continue
-            provider_details = meny_order_provider_details(response, order_id)
-            break
+        else:
+            raise HouseholdError("MENY order status did not refresh")
         order_total = provider_details.get("order_total", result.get("order_total"))
         if (provider_details.get("order_total") is not None and result.get("order_total") is not None
                 and round(provider_details["order_total"] * 100) != round(result["order_total"] * 100)):
@@ -3622,17 +3730,13 @@ __DELIVERY_BINDING__
             selected_delivery = meny_selected_delivery(self._delivery_slots(require_selected=True)["slots"])
             requested = (order_change or {}).get("requested_delivery")
             if order_change and order_change.get("delivery_only") and requested:
-                # Explicit selection already reserved this window. A cart can
-                # omit its time; refreshing here would select another window.
+                # The cart can omit a time already reserved by explicit selection.
                 if (selected_delivery is None
                         or {key: value for key, value in selected_delivery.items() if key != "display"}
                         != requested["slot"]):
                     raise HouseholdError("MENY selected delivery changed before review")
             elif selected_delivery is not None:
-                try:
-                    self._select_delivery_slot(selected_delivery["slot_ref"])
-                except _DeliveryReservationError:
-                    self._select_delivery_slot(selected_delivery["slot_ref"])
+                self._select_delivery_slot(selected_delivery["slot_ref"])
             expected["delivery"] = selected_delivery
         if expected.get("delivery") is None:
             raise HouseholdError("select a MENY delivery slot before checkout")
