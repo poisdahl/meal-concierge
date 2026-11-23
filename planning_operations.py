@@ -5314,7 +5314,8 @@ class PlanningOperations:
             elif pending.get("clear_requested"):
                 state.pop("product_plan_completion", None)
                 self._clear_persisted_product_plan(plan)
-            if (not accepted_meny_clear and isinstance(plan, dict) and plan.get("provider") == self.provider
+            if (not accepted_meny_clear and not pending.get("cart_only")
+                    and isinstance(plan, dict) and plan.get("provider") == self.provider
                     and (not pending.get("managed_menu") or pending["managed_menu"] == plan.get("menu_ref"))
                     and plan.get("menu_ref") == self._cart_menu_ref(state.get("menu"))):
                 self._reduce_supplements(plan, plan.get("last_synced_quantities", {}), live)
@@ -6149,10 +6150,11 @@ class PlanningOperations:
                     self._observed_cart_lines(cart)
                     self._archive_observed_cart_target(state, pending, quantities)
                     plan = state.get("cart_plan")
-                    if not pending.get("managed_menu"):
+                    if pending.get("managed_menu"):
+                        if isinstance(plan, dict):
+                            self._set_cart_needs_input(plan, quantities, names)
+                    elif not pending.get("cart_only"):
                         self._record_supplemental_cart_change(state, pending["before"], quantities, names)
-                    elif isinstance(plan, dict):
-                        self._set_cart_needs_input(plan, quantities, names)
                     return {"reconciled": True, "cart_write_pending": False, "cart_target_observed": True,
                             "dispatch_outcome": "unknown", "operation_id": self._cart_operation_ref(pending)}
         stopped_prefix = pending.get("stopped_before_next_click") is True
@@ -6189,7 +6191,7 @@ class PlanningOperations:
                 if state.get("pending_cart_change") != pending or state.get("order_change") != pending.get("order_change"):
                     raise HouseholdError("original cart intent changed during readback")
                 plan = state.get("cart_plan")
-                if isinstance(plan, dict) and not pending.get("order_change"):
+                if isinstance(plan, dict) and not pending.get("order_change") and not pending.get("cart_only"):
                     self._clear_persisted_product_plan(plan)
                     self._set_cart_needs_input(plan, quantities, names)
                     state.pop("product_plan_completion", None)
@@ -6209,7 +6211,7 @@ class PlanningOperations:
                 state["order_change"]["kind"] = "full_order" if self.provider == "meny" else "addition"
                 if self.provider in {"oda", "mathem"}:
                     state["order_change"]["expected_cart_quantities"] = dict(quantities)
-            else:
+            elif not pending.get("cart_only"):
                 self._record_supplemental_cart_change(state, pending["before"], pending["expected"], names)
                 if quantities != pending["expected"] and isinstance(state.get("cart_plan"), dict):
                     self._set_cart_needs_input(state["cart_plan"], quantities, names)
@@ -6225,6 +6227,11 @@ class PlanningOperations:
 
     def _cart(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "get")
+        cart_only = request.get("cart_only", False)
+        if type(cart_only) is not bool:
+            raise HouseholdError("cart_only must be a boolean")
+        if cart_only and action not in {"change", "ensure"}:
+            raise HouseholdError("cart_only is available for cart change and ensure")
         if action in {"change", "apply", "set", "update", "ensure", "sync", "weekly"}:
             self._require_raw_cart_write_allowed(self.store.read())
         if action == 'weekly':
@@ -6325,6 +6332,8 @@ class PlanningOperations:
                 error.outcome_unknown = pending.get("request_digest") == mp.digest({k:v for k,v in request.items() if not k.startswith("_")})
                 raise error
             change = deepcopy(state.get("order_change"))
+            if cart_only and change:
+                raise HouseholdError("cart_only is available for an ordinary cart outside an order change")
             if action == "clear" and change:
                 raise HouseholdError("finish or abort the active order edit before clearing the cart")
             if change and change.get("kind") == "reduction":
@@ -6387,6 +6396,8 @@ class PlanningOperations:
                 quantity = item.get("quantity")
                 if isinstance(quantity, bool) or not isinstance(quantity, int) or not quantity or abs(quantity) > 1_000_000:
                     raise HouseholdError("cart changes require bounded nonzero integer quantity deltas")
+                if cart_only and quantity < 0:
+                    raise HouseholdError("cart_only stages additions; remove goods with an ordinary cart change")
                 normalized.append({"productId": int(key) if self.provider in {"oda", "mathem"} else key, "quantity": quantity})
             # All deltas are journalled before dispatch, including each small MENY batch.
             batches = self._meny_cart_batches(normalized) if self.provider == "meny" else ([normalized] if normalized else [])
@@ -6415,6 +6426,7 @@ class PlanningOperations:
                                "request_digest": mp.digest({k:v for k,v in request.items() if not k.startswith("_")}),
                                "before": before, "expected": expected,
                                "order_change": deepcopy(change), "operations": batch,
+                               **({"cart_only": True} if cart_only else {}),
                                **({"clear_requested": True} if action == "clear" else {}),
                                **({"clear_id": clear_id} if clear_id else {})}
                     if request.get("_native_cart_binding") is not None:

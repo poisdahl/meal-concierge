@@ -114,6 +114,80 @@ class CartOnlyCheckoutTests(unittest.TestCase):
             self.assertEqual(state["menu"]["order_id"], "new-order")
             self.assertIn("new-order", state["order_snapshots"])
 
+    def test_staging_and_buying_a_standalone_cart_does_not_create_stale_menu_extras(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory), {**CONFIG, "provider": "oda"})
+            provider = MutableFakeOda()
+            provider._mutate_cart({"operations": [{"productId": 10, "quantity": -1}]})
+            browser = FakeBrowser()
+            browser.oda = provider
+            app = Application(store, provider, browser)
+            with store.locked() as state:
+                state["menu"] = base.CartPlanTests.menu()
+            before = menu_state(store)
+            delta = {"operation": "cart", "action": "change", "cart_only": True,
+                     "operations": [{"product_id": "10", "quantity": 1}]}
+            app.handle(delta)
+            self.assertEqual(menu_state(store), before)
+            review = app.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            bought = app.handle({"operation": "checkout", "action": "confirm",
+                                 "confirmation_id": review["confirmation_id"]})
+            self.assertTrue(bought["confirmed"], bought)
+            # The fake leaves items in the cart after payment; model their removal.
+            provider._mutate_cart({"operations": [{"productId": 10, "quantity": -1}]})
+            cancellation = app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
+            cancelled = app.handle({"operation": "orders", "action": "cancel_confirm", "order_id": "new-order",
+                                     "confirmation_id": cancellation["confirmation_id"]})
+            self.assertTrue(cancelled["cancelled"])
+            self.assertEqual(menu_state(store), before)
+            synced = base.CartPlanTests.sync(app, "20", quantity=1)
+            self.assertTrue(synced["synced"], synced)
+            self.assertEqual(store.read()["cart_plan"]["supplemental_quantities"], {})
+            self.assertEqual([str(row["product_id"]) for row in provider.cart["items"]], ["20"])
+
+    def test_lost_standalone_add_response_keeps_its_scope_through_recovery(self):
+        for action in ("reconcile_change", "accept_current"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                store, provider, _browser, app = self.household(directory)
+                before = menu_state(store)
+                original = provider.call
+                dispatched = False
+
+                def lose_cart_write(tool, arguments, **kwargs):
+                    nonlocal dispatched
+                    if dispatched and tool == "get_cart":
+                        raise HouseholdError("synthetic readback unavailable")
+                    result = original(tool, arguments, **kwargs)
+                    if tool == "manipulate_cart":
+                        dispatched = True
+                        raise HouseholdError("synthetic lost response")
+                    return result
+
+                ensure = {"operation": "cart", "action": "ensure", "cart_only": True,
+                          "requirements": [{"product_id": "30", "product_name": "Test item", "quantity": 1}]}
+                with mock.patch.object(provider, "call", side_effect=lose_cart_write):
+                    with self.assertRaises(HouseholdError):
+                        app.handle(ensure)
+                self.assertIs(store.read()["pending_cart_change"]["cart_only"], True)
+                observed = app.handle({"operation": "cart", "action": "get"})
+                recovered = app.handle({"operation": "cart", "action": action,
+                                        "operation_id": observed["operation_id"], "cart_digest": observed["cart_digest"]})
+                self.assertTrue(recovered["reconciled"], recovered)
+                self.assertIsNone(store.read().get("pending_cart_change"))
+                app.handle(ensure)
+                self.assertEqual(len([item for item in provider.cart["items"] if str(item["product_id"]) == "30"]), 1)
+                self.assertEqual(menu_state(store), before)
+
+    def test_cart_only_staging_rejects_removal_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, _browser, app = self.household(directory)
+            before = deepcopy(provider.cart)
+            with self.assertRaisesRegex(HouseholdError, "cart_only stages additions"):
+                app.handle({"operation": "cart", "action": "change", "cart_only": True,
+                            "operations": [{"product_id": "30", "quantity": 1}, {"product_id": "10", "quantity": -1}]})
+            self.assertEqual(provider.cart, before)
+            self.assertIsNone(store.read().get("pending_cart_change"))
+
     def test_lost_cart_only_submit_reconciles_once_without_binding_the_menu(self):
         with tempfile.TemporaryDirectory() as directory:
             store, provider, browser, application = self.household(directory, policy="standing")
