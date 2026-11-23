@@ -661,20 +661,23 @@ checkout. Any later product or quantity change invalidates the approved digest.
 Scheduled checkout stops in `cart_ready`/`needs_input` while anything is
 unresolved and never treats the suggested default as automatic consent.
 
-An owner can also buy the current cart without the saved menu: manual checkout
-`prepare` or `submit` with `cart_only=true` skips this menu-plan question,
-records the order as `menu_attribution="cart_only"` and leaves a saved menu,
-its cart plan and recipe usage unchanged through purchase, reconciliation and
-cancellation; a menu that already belongs to an order only has its separate
-extras bookkeeping cleared, as without the flag. Renewal, payment switching and
-retries keep the choice; `confirm` or a bound idempotency key with a different
-`cart_only` or `weekly` intent is rejected, and `cart_only=false` means the same
-as omitting it. An incomplete saved-menu product apply still
-blocks checkout. Use
-`weekly=true` for an explicit purchase of the saved weekly menu; the two flags
-are mutually exclusive, and products shared by the cart and the menu do not
-change the chosen attribution. Scheduled, order-change and recovery checkouts
-reject `cart_only`.
+Use `cart_only=true` with manual checkout `prepare` or `submit` to buy the
+current cart independently. The order is recorded as
+`menu_attribution="cart_only"`. The saved draft menu, its cart plan and recipe
+usage are preserved through purchase, reconciliation and cancellation. For a
+menu that already belongs to an order, checkout clears only its separate extras
+bookkeeping. Renewal, payment switching and retries preserve the purchase
+intent. `confirm` and bound idempotency keys require a matching intent. Omitting
+`cart_only` and passing `cart_only=false` are equivalent. An incomplete
+saved-menu product apply still blocks checkout. Use `weekly=true` to buy for
+the saved weekly menu. Pick one scope based on the owner's request. `cart_only`
+is available for interactive new orders.
+
+MENY new-order reviews expose `summary.price_breakdown.status=unitemized`
+when the payable total is verified and individual price rows are unavailable.
+`cart_total_ore` comes from the refreshed cart. `cart_to_checkout_difference_ore`
+is the checkout total minus that cart total. Label fees, reserves and discounts
+only when their own rows are verified.
 
 Only the checkout tool's bound `submit` or `reconcile` result can establish a
 successful order. A generic order list or order read after checkout returned an

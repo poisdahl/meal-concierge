@@ -10112,6 +10112,9 @@ class FlowTests(unittest.TestCase):
 
             pending = store.read()["pending_checkout"]
             self.assertEqual(prepared["summary"]["total"], 40.0)
+            self.assertEqual(prepared["summary"]["price_breakdown"], {
+                "status": "unitemized", "cart_total_ore": 3900, "cart_to_checkout_difference_ore": 100,
+            })
             self.assertEqual(pending["cart"]["total"], 39.0)
             self.assertEqual([call[0] for call in provider.calls], ["get_cart", "get_orders", "get_cart", "get_delivery_slots"])
 
