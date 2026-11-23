@@ -11,7 +11,7 @@ snapshot; saving a personal recipe or favorite is a separate action.
 |---|---|---|---|
 | Oda | Authenticated MCP, bounded pages | Exact public recipe page | Shared scaling and ordinary product matching |
 | Mathem | Authenticated MCP, bounded pages | Exact public recipe page | Shared scaling and ordinary product matching |
-| MENY | Logged-in browser, bounded visible results | Exact recipe page in that browser | Shared scaling and ordinary product matching |
+| MENY | Public search read with logged-in browser fallback | Exact public recipe page with browser fallback | Shared scaling and ordinary product matching |
 
 The integrations do not use native bulk recipe-cart additions. Oda and Mathem's
 `manipulate_cart` schema accepts `recipeId` and `fromRecipePortions`, but it does
@@ -46,16 +46,20 @@ source limitation; it does not establish that no suitable recipes exist.
 ## MENY
 
 `recipe_search` accepts `query` and `size` (1–20). It returns
-`{provider: "meny", query, recipes: [...]}` from a bounded prefix of currently
-visible, identity-checked cards. It has no `page`, total, next cursor or
+`{provider: "meny", query, recipes: [...]}` from a bounded, ranked first page.
+The service reads the recipe group from MENY's public search and constructs the
+same recipe links as the first-party result cards. Incomplete or incompatible
+responses fall back to identity-checked browser results. The tool has no
+pagination, total, next cursor or
 exhaustion flag. A short result cannot establish source exhaustion, and an empty
 query does not establish that other useful queries have no results.
 
 `recipe_detail` takes only the exact `recipe_id` path returned by search. It
-uses the dedicated browser, login checks, operation lock and deadline. It never
-presses a recipe shopping control. The requested page, its sole canonical URL
-and its sole JSON-LD Recipe URL must agree. Embedded context, author and image
-URLs are not fetched, and structured text is never executed.
+first reads the public HTML over bounded, unauthenticated HTTPS. The requested
+page, its sole canonical URL and its sole JSON-LD Recipe URL must agree. If that
+read fails or validation fails, the dedicated browser reads the same evidence.
+Both operations retain the MENY login checks, lock and deadline. Structured
+text is parsed as data, with no recipe shopping controls or embedded URLs used.
 
 The result contains `provider: "meny"`, the base culinary `recipe` and separate
 `capabilities`. `recipeIngredient` and `recipeInstructions` are string arrays;

@@ -8,12 +8,16 @@ from html.parser import HTMLParser
 import json
 import re
 from typing import Any, Mapping
-from urllib.parse import unquote, urlsplit
+from unicodedata import normalize
+from urllib.parse import unquote, urlencode, urlsplit
 
 from core import HouseholdError
 
 
 MENY_ORIGIN = "https://meny.no"
+MENY_RECIPE_SEARCH = "https://search.trumfnetthandel.prod.trumf.cloud/search/all/1300"
+_MAX_MENY_RECIPE_RESPONSE = 1_000_000
+_MENY_RECIPE_SLUG = re.compile(r"[A-Za-z0-9_-]+")
 MAX_DETAIL_BYTES = 256 * 1024
 MENY_RECIPE_CAPABILITIES = {
     "detail": "website_jsonld",
@@ -221,6 +225,130 @@ def _text(value: Any, field: str, maximum: int) -> str:
     except UnicodeError as exc:
         raise HouseholdError(f"MENY recipe {field} changed") from exc
     return value
+
+
+def read_meny_recipe_search(query: str, limit: int, *, timeout: float) -> list[dict[str, str]]:
+    """Read the ranked, bounded first page of MENY's public recipe search."""
+    from recipe_import_sources import _get_bytes
+
+    try:
+        params = urlencode({"query": query, "include": "recipes", "page": 1, "size": limit})
+        raw, content_type = _get_bytes(f"{MENY_RECIPE_SEARCH}?{params}", maximum=_MAX_MENY_RECIPE_RESPONSE,
+                                       timeout=timeout, accept="application/json")
+        if content_type != "application/json":
+            raise ValueError("recipe search did not return JSON")
+        data = json.loads(raw, object_pairs_hook=_object, parse_constant=_invalid_constant)
+    except (ValueError, RecursionError) as exc:
+        raise HouseholdError("MENY public recipe search is unavailable") from exc
+
+    group = data["recipes"] if isinstance(data, dict) and data.keys() == {"recipes"} else None
+    total = group.get("totalCount") if isinstance(group, dict) else None
+    hits = group.get("hits") if isinstance(group, dict) else None
+    if type(total) is not int or total < 0 or not isinstance(hits, list) or len(hits) != min(total, limit):
+        raise HouseholdError("MENY public recipe search scope changed")
+
+    result = []
+    seen_ids, seen_paths = set(), set()
+    for hit in hits:
+        document = hit.get("document") if isinstance(hit, dict) else None
+        if not isinstance(document, dict) or document.get("type") != "recipe":
+            raise HouseholdError("MENY public recipe search returned a different result type")
+        identity = _text(hit.get("id"), "search identity", 100)
+        if identity != document.get("id") or identity in seen_ids:
+            raise HouseholdError("MENY public recipe search identity changed")
+        # The first-party recipe card links to /oppskrifter/<parentSlug>/<slug>.
+        slug = document.get("slug")
+        parent = document.get("parentSlug")
+        segments = [slug] if parent in (None, "") else [parent, slug]
+        if any(not isinstance(segment, str) or not _MENY_RECIPE_SLUG.fullmatch(segment) for segment in segments):
+            raise HouseholdError("MENY public recipe search path changed")
+        path = meny_recipe_path("/oppskrifter/" + "/".join(segments))
+        if path in seen_paths:
+            raise HouseholdError("MENY public recipe search returned a duplicate path")
+        seen_ids.add(identity)
+        seen_paths.add(path)
+        name = " ".join(normalize("NFC", _text(document.get("title"), "search title", 300)).split())
+        result.append({"recipe_id": path, "recipe_url": MENY_ORIGIN + path, "name": name, "summary": name})
+    return result
+
+
+class _MenyRecipePage(HTMLParser):
+    """Collect link and JSON-LD evidence without executing the public page."""
+
+    CDATA_CONTENT_ELEMENTS = (*HTMLParser.CDATA_CONTENT_ELEMENTS, "iframe", "noembed", "noframes",
+                              "noscript", "textarea", "title", "xmp")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_head = False
+        self.templates = 0
+        self.canonical_urls: list[str] = []
+        self.scripts: list[str] = []
+        self.current: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "plaintext":
+            raise HouseholdError("MENY public recipe HTML changed")
+        if tag == "template":
+            self.templates += 1
+        if self.templates:
+            return
+        if tag == "head":
+            self.in_head = True
+        elif tag == "link":
+            relations = [value for key, value in attrs if key == "rel"]
+            if any(value and value.casefold() == "canonical" for value in relations):
+                targets = [value for key, value in attrs if key == "href"]
+                if (not self.in_head or relations != ["canonical"] or len(targets) != 1
+                        or not targets[0] or self.canonical_urls):
+                    raise HouseholdError("MENY public recipe canonical link changed")
+                self.canonical_urls.append(targets[0])
+        elif tag == "script":
+            types = [value for key, value in attrs if key == "type"]
+            if any(value and value.strip().casefold() == "application/ld+json" for value in types):
+                if types != ["application/ld+json"]:
+                    raise HouseholdError("MENY public recipe structured data changed")
+                self.current = []
+
+    def handle_data(self, data: str) -> None:
+        if self.current is not None:
+            self.current.append(data)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # HTML ignores the slash on non-void tags. Reject the ambiguous form
+        # for elements that can otherwise make inert markup appear active.
+        if tag in self.CDATA_CONTENT_ELEMENTS or tag in {"head", "template"}:
+            raise HouseholdError("MENY public recipe HTML changed")
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "template" and self.templates:
+            self.templates -= 1
+        elif not self.templates and tag == "head":
+            self.in_head = False
+        elif tag == "script" and self.current is not None:
+            self.scripts.append("".join(self.current))
+            self.current = None
+
+
+def read_meny_recipe_detail(recipe_id: str, *, timeout: float) -> dict[str, Any]:
+    from recipe_import_sources import _get_bytes
+
+    path = meny_recipe_path(recipe_id)
+    url = MENY_ORIGIN + path
+    try:
+        raw, content_type = _get_bytes(url, maximum=_MAX_MENY_RECIPE_RESPONSE, timeout=timeout, accept="text/html")
+        if content_type != "text/html":
+            raise ValueError("recipe page did not return HTML")
+        page = _MenyRecipePage()
+        page.feed(raw.decode("utf-8"))
+        page.close()
+    except (ValueError, RecursionError) as exc:
+        raise HouseholdError("MENY public recipe page is unavailable") from exc
+    if page.current is not None or page.templates:
+        raise HouseholdError("MENY public recipe page is incomplete")
+    return meny_recipe_input({"ready": True, "url": url, "canonical_urls": page.canonical_urls,
+                              "scripts": page.scripts}, path)
 
 
 def meny_recipe_jsonld(observation: Any, recipe_id: str) -> dict[str, Any]:
