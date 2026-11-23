@@ -284,6 +284,34 @@ class CartOnlyCheckoutTests(unittest.TestCase):
             self.assertIsNone(store.read()["pending_checkout"])
             self.assertEqual(browser.checkout_clicks, 0)
 
+    def test_cart_only_does_not_buy_a_partially_applied_menu(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _provider, browser, application = self.household(directory)
+            with store.locked() as state:
+                state["cart_plan"]["partial_product_plan_digest"] = "synthetic-partial-apply"
+            result = application.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            self.assertEqual(result["reason"], "managed_product_apply_incomplete")
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertEqual(browser.checkout_clicks, 0)
+
+    def test_a_new_product_apply_fence_blocks_an_existing_cart_only_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _provider, browser, application = self.household(directory)
+            prepared = application.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            original_check = application._checkout_dietary
+
+            def start_apply(*args, **kwargs):
+                result = original_check(*args, **kwargs)
+                application._start_managed_product_apply_fence()
+                return result
+
+            with mock.patch.object(application, "_checkout_dietary", side_effect=start_apply):
+                stopped = application.handle({"operation": "checkout", "action": "confirm",
+                                              "confirmation_id": prepared["confirmation_id"]})
+            self.assertEqual(stopped["reason"], "managed_product_apply_incomplete")
+            self.assertEqual(store.read()["pending_checkout"]["status"], "awaiting_confirmation")
+            self.assertEqual(browser.checkout_clicks, 0)
+
     def test_cart_only_is_rejected_for_scheduled_and_recovery_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             store, _provider, browser, application = self.household(directory)
