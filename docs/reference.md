@@ -554,8 +554,9 @@ preserving choices and review. The existing managed apply fence prevents checkou
 of an older cart while validation is pending. A selected product whose read
 fails twice in one cycle for a reason other than time ends the cycle with
 `status=needs_input`, `reason="selected product reads keep failing"` and
-`read_failures`, including any `provider_failure` such as a lost store login;
-no cart write occurs. MENY changes one unit per product page, so when completed
+`read_failures`, including any available `provider_failure`. The compact retry keeps the reviewed
+reference. A verified MENY login failure stops the read immediately. After sign-in,
+the same reference resumes with fresh retailer observations. Neither failure writes to the cart. MENY changes one unit per product page, so when completed
 reads leave less than its cart-write reserve, apply returns `status=validating`
 with `validation_progress.pending_cart_write=1` and writes on the continuation
 with a full time budget. It defers at most once per cycle and never by more
@@ -2166,9 +2167,9 @@ packages. The household agent reviews culinary suitability and each returned
 approval. Unapproved suggestions leave the plan incomplete. Continuation work
 retains provider, query, page, menu, ingredient and household context with a
 five-minute review window (30 minutes on MENY, whose one-page-per-product reads
-can outlast five minutes for a whole menu). A search that fails twice in one
-cycle for a reason other than time is settled as failed: its requirement stays
-unresolved and the remaining reads finish, instead of being retried forever.
+can outlast five minutes for a whole menu). For an unfinished preparation, counted search failures carry across expired price windows
+while current prices are read again. After two counted failures the requirement
+stays unresolved and the remaining reads can finish.
 Apply performs a fresh validation cycle and binds its
 prewrite checks to current menu, product, profile and cart evidence. Oda batches
 up to eight bounded product searches and retries failing queries individually.

@@ -44,6 +44,7 @@ from service_common import (
     canonical,
     menu_digest,
     menu_email_html,
+    meny_login_lost,
     scheduled_occurrence,
     scheduler_settings_digest,
     validate_schedule
@@ -2628,6 +2629,31 @@ class PlanningOperations:
             raise HouseholdError("provider product search exceeded its bounded candidate scope")
         return normalized
 
+    def _raise_on_product_login_loss(self, error: HouseholdError) -> None:
+        if self.provider == "meny" and meny_login_lost(error):
+            # A later sign-in may select another store. Preserve the review and
+            # its approvals, but start fresh provider reads before any cart write.
+            with self.store.locked() as state:
+                for record in state["menu_planning"]["prepared"].values():
+                    if isinstance(record, dict) and record.get("kind") == "product_plan":
+                        for key in ("observation_work", "validation_work"):
+                            work = record.pop(key, None)
+                            if not work or not self._product_work_pending(work):
+                                continue
+                            # Keep the continuation discoverable after restart.
+                            # Only counts and the exact original apply request
+                            # survive. Every provider fact must be read again.
+                            record[key] = {
+                                "pending_search_count": work.get("pending_search_count", 0)
+                                    + len(work.get("searches") or {}) + len(work.get("recurring_observations") or {})
+                                    + sum(n >= 2 for n in (work.get("search_failure_counts") or {}).values()),
+                                "pending_detail_count": work.get("pending_detail_count", 0) + len(work.get("details") or {}),
+                                **({"restarted": True, "restore_arguments": work.get("restore_arguments", {})}
+                                   if key == "validation_work" else {}),
+                            }
+                state.pop("partial_product_validation", None)
+            raise error
+
     def _product_observations(
         self, menu: Mapping[str, Any], *, deadline: float | None,
         search_cache: dict[str, dict[str, Any]] | None = None,
@@ -2656,11 +2682,14 @@ class PlanningOperations:
         # query that already failed twice in this cycle is settled as failed and
         # not retried, so the remaining reads can run and the cycle can finish.
         settled = {key for key, count in (work.get("search_failure_counts") or {}).items() if count >= 2} if work is not None else set()
-        missing = sorted((key for key in requested if key not in cache and key not in settled),
-                         key=lambda key: attempted.index(key) if key in attempted else -1)
         # A continuation may spend its whole budget on previously unseen queries.
         # Keep the last failed observation until that same search succeeds/retries.
         failed = work.setdefault("search_failures", {}) if work is not None else {}
+        # On expiry successful reads need new prices. Give unseen queries, then
+        # failed reads, a turn before repeating those previously successful reads.
+        missing = sorted((key for key in requested if key not in cache and key not in settled),
+                         key=lambda key: (key in attempted, key not in failed,
+                                          attempted.index(key) if key in attempted else -1))
         batch_reader = getattr(self.provider_client, "product_search_batch", None)
         native_batch = callable(batch_reader) and self.provider == "oda"
         singles = work.setdefault("single_searches", []) if work is not None else []
@@ -2717,6 +2746,7 @@ class PlanningOperations:
                         if work is not None:
                             work.get("search_failure_counts", {}).pop(key, None)
             except HouseholdError as exc:
+                self._raise_on_product_login_loss(exc)
                 if native_batch and keys[0] not in singles:
                     singles.extend(key for key in keys if key not in singles)
                     missing.extend(keys)
@@ -3451,7 +3481,9 @@ class PlanningOperations:
             compact["cart_plan"]["item_count"] = len(plan.get("items", []))
             compact["cart_read_arguments"] = {"action": "get"}
         fresh = result.get("fresh_product_plan")
-        if isinstance(fresh, Mapping):
+        # A failed read did not establish changed facts. The original reference
+        # must still resolve when the caller retries after the store recovers.
+        if isinstance(fresh, Mapping) and not result.get("read_failures"):
             # A refreshed diagnostic is a new review, never authority to retry
             # the write. Store its bounded facts so every row remains readable.
             binding = fresh.get("binding") or {}
@@ -3858,7 +3890,8 @@ class PlanningOperations:
                         observed = self._checked_product_observation(result, self.provider, query)
                         matches = [p for p in observed["products"] if str(p["product_ref"]) == str(item["product_id"])]
                         cache[key] = matches[0] if len(matches) == 1 else {}
-                    except HouseholdError:
+                    except HouseholdError as exc:
+                        self._raise_on_product_login_loss(exc)
                         review["reason"] = "recurring_search_unavailable"
             product = cache.get(key) or {}
             if product:
@@ -4286,7 +4319,17 @@ class PlanningOperations:
             observed_now = self._now()
             observed_start = observation_work.get("started_at")
             if observed_start is None or not 0 <= (observed_now - datetime.fromisoformat(observed_start)).total_seconds() <= self._product_review_window_seconds():
-                observation_work = {"started_at": observed_now.isoformat()}
+                # Negative search evidence can bound retries across price
+                # windows. Drop all observed product, dietary and recurring facts.
+                # Preserve the context identity so a changed household clears
+                # these counters just as it would within a single window.
+                if self._product_work_pending(observation_work):
+                    observation_work = {key: observation_work[key] for key in (
+                        "observation_context", "attempted_searches", "search_failures", "search_failure_counts",
+                    ) if key in observation_work}
+                else:
+                    observation_work = {}
+                observation_work["started_at"] = observed_now.isoformat()
             plan = self._prepare_products(
                 include_recurring=include_recurring,
                 work=observation_work,
@@ -4500,6 +4543,7 @@ class PlanningOperations:
                     return {"applied": False, "cart_changed": False, "status": "needs_input",
                             "menu_ref": deepcopy(expected_menu_ref), "partial_product_plan_digest": expected_digest,
                             "reason": "selected product reads keep failing", "read_failures": repeated_failures,
+                            **({"product_plan_ref": plan_ref} if plan_ref else {}),
                             "fresh_product_plan": fresh,
                             "next": "No cart write occurred. Report the failing product reads and check the store connection status, since a lost store login causes this; then retry the same apply or prepare again."}
                 self._reserve_cart_write_time(work, deadline, call_budget)
@@ -4751,6 +4795,7 @@ class PlanningOperations:
                 return {"applied": False, "cart_changed": False, "status": "needs_input",
                         "menu_ref": deepcopy(expected_menu_ref), "product_plan_digest": supplied.get("product_plan_digest"),
                         "reason": "selected product reads keep failing", "read_failures": repeated_failures,
+                        **({"product_plan_ref": validation_ref} if validation_ref else {}),
                         "fresh_product_plan": fresh,
                         "next": "No cart write occurred. Report the failing product reads and check the store connection status, since a lost store login causes this; then retry the same apply or prepare again."}
             self._reserve_cart_write_time(work, deadline, call_budget)
