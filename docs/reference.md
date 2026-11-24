@@ -554,8 +554,9 @@ preserving choices and review. The existing managed apply fence prevents checkou
 of an older cart while validation is pending. A selected product whose read
 fails twice in one cycle for a reason other than time ends the cycle with
 `status=needs_input`, `reason="selected product reads keep failing"` and
-`read_failures`, including any `provider_failure` such as a lost store login;
-no cart write occurs. MENY changes one unit per product page, so when completed
+`read_failures`, including any available `provider_failure`. The compact retry keeps the reviewed
+reference. A verified MENY login failure stops the read immediately. After sign-in,
+the same reference resumes with fresh retailer observations. Neither failure writes to the cart. MENY changes one unit per product page, so when completed
 reads leave less than its cart-write reserve, apply returns `status=validating`
 with `validation_progress.pending_cart_write=1` and writes on the continuation
 with a full time budget. It defers at most once per cycle and never by more
@@ -676,7 +677,11 @@ current cart independently. The order is recorded as
 usage are preserved through purchase, reconciliation and cancellation. For a
 menu that already belongs to an order, checkout clears only its separate extras
 bookkeeping. Renewal, payment switching and retries preserve the purchase
-intent. `confirm` and bound idempotency keys require a matching intent. Omitting
+intent. A payment method selected for one review follows that purchase through
+renewal. A separate purchase starts with the household payment preference.
+A submit carrying a scheduled occurrence must use a review for that occurrence.
+A weekly review carries its weekly-goods checks through token-only confirmation.
+`confirm` and bound idempotency keys require a matching intent. Omitting
 `cart_only` and passing `cart_only=false` are equivalent. An incomplete
 saved-menu product apply still blocks checkout. Use `weekly=true` to buy for
 the saved weekly menu. Pick one scope based on the owner's request. `cart_only`
@@ -2166,9 +2171,9 @@ packages. The household agent reviews culinary suitability and each returned
 approval. Unapproved suggestions leave the plan incomplete. Continuation work
 retains provider, query, page, menu, ingredient and household context with a
 five-minute review window (30 minutes on MENY, whose one-page-per-product reads
-can outlast five minutes for a whole menu). A search that fails twice in one
-cycle for a reason other than time is settled as failed: its requirement stays
-unresolved and the remaining reads finish, instead of being retried forever.
+can outlast five minutes for a whole menu). For an unfinished preparation, counted search failures carry across expired price windows
+while current prices are read again. After two counted failures the requirement
+stays unresolved and the remaining reads can finish.
 Apply performs a fresh validation cycle and binds its
 prewrite checks to current menu, product, profile and cart evidence. Oda batches
 up to eight bounded product searches and retries failing queries individually.
@@ -2504,7 +2509,8 @@ with its original `confirmation_id` before trying to confirm. It reads the
 current merchant summary, issues a fresh confirmation, and records the prior
 review ID. Review the returned terms again. A possible dispatch or recovery
 must use its existing reconciliation path. If confirmation already retired an
-expired review, use ordinary checkout preparation.
+expired review, prepare again with the original scope. For a standalone purchase,
+pass `cart_only=true` to the fresh prepare.
 
 After recording new pantry answers, use `products prepare` with
 `continuation_mode=refresh_stock`, the original `product_plan_ref` and the new

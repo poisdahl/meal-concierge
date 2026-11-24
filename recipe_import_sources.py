@@ -14,6 +14,7 @@ interpretation remain in recipe_import_readers and the shared source parsers.
 from __future__ import annotations
 
 import http.client
+from concurrent.futures import Future
 from datetime import datetime, timezone
 import hashlib
 import ipaddress
@@ -41,6 +42,7 @@ MAX_PAGES = 1000
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 MAX_PAGE_SIZE = 50
 TIMEOUT = 10.0
+_PUBLIC_DNS_SLOTS = threading.BoundedSemaphore(8)
 MAX_IMPORT_SECONDS = 600
 _FIELD_NAMES = {
     "id": "identifier", "name": "name", "ingredients": "recipeIngredient",
@@ -88,6 +90,32 @@ def _public_address(address: str) -> bool:
     return ip.is_global and not (ip.is_multicast or ip.is_reserved or ip.is_unspecified)
 
 
+def _public_dns(host: str, port: int, deadline: float) -> list:
+    # The system resolver has no cancellation API. A timed-out worker may
+    # finish only its lookup, and holds its slot until the resolver returns.
+    if time.monotonic() >= deadline or not _PUBLIC_DNS_SLOTS.acquire(blocking=False):
+        raise RecipeImportSourceError("public source DNS unavailable within the deadline")
+    result = Future()
+
+    def resolve():
+        try:
+            result.set_result(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        except Exception as exc:
+            result.set_exception(exc)
+        finally:
+            _PUBLIC_DNS_SLOTS.release()
+
+    try:
+        threading.Thread(target=resolve, daemon=True).start()
+    except RuntimeError as exc:
+        _PUBLIC_DNS_SLOTS.release()
+        raise RecipeImportSourceError("public source DNS is unavailable") from exc
+    try:
+        return result.result(timeout=max(0.0, deadline - time.monotonic()))
+    except TimeoutError as exc:
+        raise RecipeImportSourceError("public source DNS timed out") from exc
+
+
 class _PinnedConnection(http.client.HTTPConnection):
     """One request; socket.connect receives only prevalidated numeric addresses."""
 
@@ -109,7 +137,10 @@ class _PinnedConnection(http.client.HTTPConnection):
 
     def connect(self) -> None:
         try:
-            addresses = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
+            if self._public_only:
+                addresses = _public_dns(self.host, self.port, self._deadline)
+            else:
+                addresses = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
             if not addresses or len(addresses) > 32:
                 raise RecipeImportSourceError("source DNS result is empty or oversized")
             for family, socktype, _protocol, _name, address in addresses:

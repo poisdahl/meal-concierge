@@ -291,6 +291,10 @@ class _CartControlReplaced(HouseholdError):
     """The product page replaced the marked control before mouse dispatch."""
 
 
+class _OrderPageBehindResponse(HouseholdError):
+    """The order page still shows a status contradicted by its latest response."""
+
+
 class _CheckoutNotReadyError(HouseholdError):
     pass
 
@@ -648,7 +652,7 @@ def meny_order_detail_request_id(value: Any, order_id: str) -> str | None:
     return None
 
 
-def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
+def meny_order_provider_details(value: Any, order_id: str, *, page_status: str | None = None) -> dict[str, Any]:
     """Read exact order status and full total separately from payment reservations."""
 
     if not isinstance(value, Mapping) or not isinstance(value.get("responseBody"), str):
@@ -663,6 +667,8 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
         raise HouseholdError("MENY response belongs to a different order")
     result = {}
     description = str(payload.get("statusDescription") or "").strip().casefold()
+    if description == "open" and page_status == "cancelled":
+        raise _OrderPageBehindResponse("MENY order page still shows cancellation for a current OPEN response")
     if description in {"deleted", "cancelled", "canceled"}:
         result["status"] = "cancelled"
     if str(payload.get("ngOrderId") or "") == order_id and isinstance(payload.get("orderCreated"), str):
@@ -687,7 +693,7 @@ def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
     return result
 
 
-def _meny_delivery_request_statuses(value: Any) -> list[tuple[str, Any]]:
+def _meny_delivery_request_statuses(value: Any) -> list[tuple[str, Any, Any]]:
     if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
         raise HouseholdError("MENY browser delivery request log changed")
     observations = []
@@ -709,35 +715,71 @@ def _meny_delivery_request_statuses(value: Any) -> list[tuple[str, Any]]:
             and method not in {"GET", "HEAD", "OPTIONS"}
         ):
             if exact_url and method == "POST" and parsed.path == MENY_RESERVATION_PATH:
-                observations.append(("reservation", status))
+                observations.append(("reservation", status, request.get("requestId")))
             elif exact_url and method == "PUT" and re.fullmatch(
                 re.escape(MENY_RESERVATION_PATH) + r"/[A-Za-z0-9_-]{1,128}/extend", parsed.path,
             ):
-                observations.append(("extension", status))
+                observations.append(("extension", status, request.get("requestId")))
             else:
-                observations.append(("unqualified", status))
+                observations.append(("unqualified", status, request.get("requestId")))
         elif (
             exact_url and method == "PUT"
             and parsed.netloc == "platform-rest-prod.ngdata.no"
             and re.fullmatch(r"/api/extended-user/\d{1,20}/household", parsed.path) is not None
         ):
-            observations.append(("household", status))
+            observations.append(("household", status, request.get("requestId")))
         elif (
             method == "GET" and parsed.netloc == "meny.no" and parsed.path == MENY_TOKEN_REFRESH_PATH
             and (type(status) is not int or status in {404, 422})
         ):
             # MENY can start an equivalent reservation if its token refresh
             # returns 404 or 422 before the extension request is sent.
-            observations.append(("unsettled_refresh", status))
+            observations.append(("unsettled_refresh", status, request.get("requestId")))
     return observations
 
 
-def meny_delivery_reservation_acknowledged(value: Any, *, keeping_existing: bool = False) -> bool:
+def _meny_renewal_history(value: Any) -> list[tuple[str, Any, Any]]:
+    history = _meny_delivery_request_statuses(value)
+    # A failed token refresh may still start a replacement hold. Only retire
+    # it after its exact successful POST and household update, in that order.
+    fallback_needs = None
+    ids = set()
+    for kind, status, request_id in history:
+        if (type(status) is not int or not isinstance(request_id, str)
+                or not request_id or request_id in ids):
+            break
+        ids.add(request_id)
+        if fallback_needs is not None:
+            if kind != fallback_needs or not 200 <= status < 300:
+                break
+            fallback_needs = "household" if kind == "reservation" else None
+        elif kind == "unsettled_refresh":
+            fallback_needs = "reservation"
+    else:
+        if fallback_needs is None:
+            return history
+    raise HouseholdError("MENY has an unresolved delivery or sign-in update. Inspect the selected slot before retrying.")
+
+
+def meny_delivery_reservation_acknowledged(
+    value: Any, *, keeping_existing: bool = False,
+    earlier: list[tuple[str, Any, Any]] | None = None,
+) -> bool:
     """Require completed writes and a single reservation write when keeping a window."""
 
+    requests = _meny_delivery_request_statuses(value)
+    if earlier is not None:
+        # Request records are appended at dispatch. All current writes must be
+        # distinguishable from the completed history and from each other.
+        if requests[:len(earlier)] != earlier:
+            return False
+        ids = [request_id for _, _, request_id in requests]
+        if any(not isinstance(request_id, str) or not request_id for request_id in ids) or len(set(ids)) != len(ids):
+            return False
+        requests = requests[len(earlier):]
     reservation = None
     household = None
-    for write, status in _meny_delivery_request_statuses(value):
+    for write, status, _request_id in requests:
         if write in {"unqualified", "unsettled_refresh"}:
             if keeping_existing:
                 return False
@@ -2615,7 +2657,8 @@ __DELIVERY_BINDING__
             self._sleep(0.5)
         result: dict[str, Any] = {}
         zero_since: float | None = None
-        for _ in range(60):
+        render_polls = 60
+        for poll in range(render_polls + 4 * MENY_CART_TOTAL_WAIT_SECONDS):
             result = self._eval(r"""
 (() => {
   const mode = __CONFIRM_MODE__;
@@ -2698,14 +2741,16 @@ __DELIVERY_BINDING__
                 now = time.monotonic()
                 zero_since = now if zero_since is None else zero_since
                 if now - zero_since >= MENY_CART_TOTAL_WAIT_SECONDS:
+                    if allow_reload:
+                        self._invoke("reload")
+                        self._sleep(0.5)
+                        return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
                     break
             else:
                 zero_since = None
+                if poll + 1 >= render_polls:
+                    break
             self._sleep(0.25)
-        if allow_reload and not observe_order_mode and _zero_total_cart(result):
-            self._invoke("reload")
-            self._sleep(0.5)
-            return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
         snapshot = normalize_cart_snapshot(result)
         return {
             "provider": "meny",
@@ -2966,10 +3011,12 @@ __DELIVERY_BINDING__
         if isinstance(guard, Mapping) and selected != validate_delivery_slot(guard.get("selected")):
             raise HouseholdError("MENY delivery price changed after review")
 
-    def _wait_for_delivery_reservation(self, *, keeping_existing: bool = False) -> None:
+    def _wait_for_delivery_reservation(
+        self, *, keeping_existing: bool = False, earlier: list[tuple[str, Any, Any]] | None = None,
+    ) -> None:
         for attempt in range(120):
             requests = self._invoke("network", "requests")
-            if meny_delivery_reservation_acknowledged(requests, keeping_existing=keeping_existing):
+            if meny_delivery_reservation_acknowledged(requests, keeping_existing=keeping_existing, earlier=earlier):
                 return
             if attempt < 119:
                 self._sleep(0.25)
@@ -3100,27 +3147,25 @@ __DELIVERY_BINDING__
             raise HouseholdError("MENY delivery confirmation changed")
         keeping = confirmation.get("keeping_existing") is True
         if keeping:
-            # Keep can use a fresh POST. Do not discard a known pending write
-            # or relevant refresh that can produce a fallback after clearing.
-            for request_filter in (
-                (MENY_RESERVATION_PATH,),
-                ("/api/extended-user/", "--method", "PUT"),
-                (MENY_TOKEN_REFRESH_PATH, "--method", "GET"),
-            ):
-                requests = self._invoke("network", "requests", "--filter", *request_filter)
-                if any(kind == "unsettled_refresh" or type(status) is not int
-                       for kind, status in _meny_delivery_request_statuses(requests)):
-                    raise HouseholdError("MENY has an unresolved delivery or sign-in update. Inspect the selected slot before retrying.")
-        self._invoke("network", "requests", "--clear")
+            # Keep the earlier completed records as a watermark. Clearing here
+            # would also discard a write that started after the preflight read.
+            earlier = _meny_renewal_history(self._invoke("network", "requests"))
+        else:
+            self._invoke("network", "requests", "--clear")
         confirmation = read_confirmation(mark=True)
         if confirmation.get("ready") is not True or (confirmation.get("keeping_existing") is True) != keeping:
             raise HouseholdError("MENY delivery confirmation changed")
         if meny_label_slot_ref(confirmation.get("label"))[0] != slot_ref:
             raise HouseholdError("MENY delivery slot date changed; list delivery slots again")
+        if keeping and _meny_delivery_request_statuses(self._invoke("network", "requests")) != earlier:
+            raise HouseholdError("MENY delivery activity changed before renewal. Inspect the selected slot before retrying.")
         self._invoke("click", '[data-meal-concierge-action="delivery-confirm"]')
         # The request log establishes write success. The marked control and
         # the reopened picker establish the matching delivery window.
-        self._wait_for_delivery_reservation(keeping_existing=keeping)
+        if keeping:
+            self._wait_for_delivery_reservation(keeping_existing=True, earlier=earlier)
+        else:
+            self._wait_for_delivery_reservation(keeping_existing=False)
         self._wait_delivery_picker_closed()
         self._open_delivery_picker()
         selected: dict[str, Any] = {}
@@ -3256,7 +3301,6 @@ __DELIVERY_BINDING__
                 self._sleep(0.5)
         if request_id is None:
             raise HouseholdError("MENY order status did not refresh")
-        self._sleep(1.5)
         script = r"""
 (() => {
   document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
@@ -3317,27 +3361,32 @@ __DELIVERY_BINDING__
   return JSON.stringify({ready:baseReady && rowsReady, expand:baseReady && expand, authenticated:true, order_number:actual, code, status, total, order_total:orderTotal, delivery, item_count:itemCount, products});
 })()
 """.replace("EXPECTED", json.dumps(order_id))
-        result: dict[str, Any] = {}
-        expanded = False
-        for _ in range(20):
-            result = self._eval(script)
-            if result.get("authenticated") is not True:
-                raise HouseholdError("MENY login is required in the configured browser profile")
-            if result.get("ready") is True:
-                break
-            if result.get("expand") is True and not expanded:
-                self._invoke("click", '[data-meal-concierge-action="order-items"]')
-                expanded = True
-            self._sleep(0.25)
-        else:
+        def read_page() -> dict[str, Any]:
+            self._sleep(1.5)
+            expanded = False
+            for _ in range(20):
+                page = self._eval(script)
+                if page.get("authenticated") is not True:
+                    raise HouseholdError("MENY login is required in the configured browser profile")
+                if page.get("ready") is True:
+                    return page
+                if page.get("expand") is True and not expanded:
+                    self._invoke("click", '[data-meal-concierge-action="order-items"]')
+                    expanded = True
+                self._sleep(0.25)
             raise HouseholdError("MENY order details changed or are unavailable")
+
+        page_request_id = request_id
+        result = read_page()
         for attempt in range(8):
-            # Rendering may have issued a newer request, while the first one's
-            # body is unavailable. Read the latest exact order after the DOM is
-            # ready; never substitute an older status for a newer missing body.
             request_id = meny_order_detail_request_id(
                 self._invoke("network", "requests", "--filter", "/api/order/"), order_id,
             )
+            if request_id is not None and request_id != page_request_id:
+                # A newer GET supersedes the page's status, delivery and goods
+                # alongside the response body, even when their totals coincide.
+                page_request_id = request_id
+                result = read_page()
             if request_id is not None:
                 response = self._invoke("network", "request", request_id)
                 if (not isinstance(response, Mapping)
@@ -3348,8 +3397,14 @@ __DELIVERY_BINDING__
                         self._invoke("network", "requests", "--filter", "/api/order/"), order_id,
                     )
                     if latest_id == request_id:
-                        provider_details = meny_order_provider_details(response, order_id)
-                        break
+                        try:
+                            provider_details = meny_order_provider_details(response, order_id, page_status=result.get("status"))
+                        except _OrderPageBehindResponse:
+                            if attempt == 7:
+                                raise
+                            page_request_id = None  # Let the current response finish painting.
+                        else:
+                            break
             if attempt < 7:
                 self._sleep(0.25)
         else:

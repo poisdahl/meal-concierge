@@ -5375,12 +5375,9 @@ process.stdout.write(eval(script));
         keep = "Behold levering torsdag 3. september klokka 10:00 til 12:00"
         other_keep = keep.replace("10:00 til 12:00", "08:00 til 10:00")
         other_confirmation = other_keep.replace("Behold", "Bekreft")
-        read_reservation = mock.call("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api")
-        read_household = mock.call("network", "requests", "--filter", "/api/extended-user/", "--method", "PUT")
-        read_refresh = mock.call("network", "requests", "--filter", "/api/auth/getToken", "--method", "GET")
+        read_log = mock.call("network", "requests")
         refresh_success = {"url": "https://meny.no/api/auth/getToken", "method": "GET", "status": 200}
-        clear_log = mock.call("network", "requests", "--clear")
-        prepare_log = [read_reservation, read_household, read_refresh, clear_log]
+        prepare_log = [read_log]
         confirm = mock.call("click", '[data-meal-concierge-action="delivery-confirm"]')
         dismiss = mock.call("click", '[data-meal-concierge-action="delivery-dismiss"]')
         harness = r"""
@@ -5415,7 +5412,7 @@ global.document = {querySelectorAll(selector) {
 process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
 """
         for name, before, after, reread, error, expected in (
-            ("same window", [keep], [keep], label, None, [*prepare_log, confirm, dismiss]),
+            ("same window", [keep], [keep], label, None, [*prepare_log, read_log, confirm, dismiss]),
             ("no keep control", [], [], label, None, [dismiss]),
             ("only hidden control", [{"label": keep, "hidden": True}], [], label, None, [dismiss]),
             ("disabled keep", [{"label": keep, "disabled": True}], [], label, "changed or is unavailable", []),
@@ -5432,14 +5429,14 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
             ("competing wrong-window confirmation", [keep], [keep, other_confirmation], label,
              "confirmation changed", prepare_log),
             ("wrong reopened selection", [keep], [keep], alternative, "could not be verified",
-             [*prepare_log, confirm]),
+             [*prepare_log, read_log, confirm]),
         ):
             with self.subTest(name=name):
                 client = self.client()
                 client._open_delivery_picker = mock.Mock()
                 client._sleep = mock.Mock()
                 client._invoke = mock.Mock(side_effect=lambda *args: {
-                    "requests": [refresh_success] if args == read_refresh.args else [],
+                    "requests": [refresh_success] if args == read_log.args else [],
                 })
                 client._wait_delivery_picker_closed = mock.Mock()
                 client._wait_for_delivery_reservation = mock.Mock()
@@ -5471,7 +5468,7 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
                 armed = [mark for stage in observed.values() for mark in stage["marks"] if mark[0] != "delivery-dismiss"]
                 if confirm in expected:
                     self.assertEqual(armed, [["delivery-confirm", keep]])
-                    client._wait_for_delivery_reservation.assert_called_once_with(keeping_existing=True)
+                    client._wait_for_delivery_reservation.assert_called_once_with(keeping_existing=True, earlier=[])
                     self.assertEqual(client._open_delivery_picker.call_count, 2)
                 else:
                     self.assertEqual(armed, [])
@@ -5506,35 +5503,87 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
                  "label": "3. september klokka 10:00 til 12:00"}
         reservation_path = "/sylinder/hentevinduer/reservasjoner/v1/api"
         refresh = {"url": "https://meny.no/api/auth/getToken", "method": "GET", "status": None}
-        conflict_requests = (
-            (0, {"url": f"https://api.ngdata.no{reservation_path}/synthetic-hold/extend", "method": "PUT", "status": None}),
-            (1, {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household", "method": "PUT", "status": None}),
-            (2, refresh),
-            (2, {**refresh, "status": 404}),
-            (2, {**refresh, "status": 422}),
-        )
-        read_requests = [
-            mock.call("network", "requests", "--filter", reservation_path),
-            mock.call("network", "requests", "--filter", "/api/extended-user/", "--method", "PUT"),
-            mock.call("network", "requests", "--filter", "/api/auth/getToken", "--method", "GET"),
-        ]
-        for earlier_reads, conflict in conflict_requests:
-            with self.subTest(conflict=conflict):
+        post = {"url": f"https://api.ngdata.no{reservation_path}", "method": "POST", "status": 201}
+        household = {"url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household",
+                     "method": "PUT", "status": 204}
+        failed_refresh = {**refresh, "status": 404}
+        for history in (
+            [{**post, "url": post["url"] + "/synthetic-hold/extend", "method": "PUT", "status": None}],
+            [{**household, "status": None}], [refresh], [failed_refresh], [{**refresh, "status": 422}],
+            [failed_refresh, {**refresh, "status": 200}],
+            [household, failed_refresh, post], [failed_refresh, post, post, household],
+            [failed_refresh, {**post, "status": 500}, household],
+            [failed_refresh, post, {**household, "status": None}],
+        ):
+            with self.subTest(history=history):
                 client = self.client()
                 client._open_delivery_picker = mock.Mock()
+                client._require_login = mock.Mock()
                 client._eval = mock.Mock(side_effect=[
                     {**ready, "already_selected": True, "refresh_available": True},
                     {**ready, "keeping_existing": True},
                 ])
-                client._invoke = mock.Mock(side_effect=[
-                    *({"requests": []} for _ in range(earlier_reads)), {"requests": [conflict]},
-                ])
-
+                client._invoke = mock.Mock(return_value={"requests": [
+                    {**record, "requestId": str(i)} for i, record in enumerate(history)
+                ]})
                 with self.assertRaisesRegex(HouseholdError, "unresolved delivery or sign-in update"):
-                    client._select_delivery_slot("meny:2026-09-03T10:00/12:00")
+                    client.call("select_delivery_slot", {"delivery_slot_id": "meny:2026-09-03T10:00/12:00"})
 
                 client._open_delivery_picker.assert_called_once_with(track_reservation=True)
-                self.assertEqual(client._invoke.call_args_list, read_requests[:earlier_reads + 1])
+                client._invoke.assert_called_once_with("network", "requests")
+
+    @mock.patch("meny.datetime")
+    def test_same_window_renewal_requires_new_writes_after_a_settled_earlier_fallback(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
+        slot_ref = "meny:2026-09-03T10:00/12:00"
+        ready = {"ready": True, "identity": True, "authenticated": True,
+                 "label": "3. september klokka 10:00 til 12:00"}
+        endpoint = "https://api.ngdata.no/sylinder/hentevinduer/reservasjoner/v1/api"
+        failed_refresh = {"url": "https://meny.no/api/auth/getToken", "method": "GET", "status": 422}
+        reservation = {"method": "POST", "url": endpoint, "status": 201}
+        household = {"method": "PUT", "url": "https://platform-rest-prod.ngdata.no/api/extended-user/1300/household", "status": 204}
+        earlier = [{**row, "requestId": str(i)} for i, row in enumerate([failed_refresh, reservation, household])]
+        new_hold = [{**reservation, "requestId": "3"}, {**household, "requestId": "4"}]
+        for tag, writes, success in (
+            ("new hold", new_hold, True),
+            ("no new acknowledgement", [], False),
+            ("missing ID", [reservation, new_hold[1]], False),
+            ("old ID reused", [{**reservation, "requestId": "1"}, new_hold[1]], False),
+            ("same ID on both writes", [new_hold[0], {**household, "requestId": "3"}], False),
+            ("overlap after final check", [{**failed_refresh, "requestId": "5"}, *new_hold], False),
+            ("overlap during final control check", new_hold, False),
+        ):
+            with self.subTest(tag=tag):
+                client = self.client()
+                client._require_login = mock.Mock()
+                client._open_delivery_picker = mock.Mock()
+                client._wait_delivery_picker_closed = mock.Mock()
+                client._sleep = mock.Mock()
+                log = list(earlier)
+                pages = iter([{**ready, "already_selected": True, "refresh_available": True},
+                              {**ready, "keeping_existing": True}, {**ready, "keeping_existing": True}, ready])
+                def read_page(script):
+                    if tag == "overlap during final control check" and "const markControl = true" in script:
+                        log.extend(new_hold)
+                    return next(pages)
+                client._eval = mock.Mock(side_effect=read_page)
+                def invoke(*args):
+                    if args == ("network", "requests"):
+                        return {"requests": list(log)}
+                    if args == ("click", '[data-meal-concierge-action="delivery-confirm"]'):
+                        log.extend(writes)
+                    elif args != ("click", '[data-meal-concierge-action="delivery-dismiss"]'):
+                        self.fail(f"unexpected browser command: {args}")
+                    return {}
+                client._invoke = mock.Mock(side_effect=invoke)
+                if success:
+                    self.assertEqual(client.call("select_delivery_slot", {"delivery_slot_id": slot_ref})["selected"]["slot_ref"], slot_ref)
+                else:
+                    with self.assertRaisesRegex(HouseholdError, "did not acknowledge renewal|activity changed before renewal"):
+                        client.call("select_delivery_slot", {"delivery_slot_id": slot_ref})
+                clicks = [call for call in client._invoke.call_args_list if call.args == (
+                    "click", '[data-meal-concierge-action="delivery-confirm"]')]
+                self.assertEqual(len(clicks), 0 if tag == "overlap during final control check" else 1)
 
     @mock.patch("meny.datetime")
     def test_delivery_selection_cannot_reuse_a_tentative_open_dialog(self, clock):
@@ -5584,14 +5633,10 @@ process.stdout.write(JSON.stringify({state:JSON.parse(eval(script)), marks}));
 
                 commands = [call.args for call in client._invoke.call_args_list]
                 if already_selected:
-                    expected = [
-                        ("network", "requests", "--filter", "/sylinder/hentevinduer/reservasjoner/v1/api"),
-                        ("network", "requests", "--filter", "/api/extended-user/", "--method", "PUT"),
-                        ("network", "requests", "--filter", "/api/auth/getToken", "--method", "GET"),
-                    ]
+                    expected = [("network", "requests")]
                 else:
-                    expected = [("click", '[data-meal-concierge-action="delivery-slot"]')]
-                expected.append(("network", "requests", "--clear"))
+                    expected = [("click", '[data-meal-concierge-action="delivery-slot"]'),
+                                ("network", "requests", "--clear")]
                 self.assertEqual(commands, expected)
 
     @mock.patch("meny.datetime")
@@ -5970,12 +6015,16 @@ process.stdout.write(eval(script));
                 client._require_login = mock.Mock()
                 client._open = mock.Mock()
                 client._sleep = mock.Mock()
-                client._eval = mock.Mock(return_value={
+                rendered_order = {
                     "ready": True, "authenticated": True, "order_number": order_id,
                     "code": "TEST-CODE-1", "status": "confirmed", "total": 123.45,
-                    "delivery": "2. september 2026", "item_count": 1,
-                    "products": [{"identity": "Testprodukt", "quantity": 1}],
-                })
+                    "delivery": "3. september 2026", "item_count": 2,
+                    "products": [{"identity": "Testprodukt", "quantity": 2}],
+                }
+                current_page = {**rendered_order, "status": "cancelled",
+                                "delivery": "2. september 2026", "item_count": 1,
+                                "products": [{"identity": "Testprodukt", "quantity": 1}]}
+                client._eval = mock.Mock(side_effect=lambda _: dict(current_page))
                 lists = iter([
                     [old], [old], [old, {**newer, "status": None}],
                     [old, {**newer, "status": None}],
@@ -5985,7 +6034,10 @@ process.stdout.write(eval(script));
                     if args == ("network", "requests", "--clear"):
                         return {}
                     if args[:2] == ("network", "requests"):
-                        return {"requests": next(lists, [old, {**newer, "status": final_status}])}
+                        records = next(lists, [old, {**newer, "status": final_status}])
+                        if records[-1]["requestId"] == "newer" and records[-1]["status"] == 200:
+                            current_page.update(rendered_order)
+                        return {"requests": records}
                     if args == ("network", "request", "older"):
                         return {**old, "responseBody": '{"statusDescription":"DELETED"}'}
                     if args == ("network", "request", "newer"):
@@ -5994,7 +6046,11 @@ process.stdout.write(eval(script));
 
                 client._invoke = mock.Mock(side_effect=invoke)
                 if final_status == 200:
-                    self.assertEqual(client.call("get_order", {"order_number": order_id})["status"], "confirmed")
+                    order = client.call("get_order", {"order_number": order_id})
+                    self.assertEqual((order["status"], order["deliverySlotDisplay"], order["productQuantityCount"]),
+                                     ("confirmed", "3. september 2026", 2))
+                    self.assertEqual(order["products"], rendered_order["products"])
+                    self.assertEqual(client._eval.call_count, 2)
                 else:
                     with self.assertRaisesRegex(HouseholdError, "status did not refresh"):
                         client.call("get_order", {"order_number": order_id})
@@ -6002,6 +6058,62 @@ process.stdout.write(eval(script));
                               if call.args[:2] == ("network", "request")]
                 self.assertEqual(body_reads, ["older", "newer"] if final_status == 200 else ["older"])
                 client._require_login.assert_called_once_with()
+
+    def test_order_detail_restarts_page_observation_when_refresh_arrives_during_render(self):
+        client = self.client()
+        client._require_login = mock.Mock()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        order_id = "99990001"
+        record = {"method": "GET", "status": 200,
+                  "url": f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"}
+        records = [{**record, "requestId": "1"}]
+        def read_page(_script):
+            generation = len(records)
+            if generation < 3:
+                records.append({**record, "requestId": str(generation + 1)})
+            return {"ready": True, "authenticated": True, "order_number": order_id,
+                    "status": "confirmed", "total": 123.45, "delivery": "2. september 2026",
+                    "item_count": generation, "products": [{"identity": "Testprodukt", "quantity": generation}]}
+        def invoke(*args):
+            if args == ("network", "requests", "--clear"):
+                return {}
+            if args == ("network", "requests", "--filter", "/api/order/"):
+                return {"requests": list(records)}
+            if args[:2] == ("network", "request"):
+                return {**record, "requestId": args[2], "responseBody": '{"statusDescription":"OPEN"}'}
+            self.fail(f"unexpected browser command: {args}")
+        client._eval = mock.Mock(side_effect=read_page)
+        client._invoke = mock.Mock(side_effect=invoke)
+        order = client.call("get_order", {"order_number": order_id})
+        self.assertEqual(client._eval.call_count, 3)
+        self.assertEqual(order["productQuantityCount"], 3)
+        self.assertEqual(order["products"], [{"identity": "Testprodukt", "quantity": 3}])
+
+    def test_order_tracking_waits_for_a_cancelled_page_to_match_a_current_open_response(self):
+        order_id = "99990001"
+        record = {"method": "GET", "requestId": "detail", "status": 200,
+                  "url": f"https://platform-rest-prod.ngdata.no/api/order/store/user/{order_id}"}
+        page = {"ready": True, "authenticated": True, "order_number": order_id, "total": 123.45,
+                "delivery": "2. september 2026", "item_count": 1, "products": [{"identity": "Testprodukt", "quantity": 1}]}
+        for statuses, expected in ((["cancelled", "confirmed"], "confirmed"),
+                                   (["cancelled", "unknown"], "unknown"),
+                                   (["cancelled"] * 8, None)):
+            with self.subTest(expected=expected):
+                client = self.client()
+                client._require_login = mock.Mock()
+                client._open = mock.Mock()
+                client._sleep = mock.Mock()
+                client._eval = mock.Mock(side_effect=[{**page, "status": status} for status in statuses])
+                client._invoke = mock.Mock(side_effect=lambda *args: (
+                    {"requests": [record]} if args[:2] == ("network", "requests") else
+                    {**record, "responseBody": '{"statusDescription":"OPEN"}'}))
+                if expected is None:
+                    with self.assertRaisesRegex(HouseholdError, "current OPEN response"):
+                        client.call("order_tracking", {"order_number": order_id})
+                else:
+                    self.assertEqual(client.call("order_tracking", {"order_number": order_id})["status"], expected)
+                self.assertEqual(client._eval.call_count, len(statuses))
 
     def test_order_details_reject_unbound_response_metadata(self):
         order_id = "99990001"

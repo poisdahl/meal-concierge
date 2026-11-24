@@ -44,6 +44,7 @@ from service_common import (
     canonical,
     menu_digest,
     menu_email_html,
+    meny_login_lost,
     scheduled_occurrence,
     scheduler_settings_digest,
     validate_schedule
@@ -2628,6 +2629,31 @@ class PlanningOperations:
             raise HouseholdError("provider product search exceeded its bounded candidate scope")
         return normalized
 
+    def _raise_on_product_login_loss(self, error: HouseholdError) -> None:
+        if self.provider == "meny" and meny_login_lost(error):
+            # A later sign-in may select another store. Preserve the review and
+            # its approvals, but start fresh provider reads before any cart write.
+            with self.store.locked() as state:
+                for record in state["menu_planning"]["prepared"].values():
+                    if isinstance(record, dict) and record.get("kind") == "product_plan":
+                        for key in ("observation_work", "validation_work"):
+                            work = record.pop(key, None)
+                            if not work or not self._product_work_pending(work):
+                                continue
+                            # Keep the continuation discoverable after restart.
+                            # Only counts and the exact original apply request
+                            # survive. Every provider fact must be read again.
+                            record[key] = {
+                                "pending_search_count": work.get("pending_search_count", 0)
+                                    + len(work.get("searches") or {}) + len(work.get("recurring_observations") or {})
+                                    + sum(n >= 2 for n in (work.get("search_failure_counts") or {}).values()),
+                                "pending_detail_count": work.get("pending_detail_count", 0) + len(work.get("details") or {}),
+                                **({"restarted": True, "restore_arguments": work.get("restore_arguments", {})}
+                                   if key == "validation_work" else {}),
+                            }
+                state.pop("partial_product_validation", None)
+            raise error
+
     def _product_observations(
         self, menu: Mapping[str, Any], *, deadline: float | None,
         search_cache: dict[str, dict[str, Any]] | None = None,
@@ -2656,11 +2682,14 @@ class PlanningOperations:
         # query that already failed twice in this cycle is settled as failed and
         # not retried, so the remaining reads can run and the cycle can finish.
         settled = {key for key, count in (work.get("search_failure_counts") or {}).items() if count >= 2} if work is not None else set()
-        missing = sorted((key for key in requested if key not in cache and key not in settled),
-                         key=lambda key: attempted.index(key) if key in attempted else -1)
         # A continuation may spend its whole budget on previously unseen queries.
         # Keep the last failed observation until that same search succeeds/retries.
         failed = work.setdefault("search_failures", {}) if work is not None else {}
+        # On expiry successful reads need new prices. Give unseen queries, then
+        # failed reads, a turn before repeating those previously successful reads.
+        missing = sorted((key for key in requested if key not in cache and key not in settled),
+                         key=lambda key: (key in attempted, key not in failed,
+                                          attempted.index(key) if key in attempted else -1))
         batch_reader = getattr(self.provider_client, "product_search_batch", None)
         native_batch = callable(batch_reader) and self.provider == "oda"
         singles = work.setdefault("single_searches", []) if work is not None else []
@@ -2717,6 +2746,7 @@ class PlanningOperations:
                         if work is not None:
                             work.get("search_failure_counts", {}).pop(key, None)
             except HouseholdError as exc:
+                self._raise_on_product_login_loss(exc)
                 if native_batch and keys[0] not in singles:
                     singles.extend(key for key in keys if key not in singles)
                     missing.extend(keys)
@@ -3451,7 +3481,9 @@ class PlanningOperations:
             compact["cart_plan"]["item_count"] = len(plan.get("items", []))
             compact["cart_read_arguments"] = {"action": "get"}
         fresh = result.get("fresh_product_plan")
-        if isinstance(fresh, Mapping):
+        # A failed read did not establish changed facts. The original reference
+        # must still resolve when the caller retries after the store recovers.
+        if isinstance(fresh, Mapping) and not result.get("read_failures"):
             # A refreshed diagnostic is a new review, never authority to retry
             # the write. Store its bounded facts so every row remains readable.
             binding = fresh.get("binding") or {}
@@ -3858,7 +3890,8 @@ class PlanningOperations:
                         observed = self._checked_product_observation(result, self.provider, query)
                         matches = [p for p in observed["products"] if str(p["product_ref"]) == str(item["product_id"])]
                         cache[key] = matches[0] if len(matches) == 1 else {}
-                    except HouseholdError:
+                    except HouseholdError as exc:
+                        self._raise_on_product_login_loss(exc)
                         review["reason"] = "recurring_search_unavailable"
             product = cache.get(key) or {}
             if product:
@@ -4286,7 +4319,17 @@ class PlanningOperations:
             observed_now = self._now()
             observed_start = observation_work.get("started_at")
             if observed_start is None or not 0 <= (observed_now - datetime.fromisoformat(observed_start)).total_seconds() <= self._product_review_window_seconds():
-                observation_work = {"started_at": observed_now.isoformat()}
+                # Negative search evidence can bound retries across price
+                # windows. Drop all observed product, dietary and recurring facts.
+                # Preserve the context identity so a changed household clears
+                # these counters just as it would within a single window.
+                if self._product_work_pending(observation_work):
+                    observation_work = {key: observation_work[key] for key in (
+                        "observation_context", "attempted_searches", "search_failures", "search_failure_counts",
+                    ) if key in observation_work}
+                else:
+                    observation_work = {}
+                observation_work["started_at"] = observed_now.isoformat()
             plan = self._prepare_products(
                 include_recurring=include_recurring,
                 work=observation_work,
@@ -4500,6 +4543,7 @@ class PlanningOperations:
                     return {"applied": False, "cart_changed": False, "status": "needs_input",
                             "menu_ref": deepcopy(expected_menu_ref), "partial_product_plan_digest": expected_digest,
                             "reason": "selected product reads keep failing", "read_failures": repeated_failures,
+                            **({"product_plan_ref": plan_ref} if plan_ref else {}),
                             "fresh_product_plan": fresh,
                             "next": "No cart write occurred. Report the failing product reads and check the store connection status, since a lost store login causes this; then retry the same apply or prepare again."}
                 self._reserve_cart_write_time(work, deadline, call_budget)
@@ -4751,6 +4795,7 @@ class PlanningOperations:
                 return {"applied": False, "cart_changed": False, "status": "needs_input",
                         "menu_ref": deepcopy(expected_menu_ref), "product_plan_digest": supplied.get("product_plan_digest"),
                         "reason": "selected product reads keep failing", "read_failures": repeated_failures,
+                        **({"product_plan_ref": validation_ref} if validation_ref else {}),
                         "fresh_product_plan": fresh,
                         "next": "No cart write occurred. Report the failing product reads and check the store connection status, since a lost store login causes this; then retry the same apply or prepare again."}
             self._reserve_cart_write_time(work, deadline, call_budget)
@@ -5302,24 +5347,23 @@ class PlanningOperations:
         return max(0, live.get(product_id, 0) - plan.get("baseline_quantities", {}).get(product_id, 0)
                    - plan.get("supplemental_quantities", {}).get(product_id, 0))
 
-    def _retain_acknowledged_cart_additions(
+    def _retain_acknowledged_cart_changes(
         self, plan: dict[str, Any], before: Mapping[str, int],
         acknowledged: Mapping[str, int], live: Mapping[str, int],
     ) -> None:
-        capacity = {product_id: self._menu_owned_capacity(plan, live, product_id) for product_id in live}
-        retained = {
-            product_id: min(quantity, capacity.get(product_id, 0))
-            for product_id, quantity in plan["added_quantities"].items()
-            if min(quantity, capacity.get(product_id, 0)) > 0
-        }
-        for product_id in set(before) | set(acknowledged):
+        retained = {}
+        for product_id in live:
             confirmed = acknowledged.get(product_id, 0) - before.get(product_id, 0)
-            if confirmed > 0:
-                retained[product_id] = min(
-                    retained.get(product_id, 0) + confirmed,
-                    capacity.get(product_id, 0),
-                )
+            owned = plan["added_quantities"].get(product_id, 0) + confirmed
+            remaining = min(owned, self._menu_owned_capacity(plan, live, product_id))
+            if remaining > 0:
+                retained[product_id] = remaining
         plan["added_quantities"] = retained
+
+    def _retain_journaled_menu_ownership(self, plan, pending, live):
+        acknowledged = pending["acknowledged"]
+        before = acknowledged if pending.get("menu_ownership_accounted") else pending["before"]
+        self._retain_acknowledged_cart_changes(plan, before, acknowledged, live)
 
     def _dispatch_managed_cart(self, operations, before, target, menu_ref, deadline, *, plan_digest=None):
         # The native adapter durably binds its individual delegation requests.
@@ -5488,7 +5532,7 @@ class PlanningOperations:
             if (meny_menu_fill and pending.get("acknowledged") is not None and isinstance(plan, dict)
                     and plan.get("provider") == self.provider and plan.get("menu_ref") == pending["managed_menu"]):
                 # Confirmed batches stay menu-owned, also when the menu changed since.
-                self._retain_acknowledged_cart_additions(plan, pending["before"], pending["acknowledged"], live)
+                self._retain_journaled_menu_ownership(plan, pending, live)
             if accepted_meny_clear:
                 self._finish_cart_clear(state, pending, live, names, owner_accepted=True)
             elif pending.get("clear_requested"):
@@ -5534,6 +5578,11 @@ class PlanningOperations:
             return pending
         return None
 
+    def _pending_managed_cart_evidence(self, pending):
+        return {"operation_id": self._cart_operation_ref(pending),
+                **({"provider_failure": deepcopy(pending["provider_failure"])}
+                   if pending.get("provider_failure") else {})}
+
     def _finish_observed_managed_cart(self, state, menu_ref, live):
         pending = state.get("pending_cart_change")
         if not pending or pending.get("managed_menu") != menu_ref:
@@ -5541,10 +5590,15 @@ class PlanningOperations:
         if not pending.get("dispatch_finished") and not (
             pending.get("stopped_before_next_click") and pending["expected"] == live
         ):
+            plan = state.get("cart_plan")
+            if (self.provider == "meny" and pending.get("acknowledged") is not None
+                    and isinstance(plan, dict) and plan.get("menu_ref") == menu_ref):
+                # Post the confirmed batches once, before clamping ownership to
+                # this observation. A later household edit may replace removed units.
+                self._retain_journaled_menu_ownership(plan, pending, live)
+                pending["menu_ownership_accounted"] = True
             return {"outcome_unknown": True, "cart_write_pending": True,
-                    "operation_id": pending["operation_id"],
-                    **({"provider_failure": deepcopy(pending["provider_failure"])}
-                       if pending.get("provider_failure") else {})}
+                    **self._pending_managed_cart_evidence(pending)}
         self._finish_managed_cart_journal(state, pending, "read_back")
         return None
 
@@ -5770,12 +5824,17 @@ class PlanningOperations:
                     plan["pending_cart_digest"] = None
                     plan["updated_at"] = self._now().isoformat()
                     current = deepcopy(plan)
+                    pending = state.get("pending_cart_change") or {}
+                    evidence = (self._pending_managed_cart_evidence(pending)
+                                if pending.get("managed_menu") == expected_menu_ref
+                                and pending.get("operations") == operations else {})
                 return {
                     "synced": None,
                     "outcome_unknown": True,
                     "cart_write_pending": True,
                     "cart_reconciliation_required": True,
                     "reason": "cart_write_verification_unavailable",
+                    **evidence,
                     # This is the exact last verified pre-write cart identity;
                     # parity after the dispatched mutation remains unknown.
                     "cart_plan": self._cart_plan_view(current, prewrite_summary),
@@ -5798,7 +5857,7 @@ class PlanningOperations:
             with self.store.locked() as state:
                 pending_result = self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
                 plan = state["cart_plan"]
-                self._retain_acknowledged_cart_additions(plan, first_live,
+                self._retain_acknowledged_cart_changes(plan, first_live,
                     first_live if pending_result else acknowledged_live, verified_live)
                 if mutation_error is None and self.provider in {"oda", "mathem"}:
                     self._offer_cart_ownership_review(plan, first_live, verified_live, operations)
@@ -5981,6 +6040,12 @@ class PlanningOperations:
                     plan["status"] = "needs_input"
                     plan["approved_cart_digest"] = None
                     plan["pending_cart_digest"] = None
+                    pending = state.get("pending_cart_change") or {}
+                    if pending.get("managed_menu") == expected_menu_ref and pending.get("operations") == operations:
+                        return {"reconciled": False, "outcome_unknown": True, "cart_write_pending": True,
+                                "cart_reconciliation_required": True, "reason": "cart_write_verification_unavailable",
+                                **self._pending_managed_cart_evidence(pending),
+                                "next": "Read and reconcile the original cart change before retrying."}
             raise
         verified_summary = summarize(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
@@ -5990,7 +6055,7 @@ class PlanningOperations:
                 pending_result = self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
                 current = state["cart_plan"]
                 self._reduce_supplements(current, first_live, {key: verified_live.get(key, 0) if key in excluded else value for key, value in first_live.items()})
-                self._retain_acknowledged_cart_additions(current, first_live,
+                self._retain_acknowledged_cart_changes(current, first_live,
                     first_live if pending_result else acknowledged_live, verified_live)
                 self._set_cart_needs_input(current, verified_live, verified_names)
                 plan = deepcopy(current)
@@ -6374,7 +6439,7 @@ class PlanningOperations:
                 if state.get("pending_cart_change") != pending or plan.get("menu_ref") != pending["managed_menu"]:
                     raise HouseholdError("original managed cart intent or menu changed")
                 if pending.get("acknowledged") is not None:
-                    self._retain_acknowledged_cart_additions(plan, pending["before"], pending["acknowledged"], quantities)
+                    self._retain_journaled_menu_ownership(plan, pending, quantities)
                 elif pending.get("dispatch_finished"):
                     self._offer_cart_ownership_review(plan, pending["before"], quantities, pending["operations"])
                 self._set_cart_needs_input(plan, quantities, names)

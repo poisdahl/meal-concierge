@@ -348,6 +348,137 @@ class CartOnlyCheckoutTests(unittest.TestCase):
             self.assertEqual(browser.checkout_clicks, 1)
             self.assertEqual(menu_state(store), before)
 
+    def test_payment_switch_stays_with_review_but_does_not_follow_new_purchase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _, browser, app = self.household(directory, policy="standing")
+            app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                        "changes": {"checkout_payment": {"method": "vipps"}}})
+            menu = self.menu_review(store, app)
+            switched = app.handle({"operation": "checkout", "action": "switch_payment",
+                                   "confirmation_id": menu["confirmation_id"],
+                                   "checkout_payment": {"method": "saved_card"}})
+            renewed = app.handle({"operation": "checkout", "action": "renew_review",
+                                  "confirmation_id": switched["confirmation_id"]})
+            self.assertEqual(renewed["summary"]["payment_method"], "saved_card")
+            self.assertEqual(browser.checkout_clicks, 0)
+            result = app.handle({"operation": "checkout", "action": "submit", "cart_only": True,
+                                 "idempotency_key": "separate-shop"})
+            self.assertEqual(result["authorized_summary"]["payment_method"], "vipps")
+            self.assertEqual(result["authorized_summary"]["menu_attribution"], "cart_only")
+            self.assertEqual(browser.checkout_clicks, 1)
+            self.assertEqual(store.read()["menu"]["phase"], "draft")
+
+    def test_fresh_standalone_prepare_resets_card_override_when_basket_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, provider, browser, app = self.household(directory)
+            app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                        "changes": {"checkout_payment": {"method": "vipps"}}})
+            request = {"operation": "checkout", "action": "prepare", "cart_only": True}
+            app.handle({**request, "checkout_payment": {"method": "saved_card"}})
+            same = app.handle(request)
+            self.assertEqual(same["summary"]["payment_method"], "saved_card")
+            provider._mutate_cart({"operations": [{"productId": 10, "quantity": -1},
+                                                   {"productId": 20, "quantity": 1}]})
+            separate = app.handle(request)
+            self.assertEqual(separate["summary"]["payment_method"], "vipps")
+            self.assertEqual(browser.checkout_clicks, 0)
+
+    def test_weekly_confirm_requires_frozen_menu_coverage_including_older_reviews(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as directory:
+                store, provider, browser, app = self.household(directory, policy="standing")
+                with store.locked() as state:
+                    state["cart_plan"] = None
+                provider._mutate_cart({"operations": [{"productId": 10, "quantity": -1}]})
+                app.handle({"operation": "cart", "action": "ensure", "requirements": [
+                    {"product_id": "10", "product_name": "Pasta", "quantity": 1}]})
+                review = app.handle({"operation": "checkout", "action": "prepare"})
+                self.assertEqual(review["summary"]["menu_attribution"], "cart_only")
+                with store.locked() as state:
+                    pending = state["pending_checkout"]
+                    self.assertNotIn("cart_only", pending)
+                    if legacy:
+                        del pending["summary"]["menu_attribution"]
+                    app._bind_protected_request(state, "checkout", "old-review", pending["confirmation_id"])
+                with self.assertRaisesRegex(HouseholdError, "not for the saved weekly menu"):
+                    app.handle({"operation": "checkout", "action": "confirm", "weekly": True,
+                                "confirmation_id": review["confirmation_id"]})
+                with self.assertRaisesRegex(HouseholdError, "bound to a cart_only review"):
+                    app.handle({"operation": "checkout", "action": "submit", "weekly": True,
+                                "idempotency_key": "old-review"})
+                self.assertEqual(browser.checkout_clicks, 0)
+                self.assertEqual(store.read()["menu"]["phase"], "draft")
+
+    def test_weekly_confirm_rechecks_the_weekly_product_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _, browser, app = self.household(directory)
+            menu = self.menu_review(store, app)
+            self.assertEqual(menu["summary"]["menu_attribution"], "menu_bound")
+            stopped = app.handle({"operation": "checkout", "action": "confirm", "weekly": True,
+                                  "confirmation_id": menu["confirmation_id"]})
+            self.assertEqual(stopped["reason"], "weekly_menu_products_incomplete")
+            self.assertEqual(browser.checkout_clicks, 0)
+
+    def test_occurrence_submit_prepares_its_own_review_even_after_expiry(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired), tempfile.TemporaryDirectory() as directory:
+                store, _, browser, app = self.household(directory, policy="standing")
+                app.handle({"operation": "schedule", "action": "update", "changes": {
+                    "enabled": True, "mode": "cart_ready", "auto_checkout": False,
+                    "delivery": {"weekday": "Saturday", "strategy": "keep_selected"}}})
+                app.handle({"operation": "schedule", "action": "set_cron_job", "cron_job_id": "test-cron"})
+                ready = app.handle({"operation": "checkout", "action": "auto", "occurrence": "2026-W36"})
+                occurrence = ready["occurrence"]
+                app.handle({"operation": "delivery", "action": "select", "slot_ref": "oda:2026-09-05:70"})
+                prior = app.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+                with store.locked() as state:
+                    app._bind_protected_request(state, "checkout", "interactive-key", prior["confirmation_id"])
+                    if expired:
+                        state["pending_checkout"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+                if not expired:
+                    with self.assertRaisesRegex(HouseholdError, "different purchase occurrence"):
+                        app.handle({"operation": "checkout", "action": "submit", "occurrence": occurrence,
+                                    "idempotency_key": "interactive-key"})
+                stopped = app.handle({"operation": "checkout", "action": "submit", "occurrence": occurrence,
+                                      "idempotency_key": "occurrence-key"})
+                self.assertEqual(stopped["reason"], "cart_requires_owner_decision")
+                self.assertEqual(browser.checkout_clicks, 0)
+                self.assertEqual(store.read()["occurrences"][occurrence]["status"], "cart_ready")
+                self.assertIsNone(store.read()["pending_checkout"])
+                if not expired:
+                    self.assertEqual(stopped["discarded_confirmation_id"], prior["confirmation_id"])
+                    receipt = app.handle({"operation": "checkout", "action": "confirm",
+                                          "confirmation_id": prior["confirmation_id"]})
+                    self.assertEqual(receipt["status"], "review_discarded")
+                app.handle({"operation": "cart", "action": "reconcile", "decision": "keep_current",
+                            "menu_ref": app._cart_menu_ref(store.read()["menu"]),
+                            "cart_digest": stopped["cart_plan"]["cart_digest"],
+                            "accept_missing_product_ids": ["20"]})
+                result = app.handle({"operation": "checkout", "action": "submit", "occurrence": occurrence,
+                                     "idempotency_key": "occurrence-key"})
+                self.assertTrue(result["confirmed"], result)
+                self.assertNotEqual(result["confirmation_id"], prior["confirmation_id"])
+                self.assertEqual(store.read()["occurrences"][occurrence]["status"], "completed")
+                self.assertEqual(browser.checkout_clicks, 1)
+
+    def test_retired_standalone_review_gives_scoped_retry_and_raw_false_can_renew(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _, browser, app = self.household(directory)
+            review = app.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            renewed = app.handle({"operation": "checkout", "action": "renew_review", "cart_only": False,
+                                  "confirmation_id": review["confirmation_id"]})
+            self.assertEqual(renewed["summary"]["menu_attribution"], "cart_only")
+            with store.locked() as state:
+                state["pending_checkout"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+            from planning_assessment import workflow_status
+            self.assertTrue(workflow_status(store.read())["next_action"]["arguments"]["cart_only"])
+            with self.assertRaisesRegex(HouseholdError, "prepare a fresh review with cart_only=true"):
+                app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": renewed["confirmation_id"]})
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertEqual(browser.checkout_clicks, 0)
+            review = app.handle({"operation": "checkout", "action": "prepare", "cart_only": True})
+            self.assertEqual(review["summary"]["menu_attribution"], "cart_only")
+
     def test_cart_only_still_waits_for_an_interrupted_menu_product_apply(self):
         with tempfile.TemporaryDirectory() as directory:
             store, _provider, browser, application = self.household(directory)

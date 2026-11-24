@@ -455,6 +455,49 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertTrue(paid['confirmed'], paid)
         self.assertEqual(self.app.handle({'operation': 'recurring', 'action': 'due', 'date': '2026-09-07'})['due'], [])
 
+    @mock.patch.object(Application, '_household_today', lambda self, state=None: date(2026, 9, 7))
+    def test_weekly_scope_survives_renewal_and_token_only_confirmation(self):
+        self.shop(self.batch())
+        self.app.confirmation_policy = "standing"
+        original = self.call("prepare", weekly=True)
+        review = self.call("renew_review", confirmation_id=original["confirmation_id"])
+        self.recurring("20")
+        rejected = self.call("confirm", confirmation_id=review["confirmation_id"])
+        self.assertEqual(rejected["reason"], "weekly_goods_changed")
+        rejected = self.call("submit", idempotency_key="weekly-retry")
+        self.assertEqual(rejected["reason"], "weekly_goods_changed")
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertTrue(self.store.read()["pending_checkout"]["weekly"])
+
+    @mock.patch.object(Application, '_household_today', lambda self, state=None: date(2026, 9, 7))
+    def test_weekly_submit_of_existing_review_keeps_scope_on_same_key_retry(self):
+        self.shop(self.batch())
+        self.app.confirmation_policy = "standing"
+        original = self.call("prepare")
+        self.recurring("20")
+        for arguments in ({"weekly": True}, {}):
+            stopped = self.call("submit", idempotency_key="buy-the-week", **arguments)
+            self.assertEqual(stopped["reason"], "weekly_goods_changed")
+            self.assertEqual(stopped["confirmation_id"], original["confirmation_id"])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    def test_weekly_equipment_change_at_final_click_is_a_predispatch_stop(self):
+        import order_operations
+        self.shop(self.batch())
+        review = self.call("prepare", weekly=True)
+        assess = order_operations.assess_menu
+
+        def equipment_changed(state):
+            if (state.get("pending_checkout") or {}).get("status") == "clicking":
+                return {"issues": [{"code": "equipment_unavailable"}]}
+            return assess(state)
+
+        with mock.patch.object(order_operations, "assess_menu", side_effect=equipment_changed):
+            with self.assertRaisesRegex(HouseholdError, "equipment requirement"):
+                self.call("confirm", confirmation_id=review["confirmation_id"])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertIsNone(self.store.read()["pending_checkout"])
+
     def test_saved_menu_equipment_is_checked_at_confirmation(self):
         self.profile(meals={'equipment': ['pot','pan','oven','blender']})
         self.shop(self.batch())

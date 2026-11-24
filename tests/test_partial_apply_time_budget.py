@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
@@ -11,7 +12,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import StateStore  # noqa: E402
+from core import HouseholdError, StateStore  # noqa: E402
 from meny import MenyBrowserError, MenyCartStoppedError  # noqa: E402
 from product_observations import normalize_meny_product_search  # noqa: E402
 from product_planner import menu_requirements  # noqa: E402
@@ -206,6 +207,137 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
                                                        "cart_change_requested": True}))
                 self.assertTrue(done.get("applied"), done)
 
+    def test_compact_apply_ref_survives_failed_reads_and_restart(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                store, provider, app, prepared = self.household(approved=3, unresolved=partial)
+                agent = {"operation": "products", "response_view": "agent"}
+                reference = prepared["product_plan_ref"]
+                page = app.handle({**agent, "action": "get", "product_plan_ref": reference})
+                args = page["partial_apply_arguments" if partial else "apply_arguments"]
+                request = {**agent, **args, "cart_change_requested": True}
+                provider.failing_query = "Lettmelk 2"
+                result = app.handle(request)
+                for _ in range(3):
+                    if result["status"] != "validating":
+                        break
+                    result = app.handle({**agent, **result["continue_arguments"]})
+                self.assertEqual(result["status"], "needs_input")
+                self.assertEqual(result["product_plan_ref"], reference)
+                self.assertEqual(result["read_failures"][0]["query"], provider.failing_query)
+                self.assertEqual(provider.writes(), 0)
+
+                provider.failing_query = None
+                restarted = Application(store, provider, mock.Mock())
+                page = restarted.handle({**agent, "action": "get", "product_plan_ref": reference})
+                self.assertEqual(page["partial_apply_arguments" if partial else "apply_arguments"], args)
+                reads_before = provider.reads()
+                self.assertTrue(restarted.handle(request)["applied"])
+                self.assertEqual(provider.reads() - reads_before, 3)
+                self.assertEqual(provider.writes(), 2)  # three units in bounded MENY batches
+
+    def test_confirmed_login_loss_stops_searching_and_updates_service_readiness(self):
+        store, provider, app, prepared = self.household(approved=3, unresolved=False)
+        menu_ref = app._cart_menu_ref(store.read()["menu"])
+        page = app.handle({"operation": "products", "action": "get", "product_plan_ref": prepared["product_plan_ref"]})
+        for arguments in ({"action": "prepare", "menu_ref": menu_ref},
+                          {**page["apply_arguments"], "cart_change_requested": True}):
+            with self.subTest(action=arguments["action"]):
+                app.integration = {"status": "ready", "provider": "meny"}
+                with mock.patch.object(provider, "call", side_effect=HouseholdError(
+                        "MENY login is required in the configured browser profile")) as read:
+                    with self.assertRaisesRegex(HouseholdError, "MENY login is required"):
+                        app.handle({"operation": "products", "response_view": "agent", **arguments})
+                self.assertEqual(read.call_count, 1)
+                self.assertEqual(read.call_args.args[0], "product_search")
+                self.assertEqual(app.integration["status"], "awaiting_login")
+                self.assertEqual(provider.writes(), 0)
+
+    def test_compact_apply_refreshes_checks_started_before_login_loss(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                store, provider, app, prepared = self.household(approved=3, unresolved=partial)
+                agent = {"operation": "products", "response_view": "agent"}
+                page = app.handle({**agent, "action": "get", "product_plan_ref": prepared["product_plan_ref"]})
+                args = page["partial_apply_arguments" if partial else "apply_arguments"]
+                request = {**agent, **args, "cart_change_requested": True}
+                with mock.patch.object(planning_operations, "MAX_REQUIREMENTS", 1):
+                    progress = app.handle(request)
+                self.assertEqual(progress["validation_progress"]["pending_search_count"], 2)
+                with mock.patch.object(provider, "call", side_effect=HouseholdError(
+                        "MENY login is required in the configured browser profile")):
+                    with self.assertRaisesRegex(HouseholdError, "MENY login is required"):
+                        app.handle({**agent, **progress["continue_arguments"]})
+                reads = provider.reads()
+                restarted = Application(store, provider, mock.Mock())
+                page = restarted.handle({**agent, "action": "get", "product_plan_ref": prepared["product_plan_ref"]})
+                if partial:
+                    resume = {**page["partial_apply_arguments"], "cart_change_requested": True}
+                else:
+                    resume = page["continue_arguments"]
+                    self.assertEqual(page["validation_progress"]["pending_search_count"], 3)
+                    self.assertTrue(page["validation_progress"]["restarted"])
+                self.assertTrue(restarted.handle({**agent, **resume})["applied"])
+                self.assertEqual(provider.reads() - reads, 3)
+
+    def test_compact_prepare_resumes_after_login_loss_and_rereads_all_prices(self):
+        store, provider, app, _prepared = self.household(approved=4, unresolved=False)
+        agent = {"operation": "products", "response_view": "agent"}
+        menu_ref = app._cart_menu_ref(store.read()["menu"])
+        with mock.patch.object(planning_operations, "MAX_REQUIREMENTS", 1):
+            page = app.handle({**agent, "action": "prepare", "menu_ref": menu_ref})
+        self.assertEqual(page["progress"]["pending_search_count"], 3)
+        continuation = page["continue_arguments"]
+        with mock.patch.object(provider, "call", side_effect=HouseholdError(
+                "MENY login is required in the configured browser profile")):
+            with self.assertRaisesRegex(HouseholdError, "MENY login is required"):
+                app.handle({**agent, **continuation})
+        restarted = Application(store, provider, mock.Mock())
+        page = restarted.handle({**agent, "action": "get", "product_plan_ref": continuation["product_plan_ref"]})
+        self.assertEqual(page["continue_arguments"], continuation)
+        self.assertEqual(page["progress"]["pending_search_count"], 4)
+        provider.template["purchase_options"][0].update(merchandise_ore=7999, total_payable_ore=7999)
+        reads = provider.reads()
+        result = restarted.handle({"operation": "products", **page["continue_arguments"]})
+        rows = result["product_plan"]["requirements"]
+        self.assertEqual(provider.reads() - reads, 4)
+        self.assertEqual({row["observation"]["products"][0]["purchase_options"][0]["merchandise_ore"]
+                          for row in rows}, {7999})
+        self.assertNotIn("continue_arguments", result)
+        self.assertEqual(provider.writes(), 0)
+
+    def test_expired_search_prices_are_reread_while_failed_queries_eventually_settle(self):
+        store, provider, app, _prepared = self.household(approved=5, unresolved=False)
+        start = datetime(2026, 11, 22, 12, tzinfo=timezone.utc)
+        app._now = lambda: start + timedelta(seconds=provider.clock.now)
+        menu_ref = app._cart_menu_ref(store.read()["menu"])
+        original = provider.call
+
+        def fail_three_searches(tool, arguments, **kwargs):
+            if tool == "product_search" and arguments["queries"][0].split()[-1] in {"1", "2", "3"}:
+                raise MenyBrowserError("synthetic product page unavailable",
+                                       failure_class="adapter_rejected", source="adapter_stderr")
+            return original(tool, arguments, **kwargs)
+
+        with mock.patch.object(provider, "call", side_effect=fail_three_searches):
+            result = app.handle({"operation": "products", "action": "prepare", "menu_ref": menu_ref})
+            self.assertIn("continue_arguments", result)
+            for attempt in range(1, 9):
+                # Every continuation crosses the real 30-minute price window.
+                provider.clock.now += 1801
+                current_price = 2180 + attempt
+                provider.template["purchase_options"][0].update(
+                    merchandise_ore=current_price, total_payable_ore=current_price)
+                result = app.handle({"operation": "products", **result["continue_arguments"]})
+                if "continue_arguments" not in result:
+                    break
+            self.assertNotIn("continue_arguments", result)
+            rows = result["product_plan"]["requirements"]
+            products = [row["observation"]["products"][0] for row in rows if row.get("observation")]
+            self.assertEqual({product["name"] for product in products}, {"Lettmelk 4", "Lettmelk 5"})
+            self.assertEqual({product["purchase_options"][0]["merchandise_ore"] for product in products}, {current_price})
+            self.assertEqual(provider.writes(), 0)
+
     def test_a_fill_that_stops_before_its_next_click_needs_only_the_cart_review(self):
         store, provider, app, prepared = self.household(approved=3, unresolved=False)
         original = provider.call
@@ -268,7 +400,6 @@ class PartialApplyTimeBudgetTests(unittest.TestCase):
 
 class MenyPrepareWindowTests(unittest.TestCase):
     def test_a_menu_whose_reads_outlast_five_minutes_still_finishes_preparing(self):
-        from datetime import datetime, timedelta, timezone
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         clock = FakeClock()

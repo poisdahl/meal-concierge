@@ -166,6 +166,11 @@ def workflow_status(state, *, now=None):
             if legacy_child:
                 next_action["order_id"] = attempt["order_id"]
                 next_action["confirmation_id"] = pending["confirmation_id"]
+        if expired and attempt is pending:
+            if pending.get("cart_only"):
+                next_action["cart_only"] = True
+            elif pending.get("weekly"):
+                next_action["weekly"] = True
         if (expired and attempt is pending and state.get("provider") == "oda"
                 and not pending.get("automatic_checkout") and "payment_preference" in pending):
             next_action["checkout_payment"] = deepcopy(pending["checkout_payment"])
@@ -241,7 +246,7 @@ def _continuation(action, state, menu, cart):
     """Add executable argument shape without inventing input or authorization."""
     operation, name = action['operation'], action['action']
     arguments = {'action': name}
-    for key in ('confirmation_id', 'order_id', 'recovery', 'checkout_payment', 'provider'):
+    for key in ('confirmation_id', 'order_id', 'recovery', 'checkout_payment', 'cart_only', 'weekly', 'provider'):
         if action.get(key) is not None:
             arguments[key] = deepcopy(action[key])
     needs = []
