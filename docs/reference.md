@@ -677,7 +677,11 @@ current cart independently. The order is recorded as
 usage are preserved through purchase, reconciliation and cancellation. For a
 menu that already belongs to an order, checkout clears only its separate extras
 bookkeeping. Renewal, payment switching and retries preserve the purchase
-intent. `confirm` and bound idempotency keys require a matching intent. Omitting
+intent. A payment method selected for one review follows that purchase through
+renewal. A separate purchase starts with the household payment preference.
+A submit carrying a scheduled occurrence must use a review for that occurrence.
+A weekly review carries its weekly-goods checks through token-only confirmation.
+`confirm` and bound idempotency keys require a matching intent. Omitting
 `cart_only` and passing `cart_only=false` are equivalent. An incomplete
 saved-menu product apply still blocks checkout. Use `weekly=true` to buy for
 the saved weekly menu. Pick one scope based on the owner's request. `cart_only`
@@ -2505,7 +2509,8 @@ with its original `confirmation_id` before trying to confirm. It reads the
 current merchant summary, issues a fresh confirmation, and records the prior
 review ID. Review the returned terms again. A possible dispatch or recovery
 must use its existing reconciliation path. If confirmation already retired an
-expired review, use ordinary checkout preparation.
+expired review, prepare again with the original scope. For a standalone purchase,
+pass `cart_only=true` to the fresh prepare.
 
 After recording new pantry answers, use `products prepare` with
 `continuation_mode=refresh_stock`, the original `product_plan_ref` and the new
