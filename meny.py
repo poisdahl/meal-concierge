@@ -2615,7 +2615,8 @@ __DELIVERY_BINDING__
             self._sleep(0.5)
         result: dict[str, Any] = {}
         zero_since: float | None = None
-        for _ in range(60):
+        render_polls = 60
+        for poll in range(render_polls + 4 * MENY_CART_TOTAL_WAIT_SECONDS):
             result = self._eval(r"""
 (() => {
   const mode = __CONFIRM_MODE__;
@@ -2698,14 +2699,16 @@ __DELIVERY_BINDING__
                 now = time.monotonic()
                 zero_since = now if zero_since is None else zero_since
                 if now - zero_since >= MENY_CART_TOTAL_WAIT_SECONDS:
+                    if allow_reload:
+                        self._invoke("reload")
+                        self._sleep(0.5)
+                        return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
                     break
             else:
                 zero_since = None
+                if poll + 1 >= render_polls:
+                    break
             self._sleep(0.25)
-        if allow_reload and not observe_order_mode and _zero_total_cart(result):
-            self._invoke("reload")
-            self._sleep(0.5)
-            return self._read_cart(allow_reload=False, observe_order_mode=observe_order_mode)
         snapshot = normalize_cart_snapshot(result)
         return {
             "provider": "meny",

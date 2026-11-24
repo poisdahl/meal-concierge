@@ -5302,24 +5302,23 @@ class PlanningOperations:
         return max(0, live.get(product_id, 0) - plan.get("baseline_quantities", {}).get(product_id, 0)
                    - plan.get("supplemental_quantities", {}).get(product_id, 0))
 
-    def _retain_acknowledged_cart_additions(
+    def _retain_acknowledged_cart_changes(
         self, plan: dict[str, Any], before: Mapping[str, int],
         acknowledged: Mapping[str, int], live: Mapping[str, int],
     ) -> None:
-        capacity = {product_id: self._menu_owned_capacity(plan, live, product_id) for product_id in live}
-        retained = {
-            product_id: min(quantity, capacity.get(product_id, 0))
-            for product_id, quantity in plan["added_quantities"].items()
-            if min(quantity, capacity.get(product_id, 0)) > 0
-        }
-        for product_id in set(before) | set(acknowledged):
+        retained = {}
+        for product_id in live:
             confirmed = acknowledged.get(product_id, 0) - before.get(product_id, 0)
-            if confirmed > 0:
-                retained[product_id] = min(
-                    retained.get(product_id, 0) + confirmed,
-                    capacity.get(product_id, 0),
-                )
+            owned = plan["added_quantities"].get(product_id, 0) + confirmed
+            remaining = min(owned, self._menu_owned_capacity(plan, live, product_id))
+            if remaining > 0:
+                retained[product_id] = remaining
         plan["added_quantities"] = retained
+
+    def _retain_journaled_menu_ownership(self, plan, pending, live):
+        acknowledged = pending["acknowledged"]
+        before = acknowledged if pending.get("menu_ownership_accounted") else pending["before"]
+        self._retain_acknowledged_cart_changes(plan, before, acknowledged, live)
 
     def _dispatch_managed_cart(self, operations, before, target, menu_ref, deadline, *, plan_digest=None):
         # The native adapter durably binds its individual delegation requests.
@@ -5488,7 +5487,7 @@ class PlanningOperations:
             if (meny_menu_fill and pending.get("acknowledged") is not None and isinstance(plan, dict)
                     and plan.get("provider") == self.provider and plan.get("menu_ref") == pending["managed_menu"]):
                 # Confirmed batches stay menu-owned, also when the menu changed since.
-                self._retain_acknowledged_cart_additions(plan, pending["before"], pending["acknowledged"], live)
+                self._retain_journaled_menu_ownership(plan, pending, live)
             if accepted_meny_clear:
                 self._finish_cart_clear(state, pending, live, names, owner_accepted=True)
             elif pending.get("clear_requested"):
@@ -5534,6 +5533,11 @@ class PlanningOperations:
             return pending
         return None
 
+    def _pending_managed_cart_evidence(self, pending):
+        return {"operation_id": self._cart_operation_ref(pending),
+                **({"provider_failure": deepcopy(pending["provider_failure"])}
+                   if pending.get("provider_failure") else {})}
+
     def _finish_observed_managed_cart(self, state, menu_ref, live):
         pending = state.get("pending_cart_change")
         if not pending or pending.get("managed_menu") != menu_ref:
@@ -5541,10 +5545,15 @@ class PlanningOperations:
         if not pending.get("dispatch_finished") and not (
             pending.get("stopped_before_next_click") and pending["expected"] == live
         ):
+            plan = state.get("cart_plan")
+            if (self.provider == "meny" and pending.get("acknowledged") is not None
+                    and isinstance(plan, dict) and plan.get("menu_ref") == menu_ref):
+                # Post the confirmed batches once, before clamping ownership to
+                # this observation. A later household edit may replace removed units.
+                self._retain_journaled_menu_ownership(plan, pending, live)
+                pending["menu_ownership_accounted"] = True
             return {"outcome_unknown": True, "cart_write_pending": True,
-                    "operation_id": pending["operation_id"],
-                    **({"provider_failure": deepcopy(pending["provider_failure"])}
-                       if pending.get("provider_failure") else {})}
+                    **self._pending_managed_cart_evidence(pending)}
         self._finish_managed_cart_journal(state, pending, "read_back")
         return None
 
@@ -5770,12 +5779,17 @@ class PlanningOperations:
                     plan["pending_cart_digest"] = None
                     plan["updated_at"] = self._now().isoformat()
                     current = deepcopy(plan)
+                    pending = state.get("pending_cart_change") or {}
+                    evidence = (self._pending_managed_cart_evidence(pending)
+                                if pending.get("managed_menu") == expected_menu_ref
+                                and pending.get("operations") == operations else {})
                 return {
                     "synced": None,
                     "outcome_unknown": True,
                     "cart_write_pending": True,
                     "cart_reconciliation_required": True,
                     "reason": "cart_write_verification_unavailable",
+                    **evidence,
                     # This is the exact last verified pre-write cart identity;
                     # parity after the dispatched mutation remains unknown.
                     "cart_plan": self._cart_plan_view(current, prewrite_summary),
@@ -5798,7 +5812,7 @@ class PlanningOperations:
             with self.store.locked() as state:
                 pending_result = self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
                 plan = state["cart_plan"]
-                self._retain_acknowledged_cart_additions(plan, first_live,
+                self._retain_acknowledged_cart_changes(plan, first_live,
                     first_live if pending_result else acknowledged_live, verified_live)
                 if mutation_error is None and self.provider in {"oda", "mathem"}:
                     self._offer_cart_ownership_review(plan, first_live, verified_live, operations)
@@ -5981,6 +5995,12 @@ class PlanningOperations:
                     plan["status"] = "needs_input"
                     plan["approved_cart_digest"] = None
                     plan["pending_cart_digest"] = None
+                    pending = state.get("pending_cart_change") or {}
+                    if pending.get("managed_menu") == expected_menu_ref and pending.get("operations") == operations:
+                        return {"reconciled": False, "outcome_unknown": True, "cart_write_pending": True,
+                                "cart_reconciliation_required": True, "reason": "cart_write_verification_unavailable",
+                                **self._pending_managed_cart_evidence(pending),
+                                "next": "Read and reconcile the original cart change before retrying."}
             raise
         verified_summary = summarize(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
@@ -5990,7 +6010,7 @@ class PlanningOperations:
                 pending_result = self._finish_observed_managed_cart(state, expected_menu_ref, verified_live)
                 current = state["cart_plan"]
                 self._reduce_supplements(current, first_live, {key: verified_live.get(key, 0) if key in excluded else value for key, value in first_live.items()})
-                self._retain_acknowledged_cart_additions(current, first_live,
+                self._retain_acknowledged_cart_changes(current, first_live,
                     first_live if pending_result else acknowledged_live, verified_live)
                 self._set_cart_needs_input(current, verified_live, verified_names)
                 plan = deepcopy(current)
@@ -6374,7 +6394,7 @@ class PlanningOperations:
                 if state.get("pending_cart_change") != pending or plan.get("menu_ref") != pending["managed_menu"]:
                     raise HouseholdError("original managed cart intent or menu changed")
                 if pending.get("acknowledged") is not None:
-                    self._retain_acknowledged_cart_additions(plan, pending["before"], pending["acknowledged"], quantities)
+                    self._retain_journaled_menu_ownership(plan, pending, quantities)
                 elif pending.get("dispatch_finished"):
                     self._offer_cart_ownership_review(plan, pending["before"], quantities, pending["operations"])
                 self._set_cart_needs_input(plan, quantities, names)
