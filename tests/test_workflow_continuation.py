@@ -16,6 +16,14 @@ class WorkflowContinuationTests(unittest.TestCase):
         self.assertEqual(action['arguments'], {'action':'prepare', 'checkout_payment':{'method':'saved_card'}})
         self.assertNotIn('confirmation_id', action)
 
+    def test_invalid_deadlines_require_fresh_review_only_before_dispatch(self):
+        for expiry in ({}, {'expires_at': 'invalid'}, {'expires_at': '2099-01-01T00:00:00'}):
+            with self.subTest(expiry=expiry):
+                review = {**expiry, 'status': 'awaiting_confirmation', 'confirmation_id': 'review'}
+                self.assertEqual(self.action(pending_checkout=review)['action'], 'prepare')
+                self.assertEqual(self.action(pending_cancellation={**review, 'order_id': 'order'})['action'], 'cancel_prepare')
+                self.assertEqual(self.action(pending_checkout={**review, 'status': 'uncertain'})['action'], 'reconcile')
+
     def test_cancellation_exact_identity_expiry_and_uncertain_dispatch(self):
         cancellation = {'status':'awaiting_confirmation', 'confirmation_id':'cancel', 'order_id':'order', 'expires_at':'2000-01-01T00:00:00+00:00'}
         for pending in (None, {'status':'uncertain','confirmation_id':'payment'}):

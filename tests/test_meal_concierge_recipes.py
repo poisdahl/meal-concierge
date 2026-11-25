@@ -5414,6 +5414,15 @@ class RecipeFlowTests(unittest.TestCase):
             self.app.handle({"operation": "profile", "action": "set_email", "email": "victim@example.test\nBcc: attacker@example.test"})
         self.assertIsNone(money_cents(1e308))
 
+    def test_money_cents_uses_decimal_ties_to_even_and_rejects_invalid_totals(self):
+        for amount, cents in (("1.015", 102), (1.225, 122), ("1.225000000000000001", 123),
+                              (0, 0), ("90071992547409.91", 2**53 - 1)):
+            with self.subTest(amount=amount):
+                self.assertEqual(money_cents(amount), cents)
+        for invalid in (True, False, None, -1, "NaN", "Infinity", "90071992547409.92"):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(money_cents(invalid))
+
     def test_year_end_cooldown_does_not_overflow(self):
         with self.store.locked() as state:
             state["recipe_usage"]["future"] = {

@@ -14,8 +14,9 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from oda_browser import delivery_signature as oda_delivery_signature
-from core import HouseholdError, cart_summary, validate_delivery_slot
+from oda_browser import delivery_signature as oda_delivery_signature, oda_addition_cents
+from payment_attempts import review_expired
+from core import HouseholdError, cart_summary, money_cents, validate_delivery_slot
 from recipe_quantities import quantity_text
 from recipes import RecipeError, evidence_inputs, normalize_source_url, validate_week
 
@@ -107,13 +108,7 @@ def validate_request_value(value: Any, depth: int = 0) -> None:
         raise HouseholdError("request contains an unsupported value")
 
 def expired_awaiting_confirmation(value: Any, instant: datetime | None = None) -> bool:
-    if not isinstance(value, Mapping) or value.get("status") != "awaiting_confirmation":
-        return False
-    try:
-        expires_at = datetime.fromisoformat(str(value.get("expires_at") or ""))
-    except ValueError:
-        return False
-    return expires_at.tzinfo is not None and (instant or now()) >= expires_at
+    return review_expired(value, instant)
 
 def scheduled_occurrence(schedule: Mapping[str, Any], current: datetime) -> str:
     weekday = SCHEDULE_WEEKDAYS.get(str(schedule.get("weekday") or "").casefold())
@@ -659,18 +654,6 @@ def validate_schedule(schedule: Mapping[str, Any], provider: str) -> float | Non
             raise HouseholdError("auto-checkout requires a delivery weekday or latest end")
     return maximum_value
 
-def money_cents(value: Any) -> int | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if not math.isfinite(number) or number < 0:
-        return None
-    scaled = number * 100
-    if not math.isfinite(scaled):
-        return None
-    return int(round(scaled))
-
 def order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, Any], *, provider: str = "oda") -> bool:
     if order.get("currency") != ("SEK" if provider == "mathem" else "NOK"):
         return False
@@ -866,10 +849,10 @@ def meny_order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, 
         times = re.findall(r"\b(?:[01]\d|2[0-3]):[0-5]\d(?=$|\s|[-–,])", value)
         return (next(iter(dates)), (times[0], times[1])) if len(dates) == 1 and len(times) == 2 else None
 
-    try:
-        total_matches = int(round(float(order.get("grossAmount")) * 100)) == int(round(float(summary.get("total")) * 100))
-    except (TypeError, ValueError, OverflowError):
+    observed_total = money_cents(order.get("grossAmount"))
+    if observed_total is None or observed_total != money_cents(summary.get("total")):
         return False
+
     def lines(value: Any, *, key: str, require_product_id: bool = False) -> dict[str, int] | None:
         if not isinstance(value, list) or not value:
             return None
@@ -900,7 +883,6 @@ def meny_order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, 
         and not isinstance(count, bool)
         and isinstance(count, int)
         and count == summary.get("count")
-        and total_matches
         and isinstance(delivery, Mapping)
         and delivery_signature(order.get("deliverySlotDisplay")) is not None
         and delivery_signature(order.get("deliverySlotDisplay")) == delivery_signature(delivery.get("display"))
@@ -983,12 +965,15 @@ def oda_order_matches_addition(before: Mapping[str, Any], after: Mapping[str, An
             return False
         product_id = str(item["product_id"])
         expected[product_id] = expected.get(product_id, 0) + item["quantity"]
+    cents = oda_addition_cents if provider == "oda" else money_cents
     try:
-        expected_total = float(before.get("grossAmount")) + float(additions.get("total"))
-        total_matches = int(round(expected_total * 100)) == int(round(float(after.get("grossAmount")) * 100))
-    except (TypeError, ValueError, OverflowError):
+        before_total = cents(before.get("grossAmount"))
+        added_total = cents(additions.get("total"))
+        after_total = cents(after.get("grossAmount"))
+    except HouseholdError:
         return False
-    return observed == expected and total_matches
+    return (observed == expected and before_total is not None and added_total is not None
+            and before_total + added_total == after_total)
 
 def checkout_intent_signature(summary: Mapping[str, Any]) -> str | None:
     items = summary.get("items")

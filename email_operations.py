@@ -14,6 +14,7 @@ from core import HouseholdError, mask_email, valid_email_address
 from recipe_assets import RecipeAssets
 from recipe_email import prepare_recipe_media
 from delivery_operations import legacy_held
+from payment_attempts import can_discard_expired_review
 from service_common import (
     EMAIL_AUTOMATION_PROTOCOL,
     EMAIL_CLAIM_LEASE,
@@ -23,7 +24,6 @@ from service_common import (
     email_automation_key,
     email_automation_prompt,
     email_job_provider,
-    expired_awaiting_confirmation,
     menu_email_html,
     menu_delivery_title,
     require_provider_identity,
@@ -707,7 +707,7 @@ class EmailOperations:
                 if legacy_held(state, matching[0]):
                     return {"send": False, "reason": "recipe delivery is explicitly held"}
                 pending_cancellation = state.get("pending_cancellation")
-                if expired_awaiting_confirmation(pending_cancellation, self._now()):
+                if can_discard_expired_review(pending_cancellation, self._now()):
                     state["pending_cancellation"] = None
                     pending_cancellation = None
                 if job_provider == self.provider and isinstance(pending_cancellation, Mapping) and pending_cancellation.get("order_id") == order_id:

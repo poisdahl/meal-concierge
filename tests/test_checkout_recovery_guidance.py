@@ -74,6 +74,7 @@ class CheckoutRecoveryGuidanceTests(unittest.TestCase):
         action = self.action({"status": "awaiting_user_payment", "confirmation_id": "original",
                               "checkout_payment": {"method": "vipps"},
                               "recovery": {"status": "awaiting_confirmation", "confirmation_id": "child",
+                                           "expires_at": "2099-01-01T00:00:00+00:00",
                                            "browser_review": {"payment_choice": {"method": "saved_card"}}}})
         self.assertEqual((action["action"], action["confirmation_id"]), ("confirm", "child"))
         self.assertEqual(action["payment_method"], "saved_card")

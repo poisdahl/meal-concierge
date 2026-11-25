@@ -28,6 +28,7 @@ from core import (
     HouseholdError,
     cart_summary,
     delivery_price_display,
+    money_cents,
     oslo_local_timestamp,
     validate_delivery_slot,
 )
@@ -968,21 +969,24 @@ def _checkout_price_breakdown(observation: Any, total_ore: int) -> dict[str, Any
     }
 
 
+def _checkout_total_ore(summary: Any) -> int | None:
+    total = summary.get("total") if isinstance(summary, Mapping) else None
+    if type(total) not in {int, float}:
+        return None
+    cents = money_cents(total)
+    return cents if cents is not None and cents > 0 else None
+
+
 def normalize_checkout_payment_snapshot(value: Any) -> dict[str, Any]:
     """Accept only one complete, enabled home-delivery Vipps summary."""
 
     if not _checkout_payment_shape(value) or any(value.get(key) is not True for key in ("ready", "authenticated", "vipps_checked", "home_delivery", "submit_enabled")):
         raise HouseholdError("MENY checkout page changed")
-    total = value.get("total")
     delivery = " ".join(str(value.get("delivery") or "").split())
     submit_controls = value.get("submit_controls")
-    try:
-        normalized_total = float(total) if type(total) in {int, float} else math.nan
-    except (TypeError, ValueError, OverflowError):
-        normalized_total = math.nan
+    total_ore = _checkout_total_ore(value)
     if (
-        not math.isfinite(normalized_total)
-        or normalized_total <= 0
+        total_ore is None
         or not isinstance(value.get("delivery"), str)
         or not delivery
         or len(delivery) > 1000
@@ -994,13 +998,11 @@ def normalize_checkout_payment_snapshot(value: Any) -> dict[str, Any]:
         meny_delivery_window_identity(delivery)
     except HouseholdError as exc:
         raise HouseholdError("MENY checkout page changed") from exc
-    payment = {"total": normalized_total, "delivery": delivery}
-    total_ore = normalized_total * 100
-    if math.isfinite(total_ore):
-        breakdown = _checkout_price_breakdown(value.get("price_rows"), round(total_ore))
-        if breakdown is not None:
-            payment["price_breakdown"] = breakdown
-            payment["price_rows"] = value["price_rows"]
+    payment = {"total": total_ore / 100, "delivery": delivery}
+    breakdown = _checkout_price_breakdown(value.get("price_rows"), total_ore)
+    if breakdown is not None:
+        payment["price_breakdown"] = breakdown
+        payment["price_rows"] = value["price_rows"]
     return payment
 
 
@@ -1014,7 +1016,7 @@ def meny_checkout_reviews_match(expected: Any, observed: Any) -> bool:
         items = summary.get("items")
         order_lines = summary.get("order_lines")
         delivery = summary.get("delivery")
-        total = summary.get("total")
+        total_cents = _checkout_total_ore(summary)
         count = summary.get("count")
         if (
             not isinstance(items, list)
@@ -1022,8 +1024,7 @@ def meny_checkout_reviews_match(expected: Any, observed: Any) -> bool:
             or not isinstance(order_lines, list)
             or not order_lines
             or not isinstance(delivery, Mapping)
-            or isinstance(total, bool)
-            or not isinstance(total, (int, float))
+            or total_cents is None
             or isinstance(count, bool)
             or not isinstance(count, int)
             or count < 1
@@ -1040,12 +1041,6 @@ def meny_checkout_reviews_match(expected: Any, observed: Any) -> bool:
                 or isinstance(value.get("target_order_code"), str)
             )
         ):
-            return None
-        try:
-            total_cents = float(total) * 100
-        except (OverflowError, TypeError, ValueError):
-            return None
-        if not math.isfinite(total_cents) or round(total_cents) < 1:
             return None
         for item in [*items, *order_lines]:
             if (
@@ -1080,7 +1075,7 @@ def meny_checkout_reviews_match(expected: Any, observed: Any) -> bool:
             "items": item_identity,
             "order_lines": line_identity,
             "count": count,
-            "total_cents": round(total_cents),
+            "total_cents": total_cents,
             "delivery": delivery_identity,
             "summary_payment": summary.get("payment"),
             "payment": value.get("payment"),
@@ -1094,6 +1089,28 @@ def meny_checkout_reviews_match(expected: Any, observed: Any) -> bool:
         return False
     expected_rows = expected.get("payment_price_rows")
     return expected_rows is None or expected_rows == observed.get("payment_price_rows")
+
+
+def _render_page_script(template: str, *, script_parts: Mapping[str, str] | None = None, **values: Any) -> str:
+    """Fill the original template once. Only adapter-built expressions belong in script_parts."""
+    replacements = {name: json.dumps(value) for name, value in values.items()}
+    if script_parts:
+        replacements.update(script_parts)
+    return re.sub(r"__([A-Z][A-Z0-9_]*?)__", lambda match: replacements[match[1]], template)
+
+
+def _render_review_gate(template: str, review: Mapping[str, Any], **values: Any) -> str:
+    code = review.get("target_order_code")
+    total_ore = _checkout_total_ore(review.get("summary"))
+    if total_ore is None:
+        raise HouseholdError("MENY checkout total is unavailable")
+    return _render_page_script(
+        template,
+        script_parts={"DELIVERY_BINDING": CHECKOUT_DELIVERY_BINDING_JS, "PRICE_ROWS_READER": CHECKOUT_PRICE_ROWS_JS},
+        CODE=code, SUBMIT_LABEL="Send oppdatering" if review.get("target_order_id") and code else "Til betaling",
+        TOTAL=total_ore,
+        DELIVERY=review["summary"]["delivery"]["display"], URL=CHECKOUT_URL, **values,
+    )
 
 
 class MenyCartStoppedError(HouseholdError):
@@ -1915,7 +1932,8 @@ class MenyClient:
 """
 
         def render(require_hit: bool, x: int = 0, y: int = 0) -> str:
-            return gate.replace("__PRODUCT__", json.dumps(product)).replace("__QUANTITY__", str(quantity)).replace("__CODE__", json.dumps(order_change_code)).replace("__REQUIRE_HIT__", "true" if require_hit else "false").replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y))
+            return _render_page_script(gate, PRODUCT=product, QUANTITY=quantity, CODE=order_change_code,
+                                       REQUIRE_HIT=require_hit, HIT_X=x, HIT_Y=y)
 
         if self._eval(render(False)) != {"ready": True}:
             raise HouseholdError("MENY cart remove control changed")
@@ -1933,12 +1951,7 @@ class MenyClient:
         self._invoke("mouse", "up")
 
     def _wait_for_cart_quantity(self, product: str, expected: int, order_change_code: str | None) -> int:
-        observed = -1
-        for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
-            if self.deadline is not None and time.monotonic() + 0.25 >= self.deadline:
-                break
-            self._sleep(0.25)
-            result = self._eval(r"""
+        script = _render_page_script(r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
@@ -1960,7 +1973,13 @@ class MenyClient:
   const quantity = selects.length === 1 ? Number.parseInt(norm(selects[0].selectedOptions?.[0]?.innerText), 10) : null;
   return JSON.stringify({ready:Number.isInteger(quantity) && quantity > 0, authenticated:true, quantity});
 })()
-""".replace("__PRODUCT__", json.dumps(product)).replace("__CODE__", json.dumps(order_change_code)))
+""", PRODUCT=product, CODE=order_change_code)
+        observed = -1
+        for _ in range(4 * MENY_QUANTITY_SETTLE_SECONDS):
+            if self.deadline is not None and time.monotonic() + 0.25 >= self.deadline:
+                break
+            self._sleep(0.25)
+            result = self._eval(script)
             if result.get("authenticated") is not True:
                 raise HouseholdError("MENY login is required in the configured browser profile")
             if result.get("ready") is True and result.get("quantity") == expected:
@@ -1974,15 +1993,15 @@ class MenyClient:
 
     @staticmethod
     def _product_control_script(action: str, delta: int, product: str) -> str:
-        return r"""
+        return _render_page_script(r"""
 (() => {
-  if (ACTION !== 'verify') document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
+  if (__ACTION__ !== 'verify') document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const headings = [...document.querySelectorAll('main h1')].filter(visible);
   const abouts = [...document.querySelectorAll('main h2')].filter(visible).filter(x => norm(x.innerText) === 'Om produktet');
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
-  if (location.origin !== 'https://meny.no' || location.pathname !== PRODUCT) return JSON.stringify({ready:false, page_ready:false, authenticated:authenticated.length === 1});
+  if (location.origin !== 'https://meny.no' || location.pathname !== __PRODUCT__) return JSON.stringify({ready:false, page_ready:false, authenticated:authenticated.length === 1});
   if (headings.length !== 1 || abouts.length !== 1) return JSON.stringify({ready:false, page_ready:false, authenticated:authenticated.length === 1});
   const heading = headings[0], about = abouts[0];
   const between = x => (heading.compareDocumentPosition(x) & Node.DOCUMENT_POSITION_FOLLOWING) && (x.compareDocumentPosition(about) & Node.DOCUMENT_POSITION_FOLLOWING);
@@ -1991,20 +2010,20 @@ class MenyClient:
   const select = selects[0];
   const selected = norm(select?.selectedOptions?.[0]?.innerText || '');
   const quantity = Number.parseInt(selected, 10) || 0;
-  if (ACTION === 'read') return JSON.stringify({ready:true, page_ready:true, authenticated:authenticated.length === 1, quantity});
+  if (__ACTION__ === 'read') return JSON.stringify({ready:true, page_ready:true, authenticated:authenticated.length === 1, quantity});
   const name = norm(heading.innerText);
   const header = heading.closest('.ws-product-details__header');
   const subtitles = header ? [...header.querySelectorAll(':scope > .ws-product-details__subtitle')] : [];
   const subtitle = subtitles.length === 1 ? norm(subtitles[0].textContent) : '';
   const fullName = subtitle ? `${name} ${subtitle}` : name;
   const buttons = [...document.querySelectorAll('main button')].filter(x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true' && between(x));
-  const labels = DELTA > 0 ? [
+  const labels = __DELTA__ > 0 ? [
     `Legg ${name} i handlevognen`, `Legg til 1 stk ${name} i handlevognen`,
     `Legg til ${fullName} i handlevognen`, `Legg til 1 stk ${fullName} i handlevognen`,
   ] : [quantity === 1 ? `Fjern ${name} fra handlevognen` : `Fjern 1 stk ${name} fra handlevognen`];
   const candidates = buttons.filter(button => labels.includes(norm(button.getAttribute('aria-label') || button.innerText)));
-  if (candidates.length !== 1 || (DELTA < 0 && (quantity < 1 || !/^\d+(?: stk)?$/.test(selected)))) return JSON.stringify({ready:false, page_ready:true, authenticated:authenticated.length === 1, quantity});
-  if (ACTION === 'mark') candidates[0].setAttribute('data-meal-concierge-action', 'cart');
+  if (candidates.length !== 1 || (__DELTA__ < 0 && (quantity < 1 || !/^\d+(?: stk)?$/.test(selected)))) return JSON.stringify({ready:false, page_ready:true, authenticated:authenticated.length === 1, quantity});
+  if (__ACTION__ === 'mark') candidates[0].setAttribute('data-meal-concierge-action', 'cart');
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
   const target = candidates[0];
   const label = norm(target.getAttribute('aria-label') || target.innerText);
@@ -2015,7 +2034,7 @@ class MenyClient:
     /^\d+(?: stk)?$/.test(selected) && Number.isSafeInteger(quantity) && quantity > 0));
   return JSON.stringify({ready:marked.length === 1 && marked[0] === candidates[0], page_ready:true, authenticated:authenticated.length === 1, quantity, exact_quantity, label});
 })()
-""".replace("ACTION", json.dumps(action)).replace("DELTA", str(delta)).replace("PRODUCT", json.dumps(product))
+""", ACTION=action, DELTA=delta, PRODUCT=product)
 
     def _click_cart_control(self, product: str, label: str, before_dispatch: Any, same_control: Any, *,
                             reviewed_control: tuple[int, int] | None = None) -> None:
@@ -2030,17 +2049,17 @@ class MenyClient:
   const enabled = x => visible(x) && !x.disabled && x.getAttribute('aria-disabled') !== 'true';
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const marked = [...document.querySelectorAll('[data-meal-concierge-action="cart"]')];
-  const samePage = location.origin === 'https://meny.no' && location.pathname === PRODUCT && !location.search && !location.hash && authenticated.length === 1;
+  const samePage = location.origin === 'https://meny.no' && location.pathname === __PRODUCT__ && !location.search && !location.hash && authenticated.length === 1;
   if (samePage && marked.length === 0) return JSON.stringify({replaced:true});
   const target = marked[0];
-  const bound = samePage && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === LABEL;
+  const bound = samePage && marked.length === 1 && enabled(target) && norm(target.getAttribute('aria-label') || target.innerText) === __LABEL__;
   if (!__CHECK_HIT__) return JSON.stringify({ready:bound});
   const hit = document.elementFromPoint(__HIT_X__, __HIT_Y__);
   if (bound && !(hit && (hit === target || target.contains(hit)))) return JSON.stringify({blocked:true});
   if (bound && __EXPECTED_QUANTITY__ !== null) {
     const quantity = JSON.parse(__VERIFY_QUANTITY__);
     if (quantity?.ready !== true || quantity.exact_quantity !== true ||
-        quantity.quantity !== __EXPECTED_QUANTITY__ || quantity.label !== LABEL) {
+        quantity.quantity !== __EXPECTED_QUANTITY__ || quantity.label !== __LABEL__) {
       return JSON.stringify({quantity_changed:true});
     }
   }
@@ -2054,12 +2073,9 @@ class MenyClient:
             verification = self._product_control_script("verify", delta, product)
 
         def observe(x: int | None = None, y: int | None = None) -> dict[str, Any]:
-            values = {"PRODUCT": product, "LABEL": label, "__CHECK_HIT__": x is not None,
-                      "__HIT_X__": x, "__HIT_Y__": y, "__EXPECTED_QUANTITY__": expected_quantity}
-            # Fill in one pass so a product label can contain placeholder text.
-            replacements = {key: json.dumps(value) for key, value in values.items()}
-            replacements["__VERIFY_QUANTITY__"] = verification
-            script = re.sub("|".join(replacements), lambda match: replacements[match[0]], gate)
+            script = _render_page_script(gate, script_parts={"VERIFY_QUANTITY": verification},
+                                         PRODUCT=product, LABEL=label, CHECK_HIT=x is not None,
+                                         HIT_X=x, HIT_Y=y, EXPECTED_QUANTITY=expected_quantity)
             return self._eval(script)
 
         ready = observe()
@@ -2185,7 +2201,8 @@ class MenyClient:
 """
 
         def render_gate(require_hit: bool, x: int = 0, y: int = 0) -> str:
-            return gate.replace("__REQUIRE_HIT__", "true" if require_hit else "false").replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y)).replace("__ACTION__", json.dumps(action)).replace("__SELECTOR__", json.dumps(selector)).replace("__EXPECTED_ITEMS__", json.dumps(expected_pairs)).replace("__TARGET_CODE__", json.dumps(target_code))
+            return _render_page_script(gate, REQUIRE_HIT=require_hit, HIT_X=x, HIT_Y=y, ACTION=action,
+                                       SELECTOR=selector, EXPECTED_ITEMS=expected_pairs, TARGET_CODE=target_code)
 
         ready = self._eval(render_gate(False))
         if ready != {"ready": True}:
@@ -2210,6 +2227,9 @@ class MenyClient:
     ) -> bool:
         if self.vipps_phone_number is None:
             raise HouseholdError("MENY checkout requires vipps_phone_number in the private household config")
+        total_ore = _checkout_total_ore(review.get("summary"))
+        if total_ore is None:
+            raise HouseholdError("MENY checkout total is unavailable")
         selector = '[data-meal-concierge-action="checkout-submit"]'
         gate = r"""
 (() => {
@@ -2254,16 +2274,8 @@ __DELIVERY_BINDING__
 })()
 """
         def render_gate(require_hit: bool, x: int = 0, y: int = 0) -> str:
-            return (gate.replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS)
-                    .replace("__PRICE_ROWS_READER__", CHECKOUT_PRICE_ROWS_JS)
-                    .replace("__REVIEWED_PRICE_ROWS__", json.dumps(review.get("payment_price_rows")))
-                    .replace("__REQUIRE_HIT__", "true" if require_hit else "false")
-                    .replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y))
-                    .replace("__CODE__", json.dumps(review.get("target_order_code")))
-                    .replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling"))
-                    .replace("__TOTAL__", str(round(float(review["summary"]["total"]) * 100)))
-                    .replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False))
-                    .replace("__URL__", json.dumps(CHECKOUT_URL)))
+            return _render_review_gate(gate, review, REVIEWED_PRICE_ROWS=review.get("payment_price_rows"),
+                                       REQUIRE_HIT=require_hit, HIT_X=x, HIT_Y=y)
 
         if self._eval(render_gate(False)) != {"ready": True}:
             raise HouseholdError("MENY Vipps payment control changed")
@@ -2332,7 +2344,7 @@ __DELIVERY_BINDING__
   return JSON.stringify({reservation_expired:location.href === 'https://meny.no/kassen' && authenticated.length === 1 && notices.length === 1});
 })()
 """),
-            target_order_id=review.get("target_order_id"), total_ore=round(review_summary["total"] * 100),
+            target_order_id=review.get("target_order_id"), total_ore=total_ore,
         )
 
     def _wait_for_vipps_dispatch(self, exact_checkout: Any = None, known_failure: Any = None, *, total_ore: int, target_order_id: str | None = None) -> bool:
@@ -2552,13 +2564,14 @@ __DELIVERY_BINDING__
   if(__NAVIGATE__)location.assign(store);
   return JSON.stringify({state:'navigating'});
 })()
-""".replace("__CODE__", json.dumps(code)).replace("__CONFIRM__", json.dumps("confirm_order_code" in arguments))
-        entry = entry.replace("__DRAWER_MODE__", CART_DRAWER_MODE_JS)
+"""
         navigate = True
         resized_route = None
         viewport_restored = False
         for _ in range(20):
-            script = entry.replace("__NAVIGATE__", json.dumps(navigate)).replace("__RESIZED_ROUTE__", json.dumps(resized_route))
+            script = _render_page_script(entry, script_parts={"DRAWER_MODE": CART_DRAWER_MODE_JS}, CODE=code,
+                                         CONFIRM="confirm_order_code" in arguments, NAVIGATE=navigate,
+                                         RESIZED_ROUTE=resized_route)
             result = self._eval(script)
             state = result.get("state")
             if state == "ready":
@@ -2592,7 +2605,7 @@ __DELIVERY_BINDING__
 
     @staticmethod
     def _cart_mode_script(order_code: str | None, *, observe: bool = False) -> str:
-        return r"""
+        return _render_page_script(r"""
 (() => {
   const norm=x=>(x||'').normalize('NFC').replace(/\s+/g,' ').trim();
   const visible=x=>{const s=getComputedStyle(x),b=x.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&b.width>0&&b.height>0};
@@ -2607,7 +2620,7 @@ __DELIVERY_BINDING__
   const mode=(__DRAWER_MODE__)(drawers[0],expected);
   return JSON.stringify({mode:mode==='different'?__MISMATCH__:mode});
 })()
-""".replace("__DRAWER_MODE__", CART_DRAWER_MODE_JS).replace("__MISMATCH__", json.dumps("different" if observe else "unverified")).replace("__CODE__", json.dumps(order_code))
+""", script_parts={"DRAWER_MODE": CART_DRAWER_MODE_JS}, MISMATCH="different" if observe else "unverified", CODE=order_code)
 
     def _read_cart(self, *, allow_reload: bool = True, observe_order_mode: bool = False,
                    confirmation_context: str | None = None) -> dict[str, Any]:
@@ -3094,9 +3107,9 @@ __DELIVERY_BINDING__
         confirmation_script = r"""
 (() => {
   document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
-  const expectedSuffix = EXPECTED_SUFFIX.toLocaleLowerCase('nb-NO');
-  const keepOnly = KEEP_ONLY;
-  const markControl = MARK_CONTROL;
+  const expectedSuffix = __EXPECTED_SUFFIX__.toLocaleLowerCase('nb-NO');
+  const keepOnly = __KEEP_ONLY__;
+  const markControl = __MARK_CONTROL__;
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const identity = location.origin === 'https://meny.no' && location.pathname === '/varer' && !location.search && !location.hash;
@@ -3128,10 +3141,11 @@ __DELIVERY_BINDING__
   if (markControl) (confirm[0] || keep[0]).setAttribute('data-meal-concierge-action', 'delivery-confirm');
   return JSON.stringify({ready:true, identity, authenticated:true, selected_count:1, total_selected_count:1, keeping_existing:keep.length === 1, label:norm(selected[0].getAttribute('aria-label') || selected[0].innerText)});
 })()
-""".replace("EXPECTED_SUFFIX", json.dumps(expected_suffix, ensure_ascii=False)).replace("KEEP_ONLY", json.dumps(already_selected))
+"""
 
         def read_confirmation(*, mark: bool) -> dict[str, Any]:
-            observed = self._eval(confirmation_script.replace("MARK_CONTROL", json.dumps(mark)))
+            observed = self._eval(_render_page_script(confirmation_script, EXPECTED_SUFFIX=expected_suffix,
+                                                      KEEP_ONLY=already_selected, MARK_CONTROL=mark))
             if observed.get("identity") is not True:
                 raise HouseholdError("MENY delivery route changed")
             if observed.get("authenticated") is not True:
@@ -3410,9 +3424,10 @@ __DELIVERY_BINDING__
         else:
             raise HouseholdError("MENY order status did not refresh")
         order_total = provider_details.get("order_total", result.get("order_total"))
-        if (provider_details.get("order_total") is not None and result.get("order_total") is not None
-                and round(provider_details["order_total"] * 100) != round(result["order_total"] * 100)):
-            raise HouseholdError("MENY full order total changed between its response and page")
+        if provider_details.get("order_total") is not None and result.get("order_total") is not None:
+            reported_cents = money_cents(provider_details["order_total"])
+            if reported_cents is None or reported_cents != money_cents(result["order_total"]):
+                raise HouseholdError("MENY full order total changed between its response and page")
         return {
             "provider": "meny",
             "orderNumber": order_id,
@@ -3524,10 +3539,15 @@ __DELIVERY_BINDING__
     def checkout_payment_not_dispatched(self, review: Mapping[str, Any], *, deadline: float | None = None) -> bool:
         """Prove that a fenced click never left the unchanged MENY checkout page."""
 
+        summary = review.get("summary") if isinstance(review, Mapping) else None
+        delivery = summary.get("delivery") if isinstance(summary, Mapping) else None
+        display = delivery.get("display") if isinstance(delivery, Mapping) else None
+        if _checkout_total_ore(summary) is None or not isinstance(display, str) or not display.strip():
+            return False
         with self._locked_operation(MENY_READ_TIMEOUT, deadline):
             if vipps_dispatch_attempted(self._invoke("network", "requests")):
                 return False
-            result = self._eval(r"""
+            result = self._eval(_render_review_gate(r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
@@ -3558,7 +3578,7 @@ __DELIVERY_BINDING__
   const exact = checked && homeChecked && targetReady && buttons.length === 1 && blockingDialogs.length === 0 && totalLabels.length === 1 && totals.length === 1 && Math.round(totals[0]*100) === __TOTAL__ && deliveryBinding?.root && deliveryBinding.display === __DELIVERY__ && location.href === __URL__;
   return JSON.stringify({ready:Boolean(exact)});
 })()
-""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling")).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL)))
+""", review))
             if result != {"ready": True}:
                 return False
             return not vipps_dispatch_attempted(self._invoke("network", "requests"))
@@ -3980,7 +4000,7 @@ __DELIVERY_BINDING__
             raise HouseholdError("MENY checkout page changed")
         if reservation.get("lost") is True:
             raise HouseholdError("MENY delivery reservation expired; select the same delivery time again before checkout")
-        payment_summary_script = r"""
+        payment_summary_script = _render_page_script(r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
@@ -4007,9 +4027,8 @@ __DELIVERY_BINDING__
   const priceRows = __IS_NEW_ORDER__ && location.href === 'https://meny.no/kassen' ? (__PRICE_ROWS_READER__)(root) : null;
   return JSON.stringify({ready:buttons.length===1 && totalLabels.length===1 && totals.length===1 && Boolean(deliveryBinding?.root) && Boolean(deliveryBinding.display), authenticated:true, vipps_checked:vippsChecked, home_delivery:homeChecked, submit_enabled:enabled, total:totals[0], delivery:deliveryBinding?.display, submit_controls:buttons.length, price_rows:priceRows});
 })()
-""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace(
-            "__PRICE_ROWS_READER__", CHECKOUT_PRICE_ROWS_JS).replace("__IS_NEW_ORDER__", json.dumps(not order_change)).replace(
-            "__SUBMIT_LABEL__", json.dumps("Send oppdatering" if target_order_id and target_code else "Til betaling"))
+""", script_parts={"DELIVERY_BINDING": CHECKOUT_DELIVERY_BINDING_JS, "PRICE_ROWS_READER": CHECKOUT_PRICE_ROWS_JS},
+            IS_NEW_ORDER=not order_change, SUBMIT_LABEL="Send oppdatering" if target_order_id and target_code else "Til betaling")
         result: dict[str, Any] = {}
         payment_summary: dict[str, Any] | None = None
         for attempt in range(20):
@@ -4082,7 +4101,7 @@ __DELIVERY_BINDING__
                 fresh = self._review_checkout(final_cart, order_change=order_change, retry_disabled_step=True)
                 if not meny_checkout_reviews_match(review, fresh):
                     raise HouseholdError("MENY checkout changed after review")
-                ready = self._eval(r"""
+                ready = self._eval(_render_review_gate(r"""
 (() => {
   document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
@@ -4116,7 +4135,7 @@ __DELIVERY_BINDING__
   buttons[0].setAttribute('data-meal-concierge-action', 'checkout-submit');
   return JSON.stringify({ready:true});
 })()
-""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling")).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL)))
+""", review))
                 if ready != {"ready": True}:
                     raise HouseholdError("MENY Vipps payment control changed")
                 def check_pre_dispatch() -> None:

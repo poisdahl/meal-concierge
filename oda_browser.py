@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 from browser_prerequisites import browser_launch_settings, browser_launch_environment, validate_browser_authority_access
 
@@ -27,7 +27,7 @@ import unicodedata
 from urllib.parse import parse_qs, quote, urlsplit
 
 from checkout_identity import checkout_lines_match, checkout_line_mismatch, review_checkout_lines
-from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, validate_delivery_slot
+from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, money_cents, validate_delivery_slot
 
 
 _JSON_EQUAL_JS = """const sameJson=(a,b)=>{
@@ -218,6 +218,17 @@ def oda_checkout_amount_minor(label: Any, amount_text: Any, *, provider: str = "
     if (discount and signed > 0) or (not discount and signed < 0):
         raise HouseholdError("Oda checkout amount row changed")
     return signed
+
+
+def oda_addition_cents(value: Any) -> int:
+    """Oda addition evidence must specify exact, nonnegative minor units."""
+    if (isinstance(value, bool) or not isinstance(value, (str, int, float))
+            or isinstance(value, str) and re.fullmatch(r"\d+(?:\.\d{1,2})?", value) is None):
+        raise HouseholdError("Oda addition cart amount is unavailable")
+    cents = money_cents(value)
+    if cents is None or Decimal(str(value)) != Decimal(cents).scaleb(-2):
+        raise HouseholdError("Oda addition cart amount is unavailable")
+    return cents
 
 
 def _oda_checkout_amounts_minor(value: Any, *, provider: str = "oda") -> dict[str, Any]:
@@ -1773,22 +1784,9 @@ class OdaBrowser:
         expected.update(order_id=order_id, checkout_url=self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
                         original_minor=original["total_minor"], original_count=original_count)
         if self.checkout_provider == "oda":
-            def exact_minor(value):
-                if (isinstance(value, bool) or not isinstance(value, (str, int, float))
-                        or isinstance(value, str) and re.fullmatch(r"\d+(?:\.\d{1,2})?", value) is None):
-                    raise HouseholdError("Oda addition cart amount is unavailable")
-                try:
-                    cents = Decimal(str(value)) * 100
-                except InvalidOperation as exc:
-                    raise HouseholdError("Oda addition cart amount is unavailable") from exc
-                if (not cents.is_finite() or cents < 0 or cents != cents.to_integral_value()
-                        or cents > 2**53 - 1):
-                    raise HouseholdError("Oda addition cart amount is unavailable")
-                return int(cents)
-
-            if exact_minor(order.get("grossAmount", order.get("subtotal", order.get("total")))) != original["total_minor"]:
+            if oda_addition_cents(order.get("grossAmount", order.get("subtotal", order.get("total")))) != original["total_minor"]:
                 raise HouseholdError("Oda original order total changed")
-            if exact_minor(cart.get("totalGrossAmount")) != expected["total_minor"]:
+            if oda_addition_cents(cart.get("totalGrossAmount")) != expected["total_minor"]:
                 raise HouseholdError("Oda addition cart total changed")
             groups = cart.get("groups")
             rows = ([item for group in groups if isinstance(group, Mapping)
@@ -1796,7 +1794,7 @@ class OdaBrowser:
                     if isinstance(groups, list) else cart.get("items", []))
             added_minor = 0
             for row in rows:
-                added_minor += exact_minor(row.get("totalGrossAmount"))
+                added_minor += oda_addition_cents(row.get("totalGrossAmount"))
                 if added_minor > 2**53 - 1:
                     raise HouseholdError("Oda addition cart amount is unavailable")
             expected["added_minor"] = added_minor
@@ -3296,7 +3294,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             if current != dict(review):
                 raise CheckoutPreconditionError("Oda delivery change changed after confirmation")
             return self._click_checkout_submit(
-                int(round(float(review["summary"]["total"]) * 100)),
+                current["order_amounts"]["payable_minor"],
                 f"{CHECKOUT_URL}?orderNumber={order_id}",
                 before_click,
                 expected_product_count=self._order_product_count(order),
@@ -3678,16 +3676,10 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         if actual_id != order_id:
             raise HouseholdError("Oda order identity changed")
         total = order.get("grossAmount", order.get("subtotal", order.get("total")))
-        if isinstance(total, bool):
+        total_minor = money_cents(total)
+        if total_minor is None:
             raise HouseholdError("Oda order total is unavailable")
-        try:
-            total_value = float(total)
-            if not math.isfinite(total_value):
-                raise ValueError
-            total_minor = int(round(total_value * 100))
-            total_text = f"{total_value:.2f}".replace(".", ",")
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise HouseholdError("Oda order total is unavailable") from exc
+        total_text = f"{total_minor // 100},{total_minor % 100:02d}"
         delivery = next((order[key] for key in ("deliverySlotDisplay", "deliveryDate", "delivery_date") if key in order), "")
         if not isinstance(delivery, str) or not delivery.strip():
             raise HouseholdError("Oda order delivery is unavailable")
@@ -3756,11 +3748,12 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         address = delivery.get("address")
         if not isinstance(address, str) or not address.strip():
             raise HouseholdError("Oda checkout delivery address is unavailable")
+        total_minor = money_cents(summary["total"])
         return {
             "lines": lines,
             "product_count": product_count,
-            "total_text": f"{summary['total']:.2f}".replace(".", ","),
-            "total_minor": int(round(summary["total"] * 100)),
+            "total_text": f"{total_minor // 100},{total_minor % 100:02d}",
+            "total_minor": total_minor,
             "delivery_text": str(delivery.get("display") or ""),
             "delivery_address": unicodedata.normalize("NFC", " ".join(address.split())),
         }
