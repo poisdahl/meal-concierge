@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import sys
 import tempfile
 import threading
@@ -35,6 +36,38 @@ class RpcResilienceTests(unittest.TestCase):
             self.assertTrue(server._connections.acquire(timeout=2), "worker did not release admission")
         for _ in range(count):
             server._connections.release()
+
+    def test_socket_is_private_until_its_group_is_set(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "rpc.sock"
+            server = Server(path, os.getgid(), os.getuid(), mock.Mock())
+            original_mask = os.umask(0)
+            try:
+                def check_initial_mode(path, uid, gid):
+                    self.assertEqual((uid, gid), (-1, server.group))
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+                with (mock.patch("service.os.chown", side_effect=check_initial_mode) as chown,
+                      mock.patch.object(socket.socket, "listen", side_effect=StopIteration),
+                      self.assertRaises(StopIteration)):
+                    server.run()
+                chown.assert_called_once()
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o660)
+            finally:
+                restored_mask = os.umask(original_mask)
+            self.assertEqual(restored_mask, 0)
+
+    def test_bind_failure_restores_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = Server(Path(directory) / "rpc.sock", os.getgid(), os.getuid(), mock.Mock())
+            original_mask = os.umask(0o027)
+            try:
+                with (mock.patch.object(socket.socket, "bind", side_effect=OSError("bind failed")),
+                      self.assertRaisesRegex(OSError, "bind failed")):
+                    server.run()
+            finally:
+                restored_mask = os.umask(original_mask)
+            self.assertEqual(restored_mask, 0o027)
 
     def test_partial_frame_expires_before_dispatch(self):
         server = self.server(capacity=1)

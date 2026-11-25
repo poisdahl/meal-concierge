@@ -13,11 +13,28 @@ def review_method(pending, attempt):
     return choice.get('method')
 
 
-def review_expired(attempt, now=None):
-    if attempt.get('status') != 'awaiting_confirmation':
-        return False
+def _confirmation_deadline(attempt):
     try:
-        expiry = datetime.fromisoformat(attempt.get('expires_at', ''))
-        return expiry.tzinfo is not None and expiry <= (now or datetime.now(timezone.utc))
+        expiry = datetime.fromisoformat(attempt.get('expires_at'))
     except (ValueError, TypeError):
+        return None
+    return expiry if expiry.tzinfo is not None else None
+
+
+def confirmation_deadline_expired(attempt, instant):
+    """Authorization requires a known, future deadline."""
+    expiry = _confirmation_deadline(attempt)
+    return expiry is None or instant >= expiry
+
+
+def can_discard_expired_review(attempt, instant):
+    """Automatic cleanup needs positive evidence that an undispatched review elapsed."""
+    if not isinstance(attempt, Mapping) or attempt.get('status') != 'awaiting_confirmation':
         return False
+    expiry = _confirmation_deadline(attempt)
+    return expiry is not None and instant >= expiry
+
+
+def review_expired(attempt, now=None):
+    return (isinstance(attempt, Mapping) and attempt.get('status') == 'awaiting_confirmation'
+            and confirmation_deadline_expired(attempt, now or datetime.now(timezone.utc)))

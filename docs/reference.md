@@ -774,9 +774,16 @@ explicitly without exposing their private payloads, so an uncertain protected
 operation cannot be mistaken for an idle household.
 
 The socket is mode `0660`, assigned to the configured group, and placed under
-the private meal-concierge directory by the installer. Config, OAuth tokens,
-state and browser profiles stay outside Git. Use `service.py --help` only for
-an advanced manual layout with separate service and agent users.
+the private meal-concierge directory by the installer. The service checks the
+connecting process's UID and admits root (UID 0) and the configured agent UID.
+Every process running as either UID that can reach the socket has the same
+household RPC authority. When a review requires fresh approval, the trusted
+agent asks the user before sending the confirmation ID back to the service.
+The ID identifies the review. The agent is responsible for verifying user approval.
+The service checks that ID against the pending operation and revalidates the
+order details. Config, OAuth tokens, state and browser profiles stay outside
+Git. For a manual layout with separate service and agent users, see
+`service.py --help`.
 
 State is bound to the provider selected at first initialization. Do not switch
 an existing private state directory in place: pending checkout, cancellation,

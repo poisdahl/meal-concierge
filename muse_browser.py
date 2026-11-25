@@ -727,10 +727,11 @@ def original_checkout_completed(facts, pending, order_id):
     start, end = (datetime.fromisoformat(slot[key].replace("Z", "+00:00"))
                   .astimezone(ZoneInfo("Europe/Oslo")) for key in ("start_at", "end_at"))
     payment = re.fullmatch(r"saved Visa \*{4} ([0-9]{4})", facts["payment_method"])
+    observed_total = money_cents(facts["total"])
     return bool(
         start.date() == end.date() and not (start.second or start.microsecond or end.second or end.microsecond)
         and facts["delivery_slot"] == f"{start:%Y-%m-%d %H:%M}-{end:%H:%M}"
-        and money_cents(facts["total"]) == money_cents(summary["total"])
+        and observed_total is not None and observed_total == money_cents(summary["total"])
         and address_text(facts["delivery_address"]).casefold() == address_text(delivery["address"]).casefold()
         and summary.get("payment_method") == "saved_card" and payment
         and pending["browser_review"].get("payment_display") == f"•••• {payment[1]}"

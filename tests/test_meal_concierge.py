@@ -1163,6 +1163,20 @@ class CoreTestsBase:
         self.assertEqual(expected["lines"], [{"product_id": "10", "name": "Fullkornspasta",
                                               "description": "500 g", "brand": "Testmerke", "quantity": 1}])
         self.assertEqual(expected["product_count"], 1)
+        rounded_cart = {**cart, "totalGrossAmount": "1.225000000000000001"}
+        precise = OdaBrowser._cart_expectation(rounded_cart)
+        self.assertEqual((precise["total_minor"], precise["total_text"]), (123, "1,23"))
+        reviewed = cart_summary({**rounded_cart, "amounts": {**summary["amounts"], "provider_total": 1.23}})
+        self.assertEqual(reviewed["total"], reviewed["amounts"]["provider_total"])
+        fractional = cart_summary({**cart, "totalGrossAmount": "1.225",
+                                   "amounts": {**summary["amounts"], "provider_total": 1.225}})
+        self.assertEqual((fractional["total"], fractional["amounts"]["provider_total"]), (1.22, 1.22))
+        with self.assertRaisesRegex(HouseholdError, "inconsistent"):
+            cart_summary({**rounded_cart, "amounts": {**summary["amounts"], "provider_total": 1.22}})
+        with self.assertRaisesRegex(HouseholdError, "inconsistent"):
+            cart_summary({**rounded_cart, "totalBreakdown": {
+                "subtotal": "1.23", "deliveryFee": 0, "productDiscounts": 0, "couponDiscount": 0,
+                "bottleDeposit": 0, "packaging": 0, "surcharge": 0, "total": "1.23"}})
 
         with self.assertRaisesRegex(HouseholdError, "product count changed"):
             OdaBrowser._cart_expectation({**cart, "productQuantityCount": 2})
@@ -1411,6 +1425,9 @@ process.stdout.write(eval(script));
         }
         order = {"grossAmount": 1200.0, "productQuantityCount": 2, "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00", "products": [{"identity": "Brokkoli 400g", "quantity": 2}]}
         self.assertTrue(meny_order_matches_checkout(order, summary))
+        self.assertTrue(meny_order_matches_checkout({**order, "grossAmount": "1.015"}, {**summary, "total": 1.02}))
+        self.assertFalse(meny_order_matches_checkout({**order, "grossAmount": True}, {**summary, "total": 1}))
+        self.assertFalse(meny_order_matches_checkout({**order, "grossAmount": None}, {**summary, "total": None}))
         self.assertFalse(meny_order_matches_checkout({**order, "grossAmount": 1199.0}, summary))
         self.assertFalse(meny_order_matches_checkout({**order, "products": [{"identity": "Blomkål 400g", "quantity": 2}]}, summary))
         self.assertFalse(meny_order_matches_checkout(order, {**summary, "payment": "card"}))
@@ -1434,6 +1451,18 @@ process.stdout.write(eval(script));
         after = {"currency": "NOK", "grossAmount": 125.0, "deliveryDate": "2026-09-05", "deliverySlotDisplay": "Lør 5. sep 09:00 - 12:00", "products": before["products"] + [{"product": {"id": 20, "name": "Såpe"}, "quantity": 1, "totalGrossAmount": "25.00"}]}
         additions = {"total": 25.0, "items": [{"product_id": "20", "quantity": 1}]}
         self.assertTrue(oda_order_matches_addition(before, after, additions))
+        self.assertFalse(oda_order_matches_addition(before, {**after, "grossAmount": 101}, {**additions, "total": True}))
+        for original, observed, added in (
+            ({**before, "grossAmount": 100.004}, after, additions),
+            (before, {**after, "grossAmount": 125.004}, additions),
+            (before, after, {**additions, "total": "25.004"}),
+        ):
+            with self.subTest(original=original["grossAmount"], observed=observed["grossAmount"], added=added["total"]):
+                self.assertFalse(oda_order_matches_addition(original, observed, added))
+                self.assertTrue(oda_order_matches_addition(
+                    {**original, "currency": "SEK", "deliverySlotDisplay": "5 september 09:00-12:00"},
+                    {**observed, "currency": "SEK", "deliverySlotDisplay": "5 september 09:00-12:00"},
+                    added, provider="mathem"))
         for currency in (None, "SEK"):
             self.assertFalse(oda_order_matches_addition({**before, "currency": currency}, after, additions))
             self.assertFalse(oda_order_matches_addition(before, {**after, "currency": currency}, additions))
@@ -1765,6 +1794,8 @@ process.stdout.write(eval(script));
             "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}],
         }
         self.assertTrue(order_matches_checkout(order, summary))
+        self.assertFalse(order_matches_checkout(
+            {**order, "grossAmount": "1.225000000000000001"}, {**summary, "total": 1.22}))
         local_offset_summary = deepcopy(summary)
         local_offset_summary["delivery"]["slot"]["start_at"] = "2026-09-03T07:00:00+02:00"
         local_offset_summary["delivery"]["slot"]["end_at"] = "2026-09-03T13:00:00+02:00"
@@ -6964,6 +6995,19 @@ process.stdout.write(JSON.stringify({result:JSON.parse(eval(js)),opened}));
 
         self.assertTrue(meny_checkout_reviews_match(expected, observed))
 
+    def test_checkout_review_and_payment_gate_use_the_same_rounded_cents(self):
+        review = self.checkout_review()
+        review["summary"]["total"] = 1.015
+        observed = deepcopy(review)
+        observed["summary"]["total"] = 1.02
+        self.assertTrue(meny_checkout_reviews_match(review, observed))
+
+        client = self.client()
+        with (mock.patch.object(client, "_eval", return_value={"ready": False}) as read_gate,
+              self.assertRaisesRegex(HouseholdError, "payment control changed")):
+            client._click_checkout_submit(review, mock.Mock())
+        self.assertIn("Math.round(totals[0]*100) === 102 ", read_gate.call_args.args[0])
+
     def test_checkout_review_identity_rejects_every_protected_change(self):
         expected = self.checkout_review()
 
@@ -8976,6 +9020,19 @@ process.stdout.write(eval(script));
         known_failure.assert_called_once_with()
         exact_checkout.assert_not_called()
 
+    def test_checkout_payment_not_dispatched_rejects_incomplete_reviews_before_browser_access(self):
+        client = self.client()
+        client._locked_operation = mock.Mock()
+        invalid_reviews = [None, {}, {"summary": None}, {"summary": {}}, {"summary": {"total": 1}}]
+        for delivery in (None, "fixture", {}, {"display": False}, {"display": " "}):
+            invalid_reviews.append({"summary": {"total": 1, "delivery": delivery}})
+        for total in (None, True, "19.90", 0, -1, 0.001, float("nan"), 10**100):
+            invalid_reviews.append({"summary": {"total": total, "delivery": {"display": "fixture"}}})
+        for review in invalid_reviews:
+            with self.subTest(review=review):
+                self.assertFalse(client.checkout_payment_not_dispatched(review))
+        client._locked_operation.assert_not_called()
+
     def test_checkout_payment_not_dispatched_requires_exact_page_and_two_empty_logs(self):
         client = self.client()
         client._locked_operation = mock.MagicMock()
@@ -10935,18 +10992,28 @@ class FlowTests(unittest.TestCase):
             app = Application(store, provider, self.browser)
             with mock.patch("service.now", return_value=started):
                 prepared = app.handle({"operation": "checkout", "action": "prepare"})
-            provider.call.reset_mock()
-
-            with mock.patch("service.now", return_value=started + timedelta(minutes=21)):
-                with self.assertRaisesRegex(HouseholdError, "confirmation expired"):
-                    app.handle({
-                        "operation": "checkout",
-                        "action": "confirm",
-                        "confirmation_id": prepared["confirmation_id"],
-                    })
-
-            self.assertIsNone(store.read()["pending_checkout"])
-            provider.call.assert_not_called()
+            pending = store.read()["pending_checkout"]
+            for expiry in (pending["expires_at"], "2099-01-01T00:00:00", "invalid", None):
+                with self.subTest(expiry=expiry):
+                    provider.call.reset_mock()
+                    with store.locked() as state:
+                        state["pending_checkout"] = {**pending, "expires_at": expiry}
+                    with mock.patch("service.now", return_value=started + timedelta(minutes=21)):
+                        with self.assertRaisesRegex(HouseholdError, "confirmation expired"):
+                            app.handle({
+                                "operation": "checkout", "action": "confirm",
+                                "confirmation_id": prepared["confirmation_id"],
+                            })
+                    remaining = store.read()["pending_checkout"]
+                    provider.call.assert_not_called()
+                    if expiry == pending["expires_at"]:
+                        self.assertIsNone(remaining)
+                    else:
+                        self.assertEqual(remaining, {**pending, "expires_at": expiry})
+                        fresh = app.handle({"operation": "checkout", "action": "prepare"})
+                        self.assertNotEqual(fresh["confirmation_id"], prepared["confirmation_id"])
+                        self.assertEqual(store.read()["pending_checkout"]["confirmation_id"], fresh["confirmation_id"])
+                        self.assertEqual(provider.checkout_clicks, 0)
 
     def test_expired_unsubmitted_cancellation_does_not_disable_safe_meny_checkout_recovery(self):
         started = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)

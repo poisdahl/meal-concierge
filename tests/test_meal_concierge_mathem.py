@@ -2521,6 +2521,8 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         # dispatched checkout can be discarded by an automatic occurrence.
         for status, expiry in [('awaiting_confirmation', pending['expires_at']),
                                ('awaiting_confirmation', 'unknown'),
+                               ('awaiting_confirmation', '2026-09-10T13:04:00'),
+                               ('awaiting_confirmation', None),
                                ('uncertain', '2026-09-10T13:04:00+00:00')]:
             with self.subTest(status=status, expiry=expiry):
                 with self.store.locked() as state:

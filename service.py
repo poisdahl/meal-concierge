@@ -1289,7 +1289,13 @@ class Server:
     def run(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with listener_ownership(self.path), socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(str(self.path))
+            # bind() creates the inode. Keep it private until its group is set.
+            # Startup is the only point where we change the process-wide mask.
+            previous_umask = os.umask(0o177)
+            try:
+                listener.bind(str(self.path))
+            finally:
+                os.umask(previous_umask)
             os.chown(self.path, -1, self.group)
             os.chmod(self.path, 0o660)
             listener.listen(16)

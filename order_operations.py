@@ -63,7 +63,10 @@ ODA_VIPPS_ORDER_BINDING_SOURCES = frozenset({
 })
 
 
-from payment_attempts import current_review as checkout_review, review_method
+from payment_attempts import (
+    can_discard_expired_review, confirmation_deadline_expired, current_review as checkout_review,
+    review_method,
+)
 
 class OrderOperations:
     @staticmethod
@@ -72,7 +75,8 @@ class OrderOperations:
         if pending.get("order_change") and isinstance(attempt, Mapping):
             context = attempt.get("vipps_request_context") or {}
             charge = context.get("provider_charge_minor")
-            if type(charge) is int and 0 < charge <= money_cents(summary.get("total")):
+            total = money_cents(summary.get("total"))
+            if type(charge) is int and total is not None and 0 < charge <= total:
                 summary["provider_charge_total"] = charge / 100
         return summary
 
@@ -80,7 +84,8 @@ class OrderOperations:
     def _vipps_context_matches(context, pending, order_id, *, child=False):
         if (not isinstance(context, Mapping)
                 or context.get("order_id") != (order_id if child or pending.get("order_change") else None)
-                or context.get("expected_total") != money_cents(pending["summary"].get("total"))):
+                or type(context.get("expected_total")) is not int
+                or context["expected_total"] != money_cents(pending["summary"].get("total"))):
             return False
         charge = context.get("provider_charge_minor")
         if charge is None:
@@ -1939,7 +1944,7 @@ class OrderOperations:
             raise HouseholdError("no order cancellation is pending")
         if order_id != pending.get("order_id") or confirmation_id != pending.get("confirmation_id"):
             raise HouseholdError("cancellation confirmation does not match the prepared order")
-        if self._now() >= datetime.fromisoformat(pending["expires_at"]):
+        if confirmation_deadline_expired(pending, self._now()):
             raise HouseholdError("cancellation confirmation expired")
         current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
         if pending["status"] != "awaiting_confirmation" or not self._cancellation_order_unchanged(current, pending["before"]):
@@ -1956,7 +1961,7 @@ class OrderOperations:
             pending["status"] = "clicking"
 
             def before_click() -> None:
-                if self._now() >= datetime.fromisoformat(pending["expires_at"]):
+                if confirmation_deadline_expired(pending, self._now()):
                     raise CancellationPreconditionError("cancellation confirmation expired before the final click")
                 if pending.get("order_change_digest"):
                     try:
@@ -2792,8 +2797,9 @@ class OrderOperations:
                         raise HouseholdError("this scheduled occurrence is already running")
                 self._require_menu_provider(state.get("menu"))
                 pending = state.get("pending_checkout")
+                # Only an interactive prepare can replace a manual review with an unknown deadline.
                 if pending and pending.get("status") == "awaiting_confirmation" and (
-                    pending.get("occurrence") or expired_awaiting_confirmation(pending, self._now())
+                    pending.get("occurrence") or can_discard_expired_review(pending, self._now())
                 ):
                     self._abandon_predispatch(state, reason="expired review or scheduled run retried")
                 elif pending:
@@ -2992,7 +2998,7 @@ class OrderOperations:
                 if isinstance(occurrence_record, dict):
                     occurrence_record["status"] = "started"
                     occurrence_record["at"] = self._now().isoformat()
-            if renew_confirmation_id is None and expired_awaiting_confirmation(current_pending, self._now()):
+            if renew_confirmation_id is None and can_discard_expired_review(current_pending, self._now()):
                 state["pending_checkout"] = None
             if self._unresolved_scheduled_effects(state):
                 raise HouseholdError("reconcile the original scheduled delivery effect before preparing checkout")
@@ -3061,7 +3067,7 @@ class OrderOperations:
             )
             if not order_change and menu_already_ordered and not independent_cart and not cart_only:
                 raise HouseholdError("the current menu already belongs to an order; save or select a new menu before a new checkout")
-            if expired_awaiting_confirmation(state.get("pending_cancellation"), self._now()):
+            if can_discard_expired_review(state.get("pending_cancellation"), self._now()):
                 state["pending_cancellation"] = None
             pending_cancellation = deepcopy(state.get("pending_cancellation"))
         inherited_start = first_meal_date is None
@@ -3850,7 +3856,7 @@ class OrderOperations:
             raise CheckoutPreconditionError("Recovery dietary review changed before payment")
         if deadline is not None and time.monotonic() >= deadline:
             raise CheckoutPreconditionError("Recovery request expired before payment")
-        if self._now() >= datetime.fromisoformat(child["expires_at"]):
+        if confirmation_deadline_expired(child, self._now()):
             raise CheckoutPreconditionError("Recovery confirmation expired before payment")
         try:
             self._pending_scheduler_guard(state, pending)
@@ -4075,7 +4081,7 @@ class OrderOperations:
                 if not (current_review or replay):
                     raise HouseholdError("Payment switching must identify the current recovery review")
                 if (child.get("browser_review", {}).get("payment_choice") == payment
-                        and self._now() < datetime.fromisoformat(child["expires_at"])):
+                        and not confirmation_deadline_expired(child, self._now())):
                     return self._recovery_prepared_view(pending)
                 return self._checkout_recovery_prepare_unlocked(deadline, payment, _switch_payment=current_review)
             if pending.get("status") not in UNRESOLVED_CHECKOUT_STATUSES:
@@ -4682,7 +4688,7 @@ class OrderOperations:
             authentication = self._checkout_authentication_wait(pending, deadline)
             if authentication and child.get("payment_action") != "same_order_payment":
                 return authentication
-            if self._now() >= datetime.fromisoformat(child["expires_at"]):
+            if confirmation_deadline_expired(child, self._now()):
                 raise HouseholdError("Recovery confirmation expired; prepare recovery again for the original order")
             if self.store.read()["checkout_payment"] != pending.get("payment_preference", pending["checkout_payment"]):
                 raise HouseholdError("Payment preference changed during recovery")
@@ -4864,10 +4870,12 @@ class OrderOperations:
             return problem
         if current_payment != pending.get("payment_preference", pending.get("checkout_payment")):
             raise HouseholdError("payment preference changed or was not bound; prepare a new summary")
-        if self._now() >= datetime.fromisoformat(pending["expires_at"]):
-            with self.store.locked() as state:
-                if canonical(state.get("pending_checkout")) == canonical(pending):
-                    state["pending_checkout"] = None
+        instant = self._now()
+        if confirmation_deadline_expired(pending, instant):
+            if can_discard_expired_review(pending, instant):
+                with self.store.locked() as state:
+                    if canonical(state.get("pending_checkout")) == canonical(pending):
+                        state["pending_checkout"] = None
             scope = " with cart_only=true" if pending.get("cart_only") else " with weekly=true" if weekly else ""
             raise HouseholdError(f"checkout confirmation expired; prepare a fresh review{scope} before confirming")
         price_review = self._delivery_price_review(pending["summary"], pending.get("order_change"))
@@ -5008,7 +5016,7 @@ class OrderOperations:
                             raise CheckoutPreconditionError("checkout confirmation changed before the final click")
                     if not pending_change:
                         self._require_menu_provider(pending.get("menu"))
-                    if self._now() >= datetime.fromisoformat(pending["expires_at"]):
+                    if confirmation_deadline_expired(pending, self._now()):
                         raise CheckoutPreconditionError("checkout confirmation expired before the final click")
 
                 vipps_dispatched = None
@@ -5556,8 +5564,9 @@ class OrderOperations:
                 except ValueError:
                     pass
             total = ((pending.get("browser_review") or {}).get("summary") or {}).get("total")
-            if isinstance(total, (int, float)):
-                handoff = self.browser.checkout_payment_handoff(round(total * 100), deadline=deadline)
+            total_minor = money_cents(total)
+            if total_minor is not None:
+                handoff = self.browser.checkout_payment_handoff(total_minor, deadline=deadline)
                 if handoff == "mismatch":
                     return {"confirmed": False, "order": None, "tracking": None,
                             "retry_allowed": False, "awaiting_user_payment": False,

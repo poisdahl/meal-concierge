@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 import fcntl
 import hashlib
 import json
@@ -1546,15 +1547,33 @@ def cart_contents(cart: Mapping[str, Any], *, require_quantities: bool = False) 
     return {"items": lines}
 
 
+def money_cents(value: Any) -> int | None:
+    """Round nonnegative provider totals to the nearest cent, ties to even."""
+    if (isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal))
+            or isinstance(value, str) and "_" in value):
+        return None
+    try:
+        amount = Decimal(str(value))
+        if not amount.is_finite() or amount < 0:
+            return None
+        rounded = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+    except (ValueError, InvalidOperation):
+        return None
+    cents = int(rounded * 100)
+    # Checkout totals also cross the JavaScript safe-integer boundary.
+    return cents if cents <= 2**53 - 1 else None
+
+
 def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize supported provider carts with strict checkout amount validation."""
     lines = cart_contents(cart)["items"]
     total = cart.get("totalGrossAmount", cart.get("total", cart.get("subtotal")))
-    try:
-        numeric_total = float(str(total).replace(",", "."))
-    except (TypeError, ValueError) as exc:
-        raise HouseholdError("Cart total is unavailable") from exc
-    if not math.isfinite(numeric_total) or numeric_total < 0:
+    total_minor = money_cents(total.replace(",", ".") if isinstance(total, str) else total)
+    if total_minor is None:
+        raise HouseholdError("Cart total is unavailable")
+    numeric_total = total_minor / 100
+    # The public summary stores a JSON number. Preserve the verified cents on reread.
+    if money_cents(numeric_total) != total_minor:
         raise HouseholdError("Cart total is unavailable")
     slot = cart.get("deliverySlot", cart.get("delivery"))
     if isinstance(slot, Mapping):
@@ -1581,7 +1600,6 @@ def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
         if (isinstance(breakdown, Mapping) and amount_keys <= breakdown.keys()
                 and not set(breakdown) - amount_keys - {"surchargeThresholdDescription"}
                 and all(breakdown[key] is not None for key in amount_keys)):
-            from decimal import Decimal, InvalidOperation
             try:
                 values = {}
                 for key in amount_keys:
@@ -1604,7 +1622,7 @@ def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
                 "deposits": float(values["bottleDeposit"]),
                 "bags": float(values["packaging"]),
                 "other_fees": {"small_order_surcharge": float(values["surcharge"])},
-                "provider_total": float(values["total"]),
+                "provider_total": numeric_total,
             }
     if raw_amounts is not None:
         amount_keys = {
@@ -1616,7 +1634,11 @@ def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
         amounts: dict[str, Any] = {}
         for key in amount_keys:
             amount = raw_amounts.get(key)
-            if key == "other_fees":
+            if key == "provider_total":
+                if type(amount) not in (int, float) or money_cents(amount) != total_minor:
+                    raise HouseholdError("provider checkout total is inconsistent")
+                amounts[key] = numeric_total
+            elif key == "other_fees":
                 if amount is None:
                     amounts[key] = None
                     continue
@@ -1652,8 +1674,6 @@ def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
                 ):
                     raise HouseholdError("provider checkout amounts are invalid")
                 amounts[key] = numeric_amount
-        if amounts["provider_total"] != numeric_total:
-            raise HouseholdError("provider checkout total is inconsistent")
         result["amounts"] = amounts
     elif "totalGrossAmount" in cart:
         result["amounts"] = {
