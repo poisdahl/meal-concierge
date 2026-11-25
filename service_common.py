@@ -297,8 +297,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 raw = str(value.get("raw") or "").strip()
                 if "display_item" in value:
                     raw = item
-                display_notes = value.get("display_notes")
-                if display_notes:
+                display_notes = value.get("display_notes", value.get("notes") if amount else None)
+                if display_notes and not amount:
                     item += " (" + str(display_notes) + ")"
                     raw += " (" + str(display_notes) + ")"
                 text = " ".join(part for part in (amount, item) if part) if amount else raw or item
@@ -310,8 +310,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                         text += tr(' (anslag fra Meal Concierge)', ' (Meal Concierge estimate)')
                     else:
                         text += tr(' (anslag)', ' (estimate)')
-                if amount and "display_notes" not in value and value.get("notes"):
-                    text += " (" + str(value["notes"]) + ")"
+                if amount and display_notes:
+                    text += " (" + str(display_notes) + ")"
             else:
                 text = str(value).strip()
             if text:

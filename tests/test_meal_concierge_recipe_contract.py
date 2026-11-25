@@ -669,6 +669,19 @@ class RecipeContractTests(unittest.TestCase):
         self.assertEqual(_canonical(_stored_recipe_document(frozen_english)), frozen_english)
         self.assertEqual(parse_measure("1 kopp"), (None, "kopp"))
 
+    def test_structured_estimate_labels_precede_cooking_notes_in_both_languages(self):
+        from service_common import menu_email_html
+
+        ingredient = {"item": "lime", "quantity": {"numerator": 1, "denominator": 1},
+                      "unit": "stk", "notes": "juice <only>", "evidence": {"quantity": {
+                          "basis": "estimate", "input": "Approximate amount", "assumptions": "For two servings"}}}
+        for language, label in (("en", "estimate"), ("nb", "anslag")):
+            menu = {"week": "2026-W47", "output_language": language, "salads": [],
+                    "dishes": [{"name": "Lime", "language": language, "ingredients": [ingredient]}]}
+            with self.subTest(language=language):
+                self.assertIn(f"lime ({label}) (juice &lt;only&gt;)", menu_email_html(menu))
+                self.assertIn("lime (juice &lt;only&gt;)", menu_email_html(menu, show_estimate_labels=False))
+
     def test_norwegian_us_liquid_quart_preserves_approximation_and_exact_conversion(self):
         review = {
             "publisher": "Meal Concierge",

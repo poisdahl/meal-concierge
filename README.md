@@ -219,6 +219,5 @@ the cheapest basket or allergen safety: check ingredient labels and the final pr
 
 [Contributing and technical documentation](CONTRIBUTING.md) · [MIT License](LICENSE)
 
-MENY’s batched product lookup draws on
+MENY’s batch lookup builds on
 [Yngve Molnes’s agenter-paa-menyen](https://github.com/YngveMolnes/agenter-paa-menyen).
-The upstream MIT notice is included in [meny_catalog.py](meny_catalog.py).
