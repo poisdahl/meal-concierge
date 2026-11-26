@@ -28,8 +28,8 @@ Use a private owned directory in the Dot’s retained cloud workspace, such as
 checkout, program and household. Use an explicit home on every command. Avoid
 `/tmp` for anything needed between turns. Check the intended home and established
 Dot installation locations before creating one. If the existing home has the
-foreground runner, discover its tools and reuse it. If it holds an older
-external installation, use the update procedure below. A legacy `dots_session.py`
+foreground runner, discover its tools and reuse it. For a requested update of
+an older store-free external installation, use the update procedure below. A legacy `dots_session.py`
 household uses a different layout and ownership model; keep using its original
 commands and registry. Never open it as an installer-managed household.
 
@@ -85,6 +85,7 @@ The separate [MENY native-browser interface](#native-browser-requests-over-stdin
 supports native-browser reads and guarded cart changes where an operator can
 verify the owner-approved account and tab. It covers catalog search, cart,
 saved-menu product planning, delivery-window reads and rendered order reads.
+The catalog additions have been exercised with browser fixtures.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
 
@@ -288,7 +289,8 @@ They do not initialize replacements when anything is missing.
 
 `catalog.products` searches a single query in the signed-in browser, with the
 exact five-item rendered scope described below. `catalog.recipes` searches the
-rendered recipe tab with a limit of one to five. Both are read-only. Use the
+rendered recipe tab with a limit of one to five. Both are read-only and return
+host-attested observations at the supplied browser observation time. Use the
 same original household selection and approved account for every request.
 
 An optional host adapter supports MENY cart `get`, `clear`, `ensure` for a reported

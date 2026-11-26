@@ -23,6 +23,7 @@ from clients import dots
 from core import HouseholdError, StateStore, cart_summary
 from meny import normalize_cart_snapshot, normalize_meny_delivery_slot, meny_order_card_status
 from product_observations import normalize_meny_product_search
+from retailer_recipes import meny_recipe_path
 import on_demand
 from runtime_ownership import file_lock
 from service import Application
@@ -123,7 +124,7 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
             "order_total": None, "payment_status": "unknown", "productQuantityCount": count, "products": items}
 
 
-def normalize_recipe_search_ui(result, query, limit):
+def normalize_recipe_search_ui(result, query, limit, observed_at):
     fields = {"source_url", "query", "authenticated", "ready", "heading_count", "displayed_count", "empty", "recipes"}
     dots.object_fields(result, fields, fields)
     url = urlsplit(result["source_url"]) if isinstance(result["source_url"], str) else None
@@ -139,15 +140,15 @@ def normalize_recipe_search_ui(result, query, limit):
     normalized, seen = [], set()
     for recipe in recipes:
         dots.object_fields(recipe, {"recipe_id", "name", "summary"}, {"recipe_id", "name"})
-        path, name, summary = recipe["recipe_id"], recipe["name"], recipe.get("summary")
-        if (not isinstance(path, str) or re.fullmatch(r"/oppskrifter/[A-Za-z0-9._~%/-]+", path) is None
-                or path.endswith("/") or path in seen or not isinstance(name, str) or not 1 <= len(name.strip()) <= 250
+        path = meny_recipe_path(recipe["recipe_id"])
+        name, summary = recipe["name"], recipe.get("summary")
+        if (path.endswith("/") or path in seen or not isinstance(name, str) or not 1 <= len(name.strip()) <= 250
                 or (summary is not None and (not isinstance(summary, str) or len(summary) > 500))):
             raise HouseholdError("native recipe search requires distinct exact retailer recipe links and names")
         dots.public_path(path)
         seen.add(path)
         normalized.append({**recipe, "name": name.strip(), "recipe_url": "https://meny.no" + path})
-    return {"provider": "meny", "query": query, "recipes": normalized,
+    return {"provider": "meny", "query": query, "recipes": normalized, "observed_at": observed_at.isoformat(),
             "scope": {"source_url": result["source_url"], "requested_size": limit, **RENDERED_UI_EVIDENCE}}
 
 
@@ -288,7 +289,7 @@ class NativeHost:
             raise HouseholdError("original native household/browser configuration changed")
         return state.get("pending_cart_change")
 
-    def exchange(self, operation, arguments, *, deadline=None, write=False):
+    def exchange(self, operation, arguments, *, deadline=None, write=False, observation_time=False):
         binding = self.config.get("browser_binding")
         if binding is None:
             raise HouseholdError("native cloud browser/account/cart binding is required; no browser started")
@@ -335,7 +336,7 @@ class NativeHost:
             raise HouseholdError("native host operation failed; reconcile any pending write without resend")
         if not isinstance(reply["result"], dict):
             raise HouseholdError("native host result must be an object")
-        return reply["result"]
+        return (reply["result"], observed) if observation_time else reply["result"]
 
     def probe(self, **kwargs):
         self.verify_order_change(None, None, deadline=kwargs.get("deadline"))
@@ -352,13 +353,16 @@ class NativeHost:
 
     def call(self, tool, arguments, *, deadline=None, **kwargs):
         if tool == "recipe_search":
+            if (self.request.get("operation"), self.request.get("action")) != ("catalog", "recipes"):
+                raise HouseholdError("use catalog.recipes for native rendered recipe links")
             dots.object_fields(arguments, {"query", "page", "size"}, {"query", "page", "size"})
             query, limit = arguments["query"], arguments["size"]
             if (not isinstance(query, str) or not 1 <= len(query) <= 200 or query != " ".join(query.split())
                     or type(arguments["page"]) is not int or arguments["page"] != 1
                     or type(limit) is not int or not 1 <= limit <= 5):
                 raise HouseholdError("native recipe search requires one bounded first-page query")
-            return normalize_recipe_search_ui(self.exchange(tool, arguments, deadline=deadline), query, limit)
+            result, observed = self.exchange(tool, arguments, deadline=deadline, observation_time=True)
+            return normalize_recipe_search_ui(result, query, limit, observed)
         if tool == "get_orders":
             if (set(arguments) != {"page", "size"} or type(arguments["page"]) is not int
                     or arguments["page"] != 1 or type(arguments["size"]) is not int
@@ -409,7 +413,7 @@ class NativeHost:
                 if self.product_searches:
                     raise HouseholdError("native apply validates one search per command; continue the saved validation")
                 self.product_searches += 1  # Failed replies also consume this command's read allowance.
-            result = self.exchange(tool, arguments, deadline=deadline)
+            result, observed = self.exchange(tool, arguments, deadline=deadline, observation_time=True)
             if (result.get("query") != queries[0] or type(result.get("page")) is not int
                     or result["page"] != 1 or type(result.get("requested_size")) is not int
                     or result["requested_size"] != size
@@ -429,11 +433,13 @@ class NativeHost:
                     dots.public_path(path)
                 except ValueError as exc:
                     raise HouseholdError(str(exc)) from exc
-            normalized = normalize_meny_product_search(result)
+            normalized = normalize_meny_product_search(result, observed_at=observed.isoformat())
             normalized["scope"]["requested_size"] = size
             normalized["scope"]["semantics"] = result["semantics"]
             if result["semantics"] == "bounded_personalized":
                 normalized["scope"]["sort_label"] = result["sort_label"]
+            if self.request.get("operation") == "catalog":
+                normalized["scope"].update(RENDERED_UI_EVIDENCE)
             return normalized
         if tool == "get_cart":
             self.last_cart = normalize_cart_snapshot(self.exchange("get_cart", {}, deadline=deadline))

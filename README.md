@@ -49,8 +49,8 @@ or a ChatGPT Dot's cloud computer**.
 
 - **Python 3.10+ and uv** for installation. The installer manages its own Python
   environment and dependencies.
-- **Linux** needs a working user systemd service manager; **Apple Silicon macOS**
-  needs a logged-in user's launchd session.
+- **Native background services** use user systemd on Linux or a logged-in user's
+  launchd session on Apple Silicon macOS. See the cloud guides for those hosts.
 - **With a store:** agent-browser and Chrome or non-snap Chromium. See
   [shared setup](docs/runtime.md#what-you-need) for supported versions and host
   requirements, or [Grok's browser setup](docs/grok.md#browser-and-login) for its

@@ -781,6 +781,8 @@ raise SystemExit(client.main())
                                    host=lambda frame: self.host(frame, product_window_minimum=100))
         self.assertEqual(code, 0, products)
         self.assertEqual(products["result"]["products"][0]["product_id"], PRODUCT)
+        self.assertEqual(products["result"]["scope"]["backend_freshness"], "unverified")
+        self.assertEqual(products["result"]["scope"]["evidence_kind"], "host_attested_rendered_ui")
         self.assertEqual(self.frames[-1]["effect"], "read")
 
         request = {"operation": "catalog", "action": "recipes", "query": "tomatsuppe", "limit": 2}
@@ -803,6 +805,10 @@ raise SystemExit(client.main())
             code, rejected = self.call(request, host=lambda frame: host(frame, {**found, **changed}))
             self.assertEqual(code, 1, rejected)
             self.assertIn("search scope", rejected["error"])
+        unusable = {**found, "recipes": [{"recipe_id": "/oppskrifter/tomatsuppe%3F", "name": "Tomatsuppe"}]}
+        code, rejected = self.call(request, host=lambda frame: host(frame, unusable))
+        self.assertEqual(code, 1, rejected)
+        self.assertIn("exact recipe search path", rejected["error"])
         self.assertEqual(self.writes, 0)
 
     def test_core_recipe_menu_and_command_recovery_without_provider(self):

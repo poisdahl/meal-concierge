@@ -192,6 +192,10 @@ def call(directory, identifier, request, outputs, make_application, build):
 
 
 def execute(options):
+    if options.action == "call":
+        request = cli.read_request(sys.stdin.buffer)
+        validate_request(request)
+        request.setdefault("response_view", "agent")
     home = options.home.expanduser().resolve(strict=True)
     original_path(home, directory=True)
     with file_lock(home / ".installer.lock"):
@@ -227,9 +231,6 @@ def execute(options):
                         "operations": sorted(TOOLS), "products_actions": ["record_ingredients"],
                         "skill": str(SOURCE / "skill/SKILL.md")}, 0
 
-            request = cli.read_request(sys.stdin.buffer)
-            validate_request(request)
-            request.setdefault("response_view", "agent")
             directory = receipt_directory(state, create=True)
 
             def make_application():
