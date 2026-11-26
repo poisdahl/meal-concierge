@@ -337,7 +337,7 @@ def observe(record, value, key, locks):
         record["frame"] = frame(record, observed=address_time)
     elif status == "verify_add":
         menu = record.get("menu")
-        keep = (menu and menu["mode"] == "keep" and menu["cart_review"]["matches_review"]
+        keep = (menu and menu["mode"] == "keep" and "partial_add_quantities" not in menu and menu["cart_review"]["matches_review"]
                 and menu["add_reply_prices"]["matches_review"])
         record["status"] = "applied" if keep else "added"
     else:

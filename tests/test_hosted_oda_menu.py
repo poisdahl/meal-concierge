@@ -277,3 +277,14 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.assertNotIn("hosted_request", result)
         self.assertFalse(result["dispatch"])
         self.assertEqual(self.step("status"), result)
+
+    def test_keep_mode_does_not_finish_if_an_incomplete_cart_reports_the_full_price(self):
+        write = self.step("observe", **self.reads(self.pre_add(mode="keep")))
+        partial = cart_data({TOMATO: 1, PASTA: 1})
+        partial["groups"][0]["items"][0]["totalGrossAmount"] = amount(2 * TOMATO_PRICE)
+        partial["totalGrossAmount"] = amount(2 * TOMATO_PRICE + PASTA_PRICE)
+        partial["totalBreakdown"].update(subtotal=partial["totalGrossAmount"], total=partial["totalGrossAmount"])
+        result = self.step("observe", **self.reads(self.ack(write, partial), data=partial))
+        self.assertEqual(result["status"], "added")
+        self.assertFalse(result["cart_review"]["quantities_match"])
+        self.assertFalse(result["cart_review"]["matches_review"])

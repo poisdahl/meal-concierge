@@ -151,18 +151,19 @@ def cart_amounts(cart):
 
 def cart_prices(cart, quote):
     expected = {str(row["product_id"]): row for row in quote["items"]}
-    observed, facts_match = {}, True
+    observed, facts_match, quantities_match = {}, True, True
     for group in cart["groups"]:
         for line in group["items"]:
             product = line["product"]
             identity = str(product["id"])
             row = expected[identity]
             observed[identity] = ore(line["totalGrossAmount"])
+            quantities_match &= line["quantity"] == row["package_count"]
             facts_match &= (product["name"] == row["name"]
                             and _oda_ore(product.get("price")) == row["package_price_ore"]
                             and parse_package(product.get("description"), provider="oda") == row["package"])
     breakdown = cart_amounts(cart)
     return {"currency": "NOK", "line_amounts_ore": observed, "breakdown_ore": breakdown,
-            "product_details_match": facts_match,
-            "matches_review": (facts_match and breakdown["subtotal"] == quote["merchandise_ore"]
+            "product_details_match": facts_match, "quantities_match": quantities_match and expected.keys() == observed.keys(),
+            "matches_review": (facts_match and quantities_match and breakdown["subtotal"] == quote["merchandise_ore"]
                                and {key: row["merchandise_ore"] for key, row in expected.items()} == observed)}
