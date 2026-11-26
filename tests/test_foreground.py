@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from contextlib import nullcontext
 from pathlib import Path
 import shutil
 import sys
@@ -12,7 +11,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import HouseholdError, StateStore
+from core import StateStore
 import foreground
 from service import Application
 
@@ -67,13 +66,13 @@ class ForegroundTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different input"):
             self.call({**request, "menu": {}}, identifier=identifier, application=unavailable)
 
-    def test_lost_reply_fences_new_merchant_writes_across_application_restart(self):
+    def test_lost_reply_is_inspectable_without_replaying_the_original_call(self):
         original = str(uuid.uuid4())
-        request = {"operation": "delivery", "action": "select", "slot_ref": "fixture-slot"}
-        dispatched = []
+        request = {"operation": "recipe_delivery", "action": "begin", "job_id": "original-job", "part_id": "part"}
+        entered = []
 
         def crash_after_dispatch(value):
-            dispatched.append(value)
+            entered.append(value)
             raise KeyboardInterrupt
 
         broken = Mock()
@@ -82,37 +81,26 @@ class ForegroundTests(unittest.TestCase):
             self.call(request, identifier=original, application=lambda: broken)
 
         fresh = Mock()
-        fresh.handle.return_value = {"selected": "fixture-slot"}
         response, code = self.call(request, identifier=original, application=lambda: fresh)
         self.assertEqual((response["status"], code), ("incomplete", 1))
-        response, code = self.call(request, application=lambda: fresh)
-        self.assertEqual((response["status"], response["original_request_id"], code),
-                         ("reconciliation_required", original, 1))
         fresh.handle.assert_not_called()
-        self.assertEqual(dispatched, [request])
-
-        verified, code = self.call({"operation": "delivery", "action": "list"}, application=lambda: fresh)
-        self.assertEqual((verified["result"]["selected"], code), ("fixture-slot", 0))
-        self.assertEqual(foreground.unresolved(self.calls), original)
-        foreground.acknowledge(self.calls, original, verified["request_id"],
-                               "Fresh picker confirms the original slot is selected")
-        self.assertIsNone(foreground.unresolved(self.calls))
+        self.assertEqual(entered, [request])
         record = foreground.read_receipt(self.calls, original)
         self.assertNotIn("response", record)
-        self.assertIn("original slot", record["reconciliation"]["evidence"])
+        self.assertEqual(response["receipt_build"]["source_commit"], "a" * 40)
+        self.assertEqual(response["original_target"], {"job_id": "original-job", "part_id": "part"})
 
-    def test_handled_error_after_delivery_dispatch_still_fences_new_writes(self):
-        dispatch = Mock()
-        dispatch.handle.side_effect = HouseholdError("store selected the window but readback was uncertain")
-        request = {"operation": "delivery", "action": "select", "slot_ref": "original-slot"}
-        response, code = self.call(request, application=lambda: dispatch)
-        self.assertEqual((response["outcome"], code), ("unknown", 1))
-        original = response["request_id"]
-        historical, code = foreground.receipt_view(foreground.read_receipt(self.calls, original), original)
-        self.assertEqual(historical["receipt_build"]["source_commit"], "a" * 40)
-        blocked, code = self.call({**request, "slot_ref": "another-slot"}, application=lambda: dispatch)
-        self.assertEqual((blocked["original_request_id"], code), (original, 1))
-        dispatch.handle.assert_called_once()
+    def test_store_dispatch_stops_before_application_or_intent(self):
+        application = Mock()
+        for request in ({"operation": "delivery", "action": "select", "slot_ref": "fixture-slot"},
+                        {"operation": "checkout", "action": "submit"},
+                        {"operation": "products", "action": "apply"},
+                        {"operation": "cart", "action": "ensure"},
+                        {"operation": "orders", "action": "change_begin"}):
+            with self.subTest(request=request), self.assertRaisesRegex(ValueError, "public|record_ingredients"):
+                self.call(request, application=application)
+        application.assert_not_called()
+        self.assertEqual([path.name for path in self.calls.iterdir()], ["ledger.json"])
 
     def test_history_never_restores_native_send_grants(self):
         app = Mock()
@@ -147,40 +135,25 @@ class ForegroundTests(unittest.TestCase):
         historical, code = foreground.receipt_view(record, identifier)
         self.assertEqual((historical["status"], code), ("output_unavailable", 1))
 
-    def test_oda_readiness_requires_authenticated_cart_and_matching_browser(self):
-        app = Mock()
-        app.provider = "oda"
-        app.integration = {"status": "ready"}
-        app._browser_operation.return_value = nullcontext()
-        app._cart_lines.side_effect = Application._cart_lines.__get__(app)
-        app._product_id.side_effect = Application._product_id.__get__(app)
-        app.provider_client.call.side_effect = [
-            {"items": [], "count": 0},
-            {"result": [{"address": "Fixture only", "isSelected": True}]},
-        ]
-        self.assertEqual(foreground.verify_store(app), {"provider": "oda", "authenticated_cart": True,
-                                                        "checkout_account_matches_oauth": True})
-        self.assertEqual([call.args[0] for call in app.provider_client.call.call_args_list],
-                         ["get_cart", "get_delivery_addresses"])
-        self.assertEqual(app.browser.verify_connection_account.call_args.args, ("Fixture only",))
+    def test_existing_cover_receipt_can_use_the_managed_asset_digest(self):
+        jpeg = self.state / "cover.jpg"
+        body = b"immutable managed image fixture"
+        jpeg.write_bytes(body)
+        output = {"output_path": str(jpeg), "bytes": len(body), "image_status": "available", "content_type": "image/jpeg",
+                  "image": {"asset_id": "sha256:" + hashlib.sha256(body).hexdigest()}}
+        self.assertTrue(foreground.output_matches(output))
+        jpeg.write_bytes(b"x" * len(body))
+        self.assertFalse(foreground.output_matches(output))
 
-        app.provider_client.call.side_effect = [{"items": [], "count": 0},
-                                                {"result": [{"address": "Fixture only", "isSelected": True}]}]
-        app.browser.verify_connection_account.side_effect = HouseholdError("browser belongs to another account")
-        response, code = self.call({"operation": "store_check"}, application=lambda: app)
-        self.assertEqual(code, 1)
-        self.assertIn("another account", response["error"])
-
-    def test_meny_readiness_rejects_incomplete_signed_in_cart(self):
+    def test_discovery_and_planning_default_to_interactive(self):
         app = Mock()
-        app.provider = "meny"
-        app._browser_operation.return_value = nullcontext()
-        app._cart_lines.return_value = ({}, {})
-        app.provider_client.call.return_value = {"items": []}
-        with self.assertRaisesRegex(HouseholdError, "complete quantities"):
-            foreground.verify_store(app)
-        self.assertEqual(app.browser.verify_order_change.call_args.args, (None, None))
-        self.assertEqual([call.args[0] for call in app.provider_client.call.call_args_list], ["get_cart"])
+        app.handle.return_value = {}
+        for operation, action in (("recipes", "discover"), ("menu", "plan")):
+            request = {"operation": operation, "action": action}
+            self.call(request, application=lambda: app)
+            app.handle.assert_called_with({**request, "interactive": True})
+            self.call({**request, "interactive": False}, application=lambda: app)
+            app.handle.assert_called_with({**request, "interactive": False})
 
 
 if __name__ == "__main__":

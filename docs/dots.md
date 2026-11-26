@@ -71,30 +71,22 @@ Identical input with that UUID returns the historical receipt. Different input
 conflicts. A recovered receipt grants no new native send authority and checks
 whether an exported file still matches its original bytes.
 
-### Store connections
+### Store availability
 
-An installer-managed store household needs the existing supported dedicated
-browser, visible to the owner for a private sign-in, and its adapter to work in
-the **same cloud execution environment**. Oda also needs the OAuth helper's
-callback to be reachable from that browser. Check these prerequisites before
-making a store installation. An executable version check alone cannot establish
-browser launch, private sign-in, or OAuth callback reachability. Use separate
-program/home/profile paths for Oda and MENY. Follow the shared
-[browser and login procedure](runtime-reference.md#grok-browser-and-login) for
-the required browser configuration and private sign-in. Setup alone never
-authorizes a cart change, delivery reservation, order change or payment.
-After login, use `{"operation":"store_check"}` in a new foreground command.
-It verifies a fresh authenticated ordinary cart and, for Oda, matches the
-dedicated browser account to the retailer OAuth account. It returns status
-without account details or a slot selection.
+The installed foreground runner is for `provider=none`. Oda and full MENY
+shopping use the shared store runtime on a host with a working dedicated
+browser and private sign-in. Oda also requires an authenticated retailer OAuth
+connection and a verified account match in that browser. During Dots testing,
+the executor denied Unix socket creation and its native browser could not reach
+the executor’s OAuth loopback callback. Full Oda and MENY shopping remains
+unverified on this Dots host.
 
-If the managed browser and OAuth cannot run on your Dot, meal planning still
-works through the no-store setup above. A Dot with the supported native browser
-can use the existing [MENY native-browser interface](#native-browser-requests-over-stdinstdout)
-under its separate private core root, subject to the capabilities listed there.
-Native browser sign-in alone does not connect the managed runtime. The native
-MENY interface cannot place orders or reserve delivery. Oda public catalog
-access does not establish an authenticated Oda connection or checkout browser.
+The separate [MENY native-browser interface](#native-browser-requests-over-stdinstdout)
+supports native-browser reads and guarded cart changes where an operator can
+verify the owner-approved account and tab. It covers catalog search, cart,
+saved-menu product planning, delivery-window reads and rendered order reads.
+Delivery reservations, checkout and existing-order changes require the full
+store runtime. Keep each store in its original private household.
 
 ### Attachments and scheduled planning
 
@@ -125,15 +117,10 @@ use `foreground.py tools` and a real call for health. If state or the original
 program selection is missing, recover the original installation before making
 changes. Keep the household, its browser profile and its receipts together.
 
-For an interrupted merchant call, check its original receipt and the shared
-[order and cart recovery guidance](../skill/references/order-recovery.md). A later
-read may establish the original result. Do not use a new UUID to repeat the
-action. When a fresh household command verifies the original result, use
-`acknowledge REQUEST_UUID --checked-receipt READ_UUID --evidence 'verified outcome'`
-to record that reconciliation and release the foreground fence. Core pending
-operations retain their original recovery procedures and authority requirements.
-For a timeout with an unknown ending, keep the fence in place until the result
-can be checked.
+If a foreground request is interrupted, consult its exact UUID and inspect the
+original recipe, menu or delivery job before retrying. For a pending native
+MENY cart change, reconcile in the original household as described below.
+Keep its target registry and operation receipt available through recovery.
 
 Use the existing [Optional Recipe Collection procedure](runtime.md#versioned-recipe-package-integration)
 against the same home. Between foreground calls no service needs stopping.
@@ -269,7 +256,7 @@ result publication stays incomplete and is not replayed.
 ## A persistent foreground core household
 
 `clients/dots_session.py` runs the existing core directly in one bounded
-process. It provides setup, profile, supplied recipes, menus, feedback,
+process. It provides setup, profile, supplied recipes, menus, shopping lists, feedback,
 pantry, recurring items and favorites in a separate private cloud household.
 It starts no socket, server or browser. Initialize a **new** root once:
 
@@ -298,6 +285,11 @@ original private configuration, state, recipe database and ownership files.
 They do not initialize replacements when anything is missing.
 
 ### Native browser requests over stdin/stdout
+
+`catalog.products` searches a single query in the signed-in browser, with the
+exact five-item rendered scope described below. `catalog.recipes` searches the
+rendered recipe tab with a limit of one to five. Both are read-only. Use the
+same original household selection and approved account for every request.
 
 An optional host adapter supports MENY cart `get`, `clear`, `ensure` for a reported
 shortage, read-only `reconcile_change`, and complete managed menu shopping
@@ -457,6 +449,16 @@ Observe the actual rendered search results; selected cards are not a search
 scope. Product fields use the existing MENY DOM normalization, including
 actual package, availability, displayed price and linked detail/deposit
 evidence. Missing facts remain unknown and cannot become payable cost.
+
+`recipe_search` requires the actual signed-in `https://meny.no/sok` URL with
+the exact emitted `query` and `expanded=recipes`. Reply with `source_url`,
+the exact `query`, `authenticated:true`, `ready:true`, `heading_count:1`, and
+the `displayed_count` of result cards. Include the first `size` exact cards
+(or all cards when fewer are displayed) as `recipes`, with `recipe_id` as the
+canonical `/oppskrifter/...` link path, `name`, and an optional `summary`.
+Use `empty:true` only for the verified zero-result state. This returns
+host-attested rendered recipe links; follow the shared recipe import workflow
+to review and save an exact recipe.
 
 `get_delivery_slots` accepts an optional canonical ISO `delivery_date`.
 The native operator opens the existing account's picker, reads its complete

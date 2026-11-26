@@ -15,6 +15,7 @@ import stat
 import sys
 import termios
 import time
+from urllib.parse import parse_qsl, urlsplit
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,11 +28,11 @@ from runtime_ownership import file_lock
 from service import Application
 
 CORE_OPERATIONS = {"health", "setup", "profile", "recipes", "menu", "feedback",
-                   "pantry", "recurring", "product_favorites"}
+                   "pantry", "recurring", "product_favorites", "shopping_list"}
 OWNER_FILES = (".service-owner.lock", "recipes.sqlite3.owner.lock", "state.json.owner.lock")
 MAX_LINE = 65536
 PRODUCTS_APPLY_BUDGET_SECONDS = 600
-ORDER_UI_EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
+RENDERED_UI_EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
 
 
 def order_ui_text(value, *, optional=False):
@@ -65,7 +66,7 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
             or any(type(result[key]) is not int or result[key] != 1
                    for key in ("authenticated_count", "main_count", "heading_count"))):
         raise HouseholdError("native rendered order scope is unavailable")
-    evidence = {**ORDER_UI_EVIDENCE, **order_ui_location(result["source_origin"], result["source_path"],
+    evidence = {**RENDERED_UI_EVIDENCE, **order_ui_location(result["source_origin"], result["source_path"],
                 result["source_query_keys"], result["source_hash"], order_id)}
     if order_id is None:
         count, rows = result["rendered_row_count"], result["orders"]
@@ -120,6 +121,34 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
             "status": meny_order_card_status(order_ui_text(markers[0])) if markers else "unknown",
             "amount_displays": {key: order_ui_text(value) for key, value in amounts.items()},
             "order_total": None, "payment_status": "unknown", "productQuantityCount": count, "products": items}
+
+
+def normalize_recipe_search_ui(result, query, limit):
+    fields = {"source_url", "query", "authenticated", "ready", "heading_count", "displayed_count", "empty", "recipes"}
+    dots.object_fields(result, fields, fields)
+    url = urlsplit(result["source_url"]) if isinstance(result["source_url"], str) else None
+    recipes, count = result["recipes"], result["displayed_count"]
+    if (url is None or (url.scheme, url.netloc, url.path, url.fragment) != ("https", "meny.no", "/sok", "")
+            or sorted(parse_qsl(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2))
+                != [("expanded", "recipes"), ("query", query)]
+            or result["query"] != query or result["authenticated"] is not True or result["ready"] is not True
+            or type(result["heading_count"]) is not int or result["heading_count"] != 1
+            or type(count) is not int or not 0 <= count <= 10000 or result["empty"] is not (count == 0)
+            or not isinstance(recipes, list) or len(recipes) != min(count, limit)):
+        raise HouseholdError("native recipe search scope or rendered results changed")
+    normalized, seen = [], set()
+    for recipe in recipes:
+        dots.object_fields(recipe, {"recipe_id", "name", "summary"}, {"recipe_id", "name"})
+        path, name, summary = recipe["recipe_id"], recipe["name"], recipe.get("summary")
+        if (not isinstance(path, str) or re.fullmatch(r"/oppskrifter/[A-Za-z0-9._~%/-]+", path) is None
+                or path.endswith("/") or path in seen or not isinstance(name, str) or not 1 <= len(name.strip()) <= 250
+                or (summary is not None and (not isinstance(summary, str) or len(summary) > 500))):
+            raise HouseholdError("native recipe search requires distinct exact retailer recipe links and names")
+        dots.public_path(path)
+        seen.add(path)
+        normalized.append({**recipe, "name": name.strip(), "recipe_url": "https://meny.no" + path})
+    return {"provider": "meny", "query": query, "recipes": normalized,
+            "scope": {"source_url": result["source_url"], "requested_size": limit, **RENDERED_UI_EVIDENCE}}
 
 
 class Input:
@@ -267,7 +296,7 @@ class NativeHost:
         self.calls += 1
         if self.calls > 64:
             raise HouseholdError("native host command exceeded its call limit")
-        reply_seconds = 120 if operation in {"get_delivery_slots", "product_search"} and not write else 60
+        reply_seconds = 120 if operation in {"get_delivery_slots", "product_search", "recipe_search"} and not write else 60
         deadline = min(self.deadline, deadline or self.deadline, time.monotonic() + reply_seconds)
         if deadline <= time.monotonic():
             raise HouseholdError("native host operation deadline reached")
@@ -311,7 +340,7 @@ class NativeHost:
     def probe(self, **kwargs):
         self.verify_order_change(None, None, deadline=kwargs.get("deadline"))
         return {"status": "ready", "provider": "meny", "protocol_version": "native-host-stdio-v1",
-                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 7}
+                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 8}
 
     def verify_order_change(self, order_id, code, *, deadline=None):
         if order_id is not None or code is not None:
@@ -322,6 +351,14 @@ class NativeHost:
         return result
 
     def call(self, tool, arguments, *, deadline=None, **kwargs):
+        if tool == "recipe_search":
+            dots.object_fields(arguments, {"query", "page", "size"}, {"query", "page", "size"})
+            query, limit = arguments["query"], arguments["size"]
+            if (not isinstance(query, str) or not 1 <= len(query) <= 200 or query != " ".join(query.split())
+                    or type(arguments["page"]) is not int or arguments["page"] != 1
+                    or type(limit) is not int or not 1 <= limit <= 5):
+                raise HouseholdError("native recipe search requires one bounded first-page query")
+            return normalize_recipe_search_ui(self.exchange(tool, arguments, deadline=deadline), query, limit)
         if tool == "get_orders":
             if (set(arguments) != {"page", "size"} or type(arguments["page"]) is not int
                     or arguments["page"] != 1 or type(arguments["size"]) is not int
@@ -538,6 +575,7 @@ def command(root, value, reader):
         raise ValueError("request_id must be a canonical UUID")
     request = value["request"]
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
+            and not (request.get("operation") == "catalog" and request.get("action") in {"products", "recipes"})
             and not (request.get("operation") == "products" and request.get("action", "prepare") in {"prepare", "get", "apply"})
             and not (request.get("operation") == "delivery" and request.get("action", "list") == "list")
             and not (request.get("operation") == "orders" and request.get("action", "list") in {"list", "get"})

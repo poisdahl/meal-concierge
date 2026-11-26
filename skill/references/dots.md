@@ -11,8 +11,9 @@ provider is ambiguous, find the intended binding before invoking a tool.
 ```
 
 Discover the household, build and installed skill with `tools`. Use the
-public operation and action from the shared skill and the matching program’s
-`docs/reference.md`. For example, `meal_concierge_status` becomes
+public operation and action from the shared skill and `docs/reference.md` in
+the retained source checkout at the reported commit. For example,
+`meal_concierge_status` becomes
 `{"operation":"status"}`. Use `{"operation":"recipes","action":"import",…}`
 for recipe import, `recipes.save` for a reviewed discovery, `menu.get` for the
 saved menu, and `shopping_list.get` for its saved shopping list. Pass exact
@@ -33,7 +34,7 @@ read supplied attachments on the cloud computer before passing a transcript.
 
 For a plan-only native schedule, name the intended household, task and chat in
 the schedule. Reuse the same installed paths on its later turn. Check the
-destination for the actual result. Follow the shared skill's current authority
-and recovery guidance for every store operation, including manual owner login
-and any bank or phone step. Never paste credentials or OAuth callback data
-into a tool request, receipt, chat or attachment.
+destination for the actual result. The foreground runner works with a
+store-free household. For the separate native MENY interface, follow its
+account binding and original receipt recovery in the Dots guide for this
+commit.

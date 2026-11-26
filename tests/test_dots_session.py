@@ -54,14 +54,14 @@ class DotsSessionTests(unittest.TestCase):
     def files(self):
         return {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
 
-    def host(self, frame):
+    def host(self, frame, *, product_window_minimum=110):
         self.assertEqual(frame["browser_binding"], self.binding)
         operation = frame["operation"]
         lifetime = (datetime.fromisoformat(frame["expires_at"])
                     - datetime.fromisoformat(frame["emitted_at"])).total_seconds()
         self.assertGreater(lifetime, 0)
         if operation == "product_search":
-            self.assertGreater(lifetime, 110)
+            self.assertGreater(lifetime, product_window_minimum)
             self.assertLessEqual(lifetime, 120)
         else:
             self.assertLessEqual(lifetime, 60)
@@ -775,6 +775,35 @@ raise SystemExit(client.main())
                 self.assertIn("provider_search_unavailable_or_scope_changed",
                               [row["reason"] for row in plan["unresolved_requirements"]])
                 self.assertEqual(self.writes, 0)
+
+    def test_native_catalog_product_and_recipe_search_are_bound_reads(self):
+        code, products = self.call({"operation": "catalog", "action": "products", "query": "havregryn"},
+                                   host=lambda frame: self.host(frame, product_window_minimum=100))
+        self.assertEqual(code, 0, products)
+        self.assertEqual(products["result"]["products"][0]["product_id"], PRODUCT)
+        self.assertEqual(self.frames[-1]["effect"], "read")
+
+        request = {"operation": "catalog", "action": "recipes", "query": "tomatsuppe", "limit": 2}
+        found = {"source_url": "https://meny.no/sok?query=tomatsuppe&expanded=recipes", "query": "tomatsuppe",
+                 "authenticated": True, "ready": True, "heading_count": 1, "displayed_count": 1,
+                 "empty": False, "recipes": [{"recipe_id": "/oppskrifter/suppe/tomatsuppe", "name": "Tomatsuppe"}]}
+
+        def host(frame, result=found):
+            self.assertEqual((frame["operation"], frame["effect"]), ("recipe_search", "read"))
+            self.assertEqual(frame["arguments"], {"query": "tomatsuppe", "page": 1, "size": 2})
+            return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                    "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
+
+        code, recipes = self.call(request, host=host)
+        self.assertEqual(code, 0, recipes)
+        self.assertEqual(recipes["result"]["scope"]["backend_freshness"], "unverified")
+        self.assertEqual(recipes["result"]["recipes"][0]["recipe_url"], "https://meny.no/oppskrifter/suppe/tomatsuppe")
+        for changed in ({"authenticated": False}, {"recipes": [], "empty": True},
+                        {"source_url": "https://meny.no/sok?query=other&expanded=recipes"}):
+            code, rejected = self.call(request, host=lambda frame: host(frame, {**found, **changed}))
+            self.assertEqual(code, 1, rejected)
+            self.assertIn("search scope", rejected["error"])
+        self.assertEqual(self.writes, 0)
 
     def test_core_recipe_menu_and_command_recovery_without_provider(self):
         recipe = {"name": "Synthetic oats", "portions": 2,
