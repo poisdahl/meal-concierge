@@ -512,6 +512,7 @@ class HostedOdaForegroundTests(unittest.TestCase):
             self.assertEqual(discovered["cart_actions"], ["get"])
             self.assertEqual(discovered["cart_write_command"], "hosted-cart")
             self.assertEqual(discovered["menu_shopping_start"], "begin_menu")
+            self.assertEqual(discovered["menu_shopping_restore"], "restore_menu")
             with self.assertRaisesRegex(ValueError, "read-only actions"):
                 execute("call", b'{"operation":"cart","action":"ensure"}')
             self.assertEqual(execute("receipt")[0]["status"], "not_found")

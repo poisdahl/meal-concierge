@@ -971,7 +971,8 @@ raise SystemExit(dots_session.main())
         self.assertEqual([frame["operation"] for frame in self.frames],
                          ["get_cart", "verify_new_cart", "get_cart"])
         self.assertEqual(self.call(self.ensure(), command_id), (1, original))
-        for request in ({"operation": "orders"}, {"operation": "orders", "action": "get", "order_id": "123456"}):
+        for request in ({"operation": "orders"}, {"operation": "orders", "action": "get", "order_id": "123456"},
+                        {"operation": "catalog", "action": "products", "query": "havregryn"}):
             with self.subTest(request=request):
                 frame_count = len(self.frames)
                 code, blocked = self.call(request)

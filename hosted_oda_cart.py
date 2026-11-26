@@ -21,7 +21,7 @@ ANCHOR_NAME = REGISTRY_NAME + "-identity.json"
 DOT_WORKSPACE = Path("/workspace/shared")
 BINDING_NAME = "hosted-oda-cart-binding.json"
 GENERATION_NAME = "hosted-oda-cart-generation.json"
-FINISHED = {"restored", "aborted", "reconciled_empty", "applied"}
+FINISHED = {"restored", "aborted", "reconciled_empty", "reconciled_baseline", "applied", "unchanged"}
 BEFORE_WRITE = {"reading_baseline", "baseline_verified", "checking_add", "menu_search", "menu_choices", "menu_review"}
 READBACK = {"verify_add", "verify_remove"}
 WRITE_PHASES = {"awaiting_add_response": 1, "awaiting_remove_response": -1}
@@ -31,6 +31,9 @@ READ_TOOLS = ("get_delivery_addresses", "get_cart")
 STATUSES = BEFORE_WRITE | READBACK | NEEDS_RECOVERY | FINISHED | {"added", "checking_remove"}
 JOURNAL_LIMIT = 512 * 1024
 JOURNAL_ENDING_RESERVE = 64 * 1024
+BASELINE_JOURNAL_VERSION = 1
+MENU_MODES = {"keep": "keep", "restore": "restore", "keep_existing": "keep", "restore_existing": "restore",
+              "restore_from_receipt": "restore"}
 
 
 def require_fields(value, fields):
@@ -76,7 +79,8 @@ def verify_record(record):
         raise ValueError("the original hosted Oda cart product is invalid")
     if "menu" in record:
         menu = record["menu"]
-        if not isinstance(menu, dict) or menu.get("mode") not in ("keep", "restore") or not isinstance(menu.get("source"), dict):
+        if (not isinstance(menu, dict) or not isinstance(menu.get("mode"), str)
+                or menu["mode"] not in MENU_MODES or not isinstance(menu.get("source"), dict)):
             raise ValueError("the original hosted Oda menu journal is invalid")
 
 
@@ -132,6 +136,15 @@ def registry(state, directory, *, initialize, allow_unbound=False):
         yield anchor, ledger, saved
 
 
+def supports_baseline_journal(target):
+    module = target / "hosted_oda_cart.py"
+    if not module.is_file():
+        return False
+    with module.open("rb") as stream:
+        declaration = f"BASELINE_JOURNAL_VERSION = {BASELINE_JOURNAL_VERSION}".encode()
+        return declaration in stream.read(8192).splitlines()
+
+
 def require_idle(state, *, target_program=None):
     """Keep the issuing program selectable until its original cart is settled."""
     bound = os.path.lexists(state / BINDING_NAME) or os.path.lexists(state / GENERATION_NAME)
@@ -147,8 +160,11 @@ def require_idle(state, *, target_program=None):
         if current["status"] not in FINISHED:
             if current.get("maintenance_deferred") is not True:
                 raise ValueError("finish the original hosted Oda cart operation before changing its program")
-            if target_program is not None and "menu" in current and not (target_program / "hosted_oda_menu.py").is_file():
-                raise ValueError("the target program cannot read the deferred Oda menu operation; retain a menu-capable release")
+            if target_program is not None and "menu" in current:
+                if not (target_program / "hosted_oda_menu.py").is_file():
+                    raise ValueError("the target program cannot read the deferred Oda menu operation; retain a menu-capable release")
+                if current["menu"]["mode"] not in {"keep", "restore"} and not supports_baseline_journal(target_program):
+                    raise ValueError("the target program cannot preserve the original Oda cart baseline")
         elif "menu" in current:
             archive_record(directory, current)
             write_json(ledger, {**saved, "current": None})
@@ -158,13 +174,31 @@ def now():
     return datetime.now(timezone.utc)
 
 
-def target_quantities(record):
+def baseline_quantities(record):
+    baseline = record.get("menu", {}).get("baseline_cart")
+    return {key: line["quantity"] for key, line in baseline["lines"].items()} if baseline else {}
+
+
+def added_quantities(record):
     if "menu" not in record:
         return {str(record["product_id"]): 1}
     menu = record["menu"]
     if "partial_add_quantities" in menu:
         return menu["partial_add_quantities"]
-    return {str(row["product_id"]): row["package_count"] for row in menu["quote"]["items"]}
+    return {str(row["product_id"]): quantity for row in menu["quote"]["items"]
+            if (quantity := row.get("additional_package_count", row["package_count"])) > 0}
+
+
+def target_quantities(record):
+    target = baseline_quantities(record)
+    for identity, quantity in added_quantities(record).items():
+        target[identity] = target.get(identity, 0) + quantity
+    return target
+
+
+def mutation_arguments(record, sign):
+    return {"operations": [{"productId": int(product_id), "quantity": sign * quantity}
+                           for product_id, quantity in added_quantities(record).items()]}
 
 
 def frame(record, *, observed=None):
@@ -176,13 +210,11 @@ def frame(record, *, observed=None):
              "issued_at": started.isoformat(), "expires_at": expires.isoformat()}
     if observed is not None:
         sign = WRITE_PHASES[record["status"]]
-        return {**value, "tool": "manipulate_cart",
-                "arguments": {"operations": [{"productId": int(product_id), "quantity": sign * quantity}
-                                             for product_id, quantity in target_quantities(record).items()]}}
+        return {**value, "tool": "manipulate_cart", "arguments": mutation_arguments(record, sign)}
     tools = [{"tool": name, "arguments": {}} for name in READ_TOOLS]
     if "menu" in record and record["status"] in {"menu_search", "checking_add"}:
         tools.insert(1, {"tool": "product_search", "arguments": record["menu"]["search_arguments"]})
-        if record["status"] == "menu_search":
+        if record["status"] == "menu_search" and record["menu"].get("preserve_existing") is not True:
             tools.pop()
     return {**value, "tools": tools}
 
@@ -234,7 +266,7 @@ def cart_quantities(cart, *, one_group=False):
 
 
 def cart_matches(cart, record, filled):
-    expected = target_quantities(record) if filled else {}
+    expected = target_quantities(record) if filled else baseline_quantities(record)
     return cart_quantities(cart, one_group="menu" not in record) == expected
 
 
@@ -274,14 +306,36 @@ def menu_search_views(menu, value, observed):
     return hosted_oda.product_search_views(value["catalog"], arguments, observed.isoformat())
 
 
+def menu_review(context, menu, views, choices):
+    review = hosted_oda_menu.quote(context, views, choices)
+    if "baseline_cart" in menu:
+        review = hosted_oda_menu.quote_with_baseline(review, menu["baseline_cart"])
+    return review
+
+
 def observe_menu_search(record, value, key, locks):
-    require_fields(value, ("action", "frame_id", "plugin_id", "address_observed_at",
-                           "products_observed_at", "addresses", "catalog_arguments", "catalog"))
     if record["status"] != "menu_search":
         raise ValueError("no original Oda menu search frame is awaiting a reply")
-    _, observed = bound_times(record, record["frame"], value, key, "products_observed_at")
-    context = approved_menu_source(record, locks)
     menu = record["menu"]
+    pending = record["frame"]
+    if menu.get("preserve_existing") is True:
+        address_time, cart_time = bound_observation(record, pending, value, key, catalog=True)
+        observed = hosted_oda.response_time(value["products_observed_at"])
+        if not address_time <= observed <= cart_time:
+            raise ValueError("the Oda product search must occur between the account and cart reads")
+        quantities = cart_quantities(value["cart"])
+        if quantities is None or len(quantities) > hosted_oda_menu.MAX_BASELINE_LINES:
+            raise ValueError("use an unreserved Oda cart with unique ungrouped items and up to 32 existing lines")
+        baseline = hosted_oda_menu.cart_snapshot(value["cart"])
+        if baseline["amounts_ore"]["subtotal"] != sum(line["amount_ore"] for line in baseline["lines"].values()):
+            raise ValueError("the existing Oda cart line amounts do not match its merchandise subtotal")
+        menu["baseline_cart"] = baseline
+        menu["baseline_amounts_ore"] = baseline["amounts_ore"]
+    else:
+        require_fields(value, ("action", "frame_id", "plugin_id", "address_observed_at",
+                               "products_observed_at", "addresses", "catalog_arguments", "catalog"))
+        _, observed = bound_times(record, pending, value, key, "products_observed_at")
+    context = approved_menu_source(record, locks)
     menu["observations"] = menu_search_views(menu, value, observed)
     menu["candidates"] = hosted_oda_menu.candidates(context, menu["observations"])
     menu["observed_at"] = observed.isoformat()
@@ -294,10 +348,11 @@ def select_menu(record, choices, locks):
         raise ValueError("complete the official Oda menu search before choosing products")
     context = approved_menu_source(record, locks)
     menu = record["menu"]
-    review = hosted_oda_menu.quote(context, menu["observations"], choices)
+    review = menu_review(context, menu, menu["observations"], choices)
     menu.update(choices=choices, quote=review, review_digest=hosted_oda.arguments_digest({
         "source": menu["source"], "quote": review, "mode": menu["mode"], "plugin_id": record["plugin_id"],
         "operation_id": record["operation_id"], "account": record["account"],
+        **({"baseline": menu["baseline_cart"]} if "baseline_cart" in menu else {}),
     }))
     record["status"] = "menu_review"
 
@@ -309,7 +364,7 @@ def verify_menu_prices(record, value, address_time, cart_time, locks):
     menu = record["menu"]
     context = approved_menu_source(record, locks)
     views = menu_search_views(menu, value, observed)
-    if hosted_oda_menu.quote(context, views, menu["choices"]) != menu["quote"]:
+    if menu_review(context, menu, views, menu["choices"]) != menu["quote"]:
         raise ValueError("Oda package or merchandise price changed; prepare and approve a new plan")
 
 
@@ -319,35 +374,56 @@ def observe(record, value, key, locks):
         raise ValueError("no original read frame can accept this observation")
     reprice = status == "checking_add" and "menu" in record
     address_time, cart_time = bound_observation(record, pending, value, key, catalog=reprice)
-    if not cart_matches(value["cart"], record, status in {"verify_add", "checking_remove"}):
+    cart = value["cart"]
+    if not cart_matches(cart, record, status in {"verify_add", "checking_remove"}):
         raise ValueError("the Oda cart has unexpected products, grouped lines or a selected slot")
+    menu = record.get("menu")
+    baseline = menu.get("baseline_cart") if menu else None
+    if baseline and status in {"reading_baseline", "checking_add"} and hosted_oda_menu.cart_snapshot(cart) != baseline:
+        raise ValueError("the existing Oda cart changed after review; prepare a new plan")
     if reprice:
         verify_menu_prices(record, value, address_time, cart_time, locks)
-        if hosted_oda_menu.cart_amounts(value["cart"]) != record["menu"]["baseline_amounts_ore"]:
+        if hosted_oda_menu.cart_amounts(cart) != menu["baseline_amounts_ore"]:
             raise ValueError("the Oda cart amounts changed before application; review a new plan")
-    if status == "verify_add" and "menu" in record:
-        menu = record["menu"]
-        menu["cart_review"] = hosted_oda_menu.cart_prices(value["cart"], menu["quote"])
-        menu["cart_url"] = value["cart"]["url"]
+    if status == "checking_remove" and "restores_operation_id" in record:
+        if hosted_oda.arguments_digest(hosted_oda_menu.cart_snapshot(cart)) != menu["applied_cart_sha256"]:
+            raise ValueError("the Oda cart changed since the applied menu receipt; no restoration was issued")
+    nothing_to_add = reprice and not added_quantities(record)
+    if menu and (status == "verify_add" or nothing_to_add):
+        menu["cart_review"] = hosted_oda_menu.cart_prices(cart, menu["quote"], baseline)
+        menu["cart_url"] = cart["url"]
     record.pop("frame")
     record.pop("recovery_read", None)
     record.pop("recovery_observation", None)
-    if status == "reading_baseline":
-        if "menu" in record:
-            record["menu"]["baseline_amounts_ore"] = hosted_oda_menu.cart_amounts(value["cart"])
+    if nothing_to_add:
+        record["status"] = "unchanged"
+    elif status == "reading_baseline":
+        if menu and baseline is None:
+            menu["baseline_amounts_ore"] = hosted_oda_menu.cart_amounts(cart)
         record["status"] = "baseline_verified"
     elif status in {"checking_add", "checking_remove"}:
         record["status"] = "awaiting_add_response" if status == "checking_add" else "awaiting_remove_response"
         record["frame"] = frame(record, observed=address_time)
     elif status == "verify_add":
-        menu = record.get("menu")
-        keep = (menu and menu["mode"] == "keep" and "partial_add_quantities" not in menu and menu["cart_review"]["matches_review"]
+        keep = (menu and MENU_MODES[menu["mode"]] == "keep" and "partial_add_quantities" not in menu
+                and menu["cart_review"]["matches_review"]
                 and menu["add_reply_prices"]["matches_review"])
         record["status"] = "applied" if keep else "added"
+        if keep:
+            menu["applied_cart_sha256"] = hosted_oda.arguments_digest(hosted_oda_menu.cart_snapshot(cart))
     else:
-        if "menu" in record:
-            record["menu"]["restored_amounts_ore"] = hosted_oda_menu.cart_amounts(value["cart"])
+        record_restoration(record, cart)
         record["status"] = "restored"
+
+
+def record_restoration(record, cart):
+    if "menu" not in record:
+        return
+    menu = record["menu"]
+    menu["restored_amounts_ore"] = hosted_oda_menu.cart_amounts(cart)
+    if "baseline_cart" in menu:
+        menu["restored_lines_match"] = (hosted_oda_menu.cart_snapshot(cart)["lines"] == menu["baseline_cart"]["lines"]
+                                        and menu.get("remove_reply_lines_match", True))
 
 
 def observe_recovery(record, value, key):
@@ -357,20 +433,33 @@ def observe_recovery(record, value, key):
     _, cart_time = bound_observation(record, pending, value, key)
     cart = value["cart"]
     observation = "other_cart"
-    if cart_matches(cart, record, False):
-        observation = "empty_unreserved"
+    baseline_matches = cart_matches(cart, record, False)
+    if baseline_matches:
+        observation = "baseline_unreserved" if baseline_quantities(record) else "empty_unreserved"
     elif cart_matches(cart, record, True):
         observation = "reviewed_products_unreserved" if "menu" in record else "single_test_unit_unreserved"
     record["recovery_observation"] = {"observed_at": cart_time.isoformat(), "cart": observation}
     record.pop("recovery_read")
     status = record["status"]
-    # The normal verification stages are reached only after a matching original
-    # mutation reply. An unverifiable reply can never release this fence.
-    if observation == "empty_unreserved" and status in READBACK | {"added"}:
-        record["status"] = "restored" if status == "verify_remove" else "reconciled_empty"
-        if "menu" in record:
-            record["menu"]["restored_amounts_ore"] = hosted_oda_menu.cart_amounts(cart)
+    # A linked undo carries the earlier add receipt. Only its own inverse
+    # acknowledgement can settle it by observation.
+    can_settle = (status == "verify_remove"
+                  or (status in {"verify_add", "added"} and "restores_operation_id" not in record))
+    if baseline_matches and can_settle:
+        record["status"] = "restored" if status == "verify_remove" else (
+            "reconciled_baseline" if baseline_quantities(record) else "reconciled_empty")
+        record_restoration(record, cart)
         record.pop("frame", None)
+
+
+def partial_additions(record, cart):
+    actual = cart_quantities(cart)
+    baseline = baseline_quantities(record)
+    target = target_quantities(record)
+    if (actual is None or any(actual.get(key, 0) < qty for key, qty in baseline.items())
+            or any(qty > target.get(key, 0) for key, qty in actual.items())):
+        return {}
+    return {key: qty - before for key, qty in actual.items() if qty > (before := baseline.get(key, 0))}
 
 
 def acknowledge(record, value):
@@ -407,18 +496,19 @@ def acknowledge(record, value):
                 if not matches:
                     # An original successful response can prove a bounded partial
                     # effect. It never permits another add, only verified cleanup.
-                    actual = cart_quantities(result)
-                    approved = target_quantities(record)
-                    if actual and all(quantity <= approved.get(identity, 0) for identity, quantity in actual.items()):
-                        menu["partial_add_quantities"] = actual
+                    if partial := partial_additions(record, result):
+                        menu["partial_add_quantities"] = partial
                         matches = True
                 if matches:
-                    menu["add_reply_prices"] = hosted_oda_menu.cart_prices(result, menu["quote"])
+                    menu["add_reply_prices"] = hosted_oda_menu.cart_prices(result, menu["quote"], menu.get("baseline_cart"))
             elif matches:
                 menu["remove_reply_amounts_ore"] = hosted_oda_menu.cart_amounts(result)
+                if "baseline_cart" in menu:
+                    menu["remove_reply_lines_match"] = hosted_oda_menu.cart_snapshot(result)["lines"] == menu["baseline_cart"]["lines"]
     step = "add" if added else "remove"
     record[step + "_response"] = {
         "frame_id": pending["frame_id"], "dispatched_at": dispatched.isoformat(), "observed_at": observed.isoformat(),
+        "arguments_sha256": hosted_oda.arguments_digest(pending["arguments"]),
         "response_sha256": hosted_oda.arguments_digest(result),
         "invocation_sha256": hosted_oda.arguments_digest(invocation) if invocation is not None else None,
         "is_error": value["is_error"]}
@@ -440,15 +530,18 @@ def status_view(record):
     if "menu" in record:
         menu = record["menu"]
         result["menu_ref"] = menu["source"]["menu_ref"]
-        result["mode"] = menu["mode"]
+        result["mode"] = MENU_MODES[menu["mode"]]
         fields = ("observed_at", "quote", "review_digest", "add_reply_prices", "cart_review", "cart_url",
-                  "partial_add_quantities", "baseline_amounts_ore", "remove_reply_amounts_ore", "restored_amounts_ore")
+                  "partial_add_quantities", "baseline_amounts_ore", "remove_reply_amounts_ore", "restored_amounts_ore",
+                  "restored_lines_match")
         for field in fields + ("candidates",) if record["status"] == "menu_choices" else fields:
             if field in menu:
                 result[field] = menu[field]
         if "restored_amounts_ore" in menu:
             result["restoration_amounts_match"] = (menu["baseline_amounts_ore"] == menu["restored_amounts_ore"]
                 and menu.get("remove_reply_amounts_ore", menu["restored_amounts_ore"]) == menu["baseline_amounts_ore"])
+        if "restores_operation_id" in record:
+            result["restores_operation_id"] = record["restores_operation_id"]
     else:
         result["product_id"] = record["product_id"]
     if record["status"] in WRITE_PHASES:
@@ -469,7 +562,8 @@ def advance(record, action):
         record.pop("maintenance_deferred", None)
     elif action == "retry_read" and status in {"reading_baseline", "checking_add", "checking_remove", *READBACK, "menu_search"}:
         pass  # Only an observation can be reissued.
-    elif action == "abort" and status in BEFORE_WRITE:
+    elif action == "abort" and (status in BEFORE_WRITE or
+                               ("restores_operation_id" in record and status in {"checking_remove", "added"})):
         record["status"] = "aborted"
         record.pop("frame", None)
         return
@@ -512,8 +606,10 @@ def initial_record(action, value, account, locks):
     context = locks.enter_context(hosted_oda_menu.source(value["planning_home"], DOT_WORKSPACE))
     if not menu_request_matches(value, context["binding"]):
         raise ValueError("use current menu, shopping list and stock references from the original planning home")
+    preserve = value.get("preserve_existing", False)
+    mode = value["mode"] + "_existing" if preserve else value["mode"]
     return {"account": account, "status": "menu_search",
-            "menu": {"source": context["binding"], "mode": value["mode"],
+            "menu": {"source": context["binding"], "mode": mode, "preserve_existing": preserve,
                      "search_arguments": hosted_oda_menu.search_arguments(context)}}
 
 
@@ -535,6 +631,23 @@ def archive_record(directory, record):
         raise ValueError("the original hosted Oda cart history changed")
 
 
+def initial_restoration(directory, original_id, owner, plugin, generation):
+    path = directory / (original_id + ".json")
+    original = read_private(path, JOURNAL_LIMIT) if os.path.lexists(path) else None
+    verify_record(original)
+    menu = (original or {}).get("menu", {})
+    add_response = (original or {}).get("add_response", {})
+    if (not original or original["operation_id"] != original_id or original["status"] != "applied"
+            or original["owner"] != owner or original["plugin_id"] != plugin
+            or original.get("add_write_generation") != generation
+            or MENU_MODES.get(menu.get("mode")) != "keep" or not menu.get("applied_cart_sha256") or not added_quantities(original)
+            or menu.get("partial_add_quantities") or add_response.get("is_error") is not False
+            or add_response.get("arguments_sha256") != hosted_oda.arguments_digest(mutation_arguments(original, 1))):
+        raise ValueError("restore the latest verified Oda menu that added packages on this original connection")
+    return {"account": original["account"], "status": "checking_remove", "restores_operation_id": original_id,
+            "add_response": add_response, "menu": {**menu, "mode": "restore_from_receipt"}}
+
+
 def write_record(ledger, authority, record):
     value = {**authority, "current": record}
     limit = JOURNAL_LIMIT - JOURNAL_ENDING_RESERVE if record["status"] in BEFORE_WRITE else JOURNAL_LIMIT
@@ -546,16 +659,26 @@ def write_record(ledger, authority, record):
 
 def run(state, directory, operation_id, value, plugin, build):
     action = value.get("action") if isinstance(value, dict) else None
-    beginning = action in ("begin", "begin_menu")
+    new_cart = action in ("begin", "begin_menu")
+    beginning = new_cart or action == "restore_menu"
     if action == "begin":
         require_fields(value, ("action", "product_id", "isolated_new_cart", "authorized_addresses"))
         if not provider_id(value["product_id"]) or value["isolated_new_cart"] is not True:
             raise ValueError("the owner must designate an isolated new cart and one exact Oda product")
     elif action == "begin_menu":
-        require_fields(value, ("action", "planning_home", "menu_ref", "list_ref", "stock_ref", "mode",
-                               "isolated_new_cart", "authorized_addresses"))
+        fields = ("action", "planning_home", "menu_ref", "list_ref", "stock_ref", "mode",
+                  "isolated_new_cart", "authorized_addresses")
+        require_fields(value, fields + ("preserve_existing",) if "preserve_existing" in value else fields)
         if value["isolated_new_cart"] is not True or value["mode"] not in ("keep", "restore"):
-            raise ValueError("designate an empty Oda cart and choose keep or restore for this menu operation")
+            raise ValueError("designate an ordinary Oda cart and choose keep or restore for this menu operation")
+        if type(value.get("preserve_existing", False)) is not bool:
+            raise ValueError("preserve_existing must be true or false")
+    elif action == "restore_menu":
+        require_fields(value, ("action", "applied_operation_id"))
+        original_id = value["applied_operation_id"]
+        if (not isinstance(original_id, str) or original_id == operation_id
+                or str(uuid.UUID(original_id)) != original_id):
+            raise ValueError("restoration requires a new UUID and the exact applied Oda menu UUID")
     elif action == "select_menu":
         require_fields(value, ("action", "choices"))
     elif action == "approve_menu":
@@ -565,8 +688,8 @@ def run(state, directory, operation_id, value, plugin, build):
 
     build = {field: build[field] for field in ("source_commit", "source_sha256", "installed_runtime_sha256")}
     owner = str(state)
-    with registry(state, directory, initialize=beginning) as (anchor, ledger, saved), ExitStack() as locks:
-        account = account_fingerprint(value["authorized_addresses"], saved["key"]) if beginning else None
+    with registry(state, directory, initialize=new_cart) as (anchor, ledger, saved), ExitStack() as locks:
+        account = account_fingerprint(value["authorized_addresses"], saved["key"]) if new_cart else None
         current = saved["current"]
         history_path = directory / (operation_id + ".json")
         if current is not None and current["operation_id"] == operation_id:
@@ -585,18 +708,23 @@ def run(state, directory, operation_id, value, plugin, build):
             if action == "begin" and (record.get("product_id") != value["product_id"]
                                       or not hmac.compare_digest(record["account"], account)):
                 raise ValueError("the operation ID belongs to a different product or account")
-            if action == "begin_menu" and ("menu" not in record or value["mode"] != record["menu"]["mode"]
+            if action == "begin_menu" and ("menu" not in record or "restores_operation_id" in record
+                                          or value["mode"] != MENU_MODES[record["menu"]["mode"]]
+                                          or value.get("preserve_existing", False) != record["menu"].get("preserve_existing", False)
                                           or not menu_request_matches(value, record["menu"]["source"])
                                           or not hmac.compare_digest(record["account"], account)):
                 raise ValueError("the operation ID belongs to a different saved menu or account")
+            if action == "restore_menu" and record.get("restores_operation_id") != original_id:
+                raise ValueError("the operation ID belongs to a different original menu restoration")
             return status_view(record)
         if beginning:
             if current is not None:
                 if current["status"] not in FINISHED:
                     raise ValueError("an original hosted Oda cart operation still owns this registry")
                 archive_record(directory, current)
-            record = {"operation_id": operation_id, "owner": owner, "plugin_id": plugin, "build": build,
-                      **initial_record(action, value, account, locks)}
+            initial = (initial_record(action, value, account, locks) if new_cart else
+                       initial_restoration(directory, original_id, owner, plugin, saved["write_generation"]))
+            record = {"operation_id": operation_id, "owner": owner, "plugin_id": plugin, "build": build, **initial}
             record["frame"] = frame(record)
         elif (record is None or record is not current
                 or (record["build"] != build and not continue_from_other_build(record, action))):
@@ -624,6 +752,8 @@ def run(state, directory, operation_id, value, plugin, build):
 
         dispatch = action == "observe" and record["status"] in WRITE_PHASES
         generation = saved["write_generation"] + int(dispatch)
+        if dispatch and record["status"] == "awaiting_add_response" and "menu" in record:
+            record["add_write_generation"] = generation
         authority = {"key": saved["key"], "write_generation": generation}
         write_record(ledger, authority, record)
         if dispatch:

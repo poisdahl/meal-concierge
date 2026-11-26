@@ -321,6 +321,7 @@ def execute(options):
                             "cart_write_command": "hosted-cart",
                             "menu_shopping_command": "hosted-cart",
                             "menu_shopping_start": "begin_menu",
+                            "menu_shopping_restore": "restore_menu",
                             "skill": str(SOURCE / "skill/SKILL.md")}, 0
                 from meny_public import ACTIONS as MENY_CATALOG_ACTIONS
 

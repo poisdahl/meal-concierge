@@ -17,6 +17,7 @@ from shopping_lists import build_list, effective_ingredient_decisions
 
 MAX_REQUIREMENTS = 8
 MAX_PACKAGES = 24
+MAX_BASELINE_LINES = 32
 
 
 @contextmanager
@@ -161,21 +162,69 @@ def cart_amounts(cart):
             for key in sorted(hosted_oda.BREAKDOWN_FIELDS)}
 
 
-def cart_prices(cart, quote):
-    expected = {str(row["product_id"]): row for row in quote["items"]}
-    observed, facts_match, quantities_match = {}, True, True
+def cart_snapshot(cart):
+    lines = {}
     for group in cart["groups"]:
         for line in group["items"]:
             product = line["product"]
             identity = str(product["id"])
-            row = expected[identity]
-            observed[identity] = ore(line["totalGrossAmount"])
-            quantities_match &= line["quantity"] == row["package_count"]
-            facts_match &= (product["name"] == row["name"]
-                            and _oda_ore(product.get("price")) == row["package_price_ore"]
-                            and parse_package(product.get("description"), provider="oda") == row["package"])
-    breakdown = cart_amounts(cart)
-    return {"currency": "NOK", "line_amounts_ore": observed, "breakdown_ore": breakdown,
-            "product_details_match": facts_match, "quantities_match": quantities_match and expected.keys() == observed.keys(),
-            "matches_review": (facts_match and quantities_match and breakdown["subtotal"] == quote["merchandise_ore"]
-                               and {key: row["merchandise_ore"] for key, row in expected.items()} == observed)}
+            lines[identity] = {"name": product["name"], "quantity": int(line["quantity"]),
+                               "package": parse_package(product.get("description"), provider="oda"),
+                               "package_price_ore": _oda_ore(product.get("price")),
+                               "details_sha256": hosted_oda.arguments_digest(
+                                   {key: product.get(key) for key in ("description", "price")}),
+                               "amount_ore": ore(line["totalGrossAmount"])}
+    return {"lines": lines, "amounts_ore": cart_amounts(cart)}
+
+
+def quoted_cart_lines(quote, baseline):
+    lines = dict(baseline["lines"]) if baseline else {}
+    for row in quote["items"]:
+        identity = str(row["product_id"])
+        original = lines.get(identity, {})
+        quantity = max(row["package_count"], original.get("quantity", 0))
+        price = row["package_price_ore"]
+        lines[identity] = {**original, "name": row["name"], "quantity": quantity, "package": row["package"],
+                           "package_price_ore": price, "amount_ore": quantity * price}
+    return lines
+
+
+def quote_with_baseline(quote, baseline):
+    existing = baseline["lines"]
+    reviewed = quoted_cart_lines(quote, baseline)
+    additions = []
+    for row in quote["items"]:
+        identity = str(row["product_id"])
+        count = existing.get(identity, {}).get("quantity", 0)
+        if count:
+            expected = {**reviewed[identity], "quantity": count, "amount_ore": count * row["package_price_ore"]}
+            if any(existing[identity][key] != value for key, value in expected.items()):
+                raise ValueError("an existing menu product's package or price differs from Oda search")
+        additional = reviewed[identity]["quantity"] - count
+        additions.append({**row, "existing_package_count": count, "additional_package_count": additional,
+                          "additional_merchandise_ore": additional * row["package_price_ore"]})
+    return {**quote, "items": additions,
+            "existing_items": [{"product_id": int(identity), "name": line["name"], "quantity": line["quantity"],
+                                "merchandise_ore": line["amount_ore"]} for identity, line in sorted(existing.items())],
+            "existing_cart_amounts_ore": baseline["amounts_ore"],
+            "additional_package_count": sum(row["additional_package_count"] for row in additions),
+            "additional_merchandise_ore": sum(row["additional_merchandise_ore"] for row in additions),
+            "resulting_merchandise_ore": sum(row["amount_ore"] for row in reviewed.values())}
+
+
+def cart_prices(cart, quote, baseline=None):
+    snapshot = cart_snapshot(cart)
+    expected, actual = quoted_cart_lines(quote, baseline), snapshot["lines"]
+    observed_amounts = {key: row["amount_ore"] for key, row in actual.items()}
+    breakdown = snapshot["amounts_ore"]
+    line_fields = {"quantity", "amount_ore"}
+    product_details_match = (actual.keys() == expected.keys()
+                             and all(all(actual[identity][key] == row[key] for key in row.keys() - line_fields)
+                                     for identity, row in expected.items()))
+    quantities_match = ({key: row["quantity"] for key, row in actual.items()}
+                        == {key: row["quantity"] for key, row in expected.items()})
+    return {"currency": "NOK", "line_amounts_ore": observed_amounts, "breakdown_ore": breakdown,
+            "product_details_match": product_details_match, "quantities_match": quantities_match,
+            "matches_review": (product_details_match and quantities_match
+                               and observed_amounts == {key: row["amount_ore"] for key, row in expected.items()}
+                               and breakdown["subtotal"] == sum(row["amount_ore"] for row in expected.values()))}

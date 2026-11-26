@@ -76,7 +76,8 @@ reconcile uncertain outcomes before another attempt.
 
 The table describes the managed store runtimes. The [ChatGPT Dots guide](dots.md#store-availability)
 lists public MENY search, hosted Oda catalog, cart, delivery and order reads,
-and reviewed Oda saved-menu shopping into a designated empty cart.
+and reviewed Oda saved-menu shopping that preserves existing items in a
+designated, unreserved cart.
 
 Oda and Mathem share their retail connection and checkout implementation, with
 separate accounts, currencies and store-specific payment controls. Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
