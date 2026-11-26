@@ -338,12 +338,21 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.assertEqual(applied["quote"]["additional_merchandise_ore"], 3440)
         self.assertEqual(applied["quote"]["resulting_merchandise_ore"], 9710)
         self.assertEqual(applied["cart_review"]["line_amounts_ore"][str(OATS)], 4980)
+        self.assertEqual(applied["cart_evidence_scope"], "historical_application")
         path = self.registry / (applied_id + ".json")
         original = path.read_bytes()
         self.identifier = str(uuid.uuid4())
+        with self.assertRaisesRegex(ValueError, "latest verified"):
+            cart.run(self.state, self.registry, self.identifier, {"action": "restore_menu", "applied_operation_id": applied_id},
+                     "different_plugin_fixture", self.build)
         checking = self.step("restore_menu", applied_operation_id=applied_id)
         self.assertFalse(checking["dispatch"])
+        self.assertFalse(checking["add_acknowledged"])
+        self.assertEqual(checking["restores_operation_id"], applied_id)
+        self.assertNotIn("cart_review", checking)
         self.assertNotIn("hosted_request", self.step("restore_menu", applied_operation_id=applied_id))
+        with self.assertRaisesRegex(ValueError, "account/address context changed"):
+            self.step("observe", **{**self.reads(checking, data=filled), "addresses": [{"id": 97, "isSelected": True}]})
         with self.assertRaisesRegex(ValueError, "cart changed"):
             changed = cart_data({TOMATO: 2, OATS: 2, PASTA: 1}, oats_price=OATS_PRICE + 1)
             self.step("observe", **self.reads(checking, data=changed))
@@ -351,14 +360,41 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.assertTrue(undo["dispatch"])
         self.assertEqual({row["productId"]: row["quantity"] for row in undo["hosted_request"]["arguments"]["operations"]},
                          {TOMATO: -1, PASTA: -1})
-        result = self.step("observe", **self.reads(self.ack(undo, baseline), data=baseline))
+        received = self.ack(undo, baseline)
+        self.assertEqual(received["status"], "verify_remove")
+        self.assertTrue(received["remove_reply_lines_match"])
+        self.assertTrue(received["independent_cart_read_required"])
+        self.assertNotIn("restored_lines_match", received)
+        self.assertNotIn("restoration_amounts_match", received)
+        result = self.step("observe", **self.reads(received, data=baseline))
         self.assertEqual(result["status"], "restored")
         self.assertTrue(result["restoration_amounts_match"])
         self.assertTrue(result["restored_lines_match"])
+        self.assertNotIn("independent_cart_read_required", result)
         self.assertEqual(path.read_bytes(), original)
         self.identifier = str(uuid.uuid4())
         with self.assertRaisesRegex(ValueError, "latest verified"):
             self.step("restore_menu", applied_operation_id=applied_id)
+
+    def test_damaged_applied_menu_receipt_cannot_start_an_undo(self):
+        applied_id = self.identifier
+        self.apply_existing()
+        path = self.registry / (applied_id + ".json")
+        original = install.bounded_json(path)
+        ledger = self.registry / "ledger.json"
+        before = ledger.read_bytes()
+        self.identifier = str(uuid.uuid4())
+        for damaged in (None, {"items": [None]}):
+            with self.subTest(quote=damaged):
+                edited_menu = dict(original["menu"])
+                if damaged is None:
+                    del edited_menu["quote"]
+                else:
+                    edited_menu["quote"] = damaged
+                install.write_json(path, {**original, "menu": edited_menu})
+                with self.assertRaisesRegex(ValueError, "menu receipt is invalid"):
+                    self.step("restore_menu", applied_operation_id=applied_id)
+                self.assertEqual(ledger.read_bytes(), before)
 
     def test_existing_cart_must_match_at_both_preflight_checks(self):
         original = cart_data({TOMATO: 1, OATS: 2})
@@ -461,11 +497,15 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.identifier = str(uuid.uuid4())
         self.step("restore_menu", applied_operation_id=original)
         self.step("defer")
+        self.build = {**self.build, "source_commit": "e" * 40}
         recovered = self.step("observe_recovery", **self.reads(self.step("recheck"), data=baseline))
         self.assertEqual(recovered["status"], "added")
         self.assertEqual(recovered["recovery_observation"]["cart"], "baseline_unreserved")
         self.assertFalse(recovered["remove_acknowledged"])
-        self.assertEqual(self.step("abort")["status"], "aborted")
+        aborted = self.step("abort")
+        self.assertEqual(aborted["status"], "aborted")
+        self.assertFalse(aborted["dispatch"])
+        self.assertNotIn("hosted_request", aborted)
 
     def test_linked_undo_lost_reply_stays_pending_after_restart_and_baseline_read(self):
         original = self.identifier
@@ -480,6 +520,12 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.assertFalse(evidence["remove_acknowledged"])
         with self.assertRaisesRegex(ValueError, "does not allow"):
             self.step("remove")
+        with patch.object(cart, "now", return_value=hosted_oda.response_time(inverse["hosted_request"]["expires_at"])):
+            self.step("defer")
+        self.build = {**self.build, "source_commit": "e" * 40}
+        with self.assertRaisesRegex(ValueError, "original active hosted Oda operation"):
+            self.step("abort")
+        self.assertEqual(self.step("status")["status"], "awaiting_remove_response")
 
     def test_newer_dispatched_operation_prevents_undo_of_old_keep_even_with_matched_cart(self):
         older = self.identifier

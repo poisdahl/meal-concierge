@@ -219,6 +219,10 @@ menu ingredients, one distinct fixed-size product per ingredient, and up to
 24 required packages. The saved shopping list and its recorded pantry
 decisions determine the quantities.
 
+The private journal and archived receipts retain the bounded baseline's product
+names, package details, quantities and prices for review and recovery. Keep
+these files in the private Dot workspace.
+
 > Prepare my saved Meal Concierge menu for Oda. Use my existing planning
 > household and the Oda app attached to this chat. Show the ingredient
 > matches, packages already in my cart, packages still needed and merchandise
@@ -253,8 +257,10 @@ stage below runs on the selected Oda program with private JSON on stdin:
    returned `quote` lists coverage, package counts already present and still
    needed, merchandise prices in øre, unanswered stock rows and any dietary
    evidence gaps. Show the owner the exact additions and resulting merchandise
-   subtotal. Deposits, discounts, fees and delivery appear separately in the
-   verified cart.
+   subtotal. `package_count` and `merchandise_ore` describe the full menu
+   requirement. The `additional_*` fields describe the cart change. Deposits,
+   discounts, fees and delivery appear separately in the verified cart. An
+   overlapping cart line must agree with the selected catalog price and pack.
 4. After the owner's explicit approval of that quote, send
    `action:"approve_menu"` with the exact `review_digest`. Use the normal
    `observe`, `add` and `acknowledge`
@@ -281,9 +287,18 @@ cart write through any hosted Oda installation in this workspace. Keep exclusive
 use of the cart from applying the menu through finishing the undo. The cart
 must still match the applied receipt exactly. Continue with the emitted address
 and cart checks, followed by `observe`, `acknowledge` and independent readback.
-The inverse removes only the quantities that receipt added. Both receipts remain
-readable. Older receipts created before this feature may lack the evidence
-required to undo them.
+The inverse removes only the quantities that receipt added. The applied receipt
+remains a record of the historical application. The separate undo receipt points
+to it and reports the undo's own acknowledgement and verification. Use a fresh
+cart read for current contents. Older receipts created before this feature may
+lack the evidence required to undo them.
+
+After the inverse acknowledgement, `verify_remove` with
+`independent_cart_read_required:true` calls for the emitted independent address
+and cart reads. Submit those with `observe` on the same UUID. Use `retry_read`
+if the read frame expired. The final restoration flags appear after that read.
+If you defer a linked undo before it issues an inverse, a compatible program
+update can abort the unsent undo using its original UUID.
 
 If the original successful add returned only an exact subset of the approved
 products and quantities, check `partial_add_quantities`. A fresh matching

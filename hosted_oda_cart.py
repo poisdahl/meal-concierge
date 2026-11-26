@@ -526,29 +526,37 @@ def acknowledge(record, value):
 
 
 def status_view(record):
+    linked_undo = "restores_operation_id" in record
     result = {"ok": True, "status": record["status"], "operation_id": record["operation_id"],
               "source_commit": record["build"]["source_commit"],
-              "add_acknowledged": "add_response" in record, "remove_acknowledged": "remove_response" in record,
+              "add_acknowledged": "add_response" in record and not linked_undo,
+              "remove_acknowledged": "remove_response" in record,
               "evidence": hosted_oda.EVIDENCE, "backend_freshness": "unverified", "dispatch": False}
     if "menu" in record:
         menu = record["menu"]
         result["menu_ref"] = menu["source"]["menu_ref"]
         result["mode"] = MENU_MODES[menu["mode"]]
-        fields = ("observed_at", "quote", "review_digest", "add_reply_prices", "cart_review", "cart_url",
-                  "partial_add_quantities", "baseline_amounts_ore", "remove_reply_amounts_ore", "restored_amounts_ore",
-                  "restored_lines_match")
+        fields = ("baseline_amounts_ore", "remove_reply_amounts_ore", "restored_amounts_ore",
+                  "remove_reply_lines_match", "restored_lines_match")
+        if not linked_undo:
+            fields += ("observed_at", "quote", "review_digest", "add_reply_prices", "cart_review", "cart_url",
+                       "partial_add_quantities")
         for field in fields + ("candidates",) if record["status"] == "menu_choices" else fields:
             if field in menu:
                 result[field] = menu[field]
         if "restored_amounts_ore" in menu:
             result["restoration_amounts_match"] = (menu["baseline_amounts_ore"] == menu["restored_amounts_ore"]
                 and menu.get("remove_reply_amounts_ore", menu["restored_amounts_ore"]) == menu["baseline_amounts_ore"])
-        if "restores_operation_id" in record:
+        if linked_undo:
             result["restores_operation_id"] = record["restores_operation_id"]
+        elif record["status"] == "applied":
+            result["cart_evidence_scope"] = "historical_application"
     else:
         result["product_id"] = record["product_id"]
     if record["status"] in WRITE_PHASES:
         result["pending_response"] = {key: record["frame"][key] for key in ("frame_id", "issued_at", "expires_at")}
+    if record["status"] == "verify_remove":
+        result["independent_cart_read_required"] = True
     if "recovery_observation" in record:
         result["recovery_observation"] = record["recovery_observation"]
     if record.get("maintenance_deferred") is True:
@@ -581,6 +589,9 @@ def continue_from_other_build(record, action):
         return False
     if action in {"acknowledge", "recheck", "observe_recovery", "defer"}:
         return True
+    if action == "abort":
+        # Deferring the linked undo's pre-write check retired its sole frame.
+        return "restores_operation_id" in record and record["status"] == "added"
     return action in {"observe", "retry_read"} and record["status"] in READBACK
 
 
@@ -647,10 +658,15 @@ def initial_restoration(directory, original_id, owner, plugin, generation):
     if (not original or original["operation_id"] != original_id or original["status"] != "applied"
             or original["owner"] != owner or original["plugin_id"] != plugin
             or original.get("add_write_generation") != generation
-            or MENU_MODES.get(menu.get("mode")) != "keep" or not menu.get("applied_cart_sha256") or not added_quantities(original)
-            or menu.get("partial_add_quantities") or add_response.get("is_error") is not False
-            or add_response.get("arguments_sha256") != hosted_oda.arguments_digest(mutation_arguments(original, 1))):
+            or MENU_MODES.get(menu.get("mode")) != "keep" or not menu.get("applied_cart_sha256")
+            or menu.get("partial_add_quantities") or not isinstance(add_response, dict) or add_response.get("is_error") is not False):
         raise ValueError("restore the latest verified Oda menu that added packages on this original connection")
+    try:
+        approved_add = mutation_arguments(original, 1)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise ValueError("the original hosted Oda menu receipt is invalid") from None
+    if not approved_add["operations"] or add_response.get("arguments_sha256") != hosted_oda.arguments_digest(approved_add):
+        raise ValueError("the original hosted Oda menu receipt is invalid")
     return {"account": original["account"], "status": "checking_remove", "restores_operation_id": original_id,
             "add_response": add_response, "menu": {**menu, "mode": "restore_from_receipt"}}
 

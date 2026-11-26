@@ -51,8 +51,9 @@ that quote to approve a cart write. Continue in the separate Oda home with
 `preserve_existing:true` on the same authorized unreserved cart. Revalidate
 the baseline and prices with the emitted reads before applying the shortfall.
 Use `menu_shopping_restore` only at the owner's request, with the exact latest
-verified application and a fresh matching cart. Keep writes out of scheduled
-planning.
+verified application and a fresh matching cart. After `verify_remove`, complete
+the independent cart read before checking the final restoration flags. Keep
+writes out of scheduled planning.
 
 When the owner explicitly designates the connected active cart for one
 reversible product test and discovery shows `cart_write_command`, use the
