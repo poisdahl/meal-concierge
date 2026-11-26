@@ -178,6 +178,9 @@ class HostedCartTest(unittest.TestCase):
             self.dispatch_add()
             with self.assertRaisesRegex(ValueError, "before changing its program"):
                 cart.require_idle(self.state)
+            (self.state / cart.BINDING_NAME).unlink()
+            with self.assertRaisesRegex(ValueError, "before changing its program"):
+                cart.require_idle(self.state)
             cart.require_idle(second)
 
     def test_expiry_freezes_writes_but_can_record_actual_original_response_after_restart(self):
@@ -213,6 +216,16 @@ class HostedCartTest(unittest.TestCase):
                      "isolated_new_cart": True, "authorized_addresses": [{"id": 7, "isSelected": True}]},
                      self.plugin, self.build)
         self.assertFalse(self.registry.exists())
+
+    def test_restored_older_ledger_cannot_duplicate_original_dispatch(self):
+        self.run_step("observe", **self.observation(self.begin()))
+        checking = self.run_step("add")
+        ledger = self.registry / "ledger.json"
+        previous = ledger.read_bytes()
+        self.assertTrue(self.run_step("observe", **self.observation(checking))["dispatch"])
+        ledger.write_bytes(previous)
+        with self.assertRaisesRegex(ValueError, "workspace write generation disagree"):
+            self.run_step("observe", **self.observation(checking))
 
     def test_prewrite_abort_and_archived_id_never_issue_again(self):
         original = self.identifier

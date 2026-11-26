@@ -256,7 +256,9 @@ the Dot with a private JSON object on stdin for each stage:
 `action:"status"` reads the original private journal. It never issues a
 mutation. `action:"retry_read"` replaces only an outstanding read frame.
 After a lost mutation reply, retain the original operation, its installed
-build and the retained workspace registry. Use the original attached tool
+build, the retained workspace registry and its sibling identity file. Keep
+their latest versions together when restoring workspace files. A mismatched
+write generation blocks new mutations. Use the original attached tool
 result if it becomes available. Stop on a divergent response, changed
 connection, or unknown ending. Use a separate `cart.get` to inspect actual
 quantities while resolving the original operation without repeating a delta.

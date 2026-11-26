@@ -69,7 +69,7 @@ def verify_record(record):
 
 
 @contextmanager
-def registry(state, directory, *, initialize):
+def registry(state, directory, *, initialize, allow_unbound=False):
     binding_file = state / BINDING_NAME
     binding = read_private(binding_file) if os.path.lexists(binding_file) else None
     if (not directory.is_absolute() or directory.name != REGISTRY_NAME
@@ -79,7 +79,7 @@ def registry(state, directory, *, initialize):
         require_fields(binding, ("registry", "key"))
         if binding["registry"] != str(directory):
             raise ValueError("use the original hosted Oda cart registry")
-    elif not initialize:
+    elif not initialize and not allow_unbound:
         raise ValueError("this household has no hosted Oda cart registry binding")
 
     anchor = directory.parent / ANCHOR_NAME
@@ -87,36 +87,44 @@ def registry(state, directory, *, initialize):
         ledger = directory / "ledger.json"
         if not os.path.lexists(anchor) and not os.path.lexists(directory) and binding is None and initialize:
             key = uuid.uuid4().hex
-            write_json(anchor, {"key": key})
+            write_json(anchor, {"key": key, "write_generation": 0})
             directory.mkdir(mode=0o700)
             _sync_directory(directory.parent)
-            write_json(ledger, {"key": key, "current": None})
+            write_json(ledger, {"key": key, "write_generation": 0, "current": None})
         anchor_value = read_private(anchor)
-        require_fields(anchor_value, ("key",))
+        require_fields(anchor_value, ("key", "write_generation"))
         private_path(directory, stat.S_ISDIR)
         saved = read_private(ledger)
-        require_fields(saved, ("key", "current"))
+        require_fields(saved, ("key", "write_generation", "current"))
         verify_record(saved["current"])
         key = saved["key"]
         if (key != anchor_value["key"] or not isinstance(key, str) or len(key) != 32
                 or any(char not in "0123456789abcdef" for char in key)):
             raise ValueError("the original hosted Oda cart registry is invalid")
+        generation = saved["write_generation"]
+        if (type(generation) is not int or generation < 0 or type(anchor_value["write_generation"]) is not int
+                or generation != anchor_value["write_generation"]):
+            raise ValueError("the hosted Oda cart ledger and workspace write generation disagree")
         expected = {"registry": str(directory), "key": key}
-        if binding is None:
+        if binding is None and initialize:
             write_json(binding_file, expected)
-        elif binding != expected:
+        elif binding is not None and binding != expected:
             raise ValueError("the original hosted Oda cart registry binding changed")
-        yield ledger, saved
+        yield anchor, ledger, saved
 
 
 def require_idle(state):
     """Keep the issuing program selectable until its original cart is settled."""
-    if os.path.lexists(state / BINDING_NAME):
-        directory = workspace_registry(state)
-        with registry(state, directory, initialize=False) as (_, saved):
-            current = saved["current"]
-            if current and current["owner"] == str(state) and current["status"] not in FINISHED:
-                raise ValueError("finish the original hosted Oda cart operation before changing its program")
+    bound = os.path.lexists(state / BINDING_NAME)
+    if not bound and not state.is_relative_to(DOT_WORKSPACE):
+        return
+    directory = workspace_registry(state)
+    if not (bound or os.path.lexists(directory) or os.path.lexists(directory.parent / ANCHOR_NAME)):
+        return
+    with registry(state, directory, initialize=False, allow_unbound=True) as (_, _, saved):
+        current = saved["current"]
+        if current and current["owner"] == str(state) and current["status"] not in FINISHED:
+            raise ValueError("finish the original hosted Oda cart operation before changing its program")
 
 
 def now():
@@ -285,7 +293,7 @@ def run(state, directory, operation_id, value, plugin, build):
 
     build = {field: build[field] for field in ("source_commit", "source_sha256", "installed_runtime_sha256")}
     owner = str(state)
-    with registry(state, directory, initialize=action == "begin") as (ledger, saved):
+    with registry(state, directory, initialize=action == "begin") as (anchor, ledger, saved):
         account = account_fingerprint(value["authorized_addresses"], saved["key"]) if action == "begin" else None
         current = saved["current"]
         history_path = directory / (operation_id + ".json")
@@ -328,8 +336,14 @@ def run(state, directory, operation_id, value, plugin, build):
         else:
             advance(record, action)
 
-        write_json(ledger, {"key": saved["key"], "current": record})
+        dispatch = record["status"] in WRITE_PHASES
+        generation = saved["write_generation"] + int(dispatch)
+        authority = {"key": saved["key"], "write_generation": generation}
+        write_json(ledger, {**authority, "current": record})
+        if dispatch:
+            # Both files must agree before an external mutation can be issued.
+            write_json(anchor, authority)
         result = status_view(record)
         if "frame" in record:
-            result.update(hosted_request=record["frame"], dispatch=record["status"] in WRITE_PHASES)
+            result.update(hosted_request=record["frame"], dispatch=dispatch)
         return result
