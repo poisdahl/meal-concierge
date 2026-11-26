@@ -166,7 +166,7 @@ class HostedCartTest(unittest.TestCase):
         with patch.object(cart, "DOT_WORKSPACE", self.state.parent):
             cart.require_idle(self.state)
 
-    def test_successful_divergent_ending_and_fresh_empty_cart_can_close(self):
+    def test_divergent_original_ending_and_fresh_empty_cart_cannot_close(self):
         issued = self.dispatch_add()
         ending = self.run_step("acknowledge", **self.acknowledgement(issued, 0))
         self.assertEqual(ending["status"], "add_response_unverified")
@@ -174,10 +174,10 @@ class HostedCartTest(unittest.TestCase):
         self.assertEqual(reading["status"], "add_response_unverified")
         with self.assertRaisesRegex(ValueError, "account/address context changed"):
             self.run_step("observe_recovery", **self.observation(reading, account=8))
-        closed = self.run_step("observe_recovery", **self.observation(reading))
-        self.assertEqual(closed["status"], "reconciled_empty")
-        self.assertTrue(closed["add_acknowledged"])
-        self.assertFalse(closed["dispatch"])
+        observed = self.run_step("observe_recovery", **self.observation(reading))
+        self.assertEqual(observed["status"], "add_response_unverified")
+        self.assertTrue(observed["add_acknowledged"])
+        self.assertFalse(observed["dispatch"])
 
     def test_unknown_reply_allows_read_recheck_and_maintenance_without_reissuing(self):
         issued = self.dispatch_add()
@@ -190,7 +190,7 @@ class HostedCartTest(unittest.TestCase):
         self.assertNotIn("hosted_request", observed)
         with self.assertRaisesRegex(ValueError, "expire"):
             self.run_step("defer")
-        ack = self.acknowledgement(issued, 0)
+        ack = self.acknowledgement(issued)
         after = expiry + timedelta(seconds=5)
         with patch.object(cart, "now", return_value=after):
             deferred = self.run_step("defer")
@@ -199,7 +199,7 @@ class HostedCartTest(unittest.TestCase):
             self.assertNotIn("hosted_request", deferred)
             self.build["source_sha256"] = "d" * 64
             ended = self.run_step("acknowledge", **{**ack, "observed_at": after.isoformat()})
-            self.assertEqual(ended["status"], "add_response_unverified")
+            self.assertEqual(ended["status"], "verify_add")
             self.assertFalse(ended["dispatch"])
             with self.assertRaisesRegex(ValueError, "original active"):
                 self.run_step("remove")
@@ -243,8 +243,6 @@ class HostedCartTest(unittest.TestCase):
         self.run_step("observe", **self.observation(add_read, 1))
         removing = self.run_step("observe", **self.observation(self.run_step("remove"), 1))
         self.run_step("acknowledge", **self.acknowledgement(removing, 0))
-        with self.assertRaisesRegex(ValueError, "fresh divergent readback"):
-            self.run_step("defer")
         observed = self.run_step("observe_recovery", **self.observation(self.run_step("recheck"), 1))
         self.assertEqual(observed["status"], "verify_remove")
         deferred = self.run_step("defer")
@@ -254,6 +252,28 @@ class HostedCartTest(unittest.TestCase):
         result = self.run_step("observe", **self.observation(self.run_step("retry_read")))
         self.assertEqual(result["status"], "restored")
         self.assertFalse(result["dispatch"])
+
+    def test_changed_context_before_inverse_allows_maintenance_with_fence(self):
+        issued = self.dispatch_add()
+        read = self.run_step("acknowledge", **self.acknowledgement(issued))
+        self.run_step("observe", **self.observation(read, 1))
+        pre_remove = self.run_step("remove")
+        with self.assertRaisesRegex(ValueError, "account/address context changed"):
+            self.run_step("observe", **self.observation(pre_remove, 1, account=8))
+        deferred = self.run_step("defer")
+        self.assertEqual(deferred["status"], "added")
+        self.assertFalse(deferred["dispatch"])
+        self.assertNotIn("hosted_request", deferred)
+        with self.assertRaisesRegex(ValueError, "no original read frame"):
+            self.run_step("observe", **self.observation(pre_remove, 1))
+        with patch.object(cart, "DOT_WORKSPACE", self.state.parent):
+            cart.require_idle(self.state)
+        self.build["source_sha256"] = "d" * 64
+        with self.assertRaisesRegex(ValueError, "original active"):
+            self.run_step("remove")
+        self.identifier = str(uuid.uuid4())
+        with self.assertRaisesRegex(ValueError, "original.*still owns"):
+            self.begin()
 
     def test_stale_pre_dispatch_address_cannot_open_a_new_write_window(self):
         self.run_step("observe", **self.observation(self.begin()))

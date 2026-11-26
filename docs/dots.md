@@ -258,16 +258,17 @@ mutation. `action:"retry_read"` replaces only an outstanding read frame.
 After a lost or divergent reply, use `action:"recheck"` for a fresh address and
 cart frame and reply with `action:"observe_recovery"` using the observation
 fields above. It records whether the bound cart is empty and unreserved,
-contains just the test unit, or differs. After an original successful
-mutation response, a verified empty cart may close as `reconciled_empty`.
-This disposition records the observed cart without claiming that both test
-legs succeeded. An empty cart after an error or a missing original response
-leaves the operation pending.
+contains just the test unit, or differs. If the original add response showed
+the exact test unit and no removal was issued, a verified empty cart can close
+as `reconciled_empty`. This records the observed cart without claiming a
+test removal succeeded. An empty cart after a divergent, failed or missing
+original response leaves the operation pending.
 
-Use `action:"defer"` after an ambiguous terminal response, fresh divergent
-recovery readback, or expiry of an outstanding mutation frame. This permits
-program maintenance while retaining the original operation and workspace
-write fence. A compatible
+After an add has been issued, use `action:"defer"` to permit program
+maintenance while retaining the original operation and workspace write
+fence. An outstanding mutation frame must expire first. If cleanup has
+started but its mutation has yet to be granted, deferral retires the old
+read frame. A compatible
 updated program can inspect, recheck and accept the actual original reply if
 it later becomes available. Continue an authorized cleanup only with the
 original, verified program and fresh bind and cart checks. Keep the original

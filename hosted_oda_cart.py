@@ -221,6 +221,7 @@ def observe(record, value, key):
         raise ValueError("the isolated Oda cart has unexpected products, grouped lines or a selected slot")
     record.pop("frame")
     record.pop("recovery_read", None)
+    record.pop("recovery_observation", None)
     if status == "reading_baseline":
         record["status"] = "baseline_verified"
     elif status in {"checking_add", "checking_remove"}:
@@ -243,13 +244,11 @@ def observe_recovery(record, value, key):
         observation = "single_test_unit_unreserved"
     record["recovery_observation"] = {"observed_at": cart_time.isoformat(), "cart": observation}
     record.pop("recovery_read")
-    # A successful original provider response establishes a completed request.
-    # A generic error or missing reply, even with an empty cart, cannot do so.
     status = record["status"]
-    step = "remove" if status == "remove_response_unverified" else "add"
-    if (status in UNVERIFIED | {"added", "verify_add"} and observation == "empty_unreserved"
-            and record[step + "_response"]["is_error"] is False):
-        record["status"] = "reconciled_empty"
+    # The normal verification stages are reached only after a matching original
+    # mutation reply. An unverifiable reply can never release this fence.
+    if observation == "empty_unreserved" and status in READBACK | {"added"}:
+        record["status"] = "restored" if status == "verify_remove" else "reconciled_empty"
         record.pop("frame", None)
 
 
@@ -340,16 +339,15 @@ def continue_from_other_build(record, action):
 
 def defer_maintenance(record):
     status = record["status"]
-    if status in READBACK:
-        observation = record.get("recovery_observation")
-        expected = "single_test_unit_unreserved" if status == "verify_add" else "empty_unreserved"
-        if (not observation or observation["cart"] == expected
-                or now() >= hosted_oda.response_time(observation["observed_at"]) + timedelta(minutes=5)):
-            raise ValueError("first record fresh divergent readback for the original hosted Oda operation")
-    elif status not in NEEDS_RECOVERY:
+    if status in FINISHED | BEFORE_WRITE:
         raise ValueError("the hosted Oda cart stage does not allow deferring maintenance")
     if status in WRITE_PHASES and now() < hosted_oda.response_time(record["frame"]["expires_at"]):
         raise ValueError("wait for the original hosted Oda frame to expire before deferring")
+    if status == "checking_remove":
+        # No inverse has been granted. Retire its read so maintenance cannot
+        # race a caller still holding the original pre-delete frame.
+        record.pop("frame")
+        record["status"] = "added"
     record["maintenance_deferred"] = True
 
 
