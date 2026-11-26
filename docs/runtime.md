@@ -84,7 +84,7 @@ Managed Oda, Mathem and MENY services validate browser dependencies during insta
 For Oda and Mathem, dependency validation is separate from both MCP authorization
 and dedicated-browser login; installation does not open a browser or require a
 store account session. The [hosted Oda setup on Dots](dots.md#oda-cart-reads)
-uses ChatGPT’s official Oda plugin for retailer reads.
+uses Oda’s official MCP endpoint through an attached ChatGPT plugin.
 
 ### 1. Find or create the installation
 

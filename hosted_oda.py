@@ -8,7 +8,7 @@ import re
 import uuid
 
 from agent_views import project_agent_result
-from core import cart_contents
+from core import cart_contents, contains_line_controls
 from product_observations import normalize_retail_product_search_batch
 from service_common import require_provider_identity, safe_order_id
 
@@ -96,7 +96,7 @@ def cart_line(item):
         raise ValueError("hosted Oda cart product identity is unavailable")
     product_id, name = product.get("id"), product.get("name")
     if (type(product_id) is not int or not 0 < product_id <= 2**53 - 1
-            or not isinstance(name, str) or not name.strip() or len(name) > 1_000 or not name.isprintable()):
+            or not isinstance(name, str) or not name.strip() or len(name) > 1_000 or contains_line_controls(name)):
         raise ValueError("hosted Oda cart product identity is unavailable")
     return {"product": {"id": product_id, "name": name}, "quantity": item.get("quantity"),
             "totalGrossAmount": money(item.get("totalGrossAmount"))}
@@ -146,7 +146,7 @@ def recipes(data, arguments):
         recipe_id = recipe.get("id") if isinstance(recipe, dict) else None
         title = recipe.get("title") if recipe_id is not None else None
         if (type(recipe_id) is not int or not 0 < recipe_id <= 2**53 - 1
-                or not isinstance(title, str) or not title.strip() or len(title) > 300 or not title.isprintable()):
+                or not isinstance(title, str) or not title.strip() or len(title) > 300 or contains_line_controls(title)):
             raise ValueError("hosted Oda recipe identity is unavailable")
         row = {"recipe_id": recipe_id, "name": title}
         url = recipe.get("url")

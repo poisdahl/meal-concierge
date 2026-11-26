@@ -325,6 +325,14 @@ class HostedOdaForegroundTests(unittest.TestCase):
         self.assertGreater(len(lines["items"]), 0)
         self.assertNotIn("next_offset", lines)
 
+    def test_cart_preserves_standard_unicode_spacing_in_product_names(self):
+        reply = self.example_reply()
+        name = "Fixture\u00a0product"
+        reply["cart"]["groups"][0]["items"][0]["product"]["name"] = name
+        result, code = self.finish(reply)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["result"]["lines"]["items"][0]["name"], name)
+
     def test_empty_cart_with_optional_provider_fields_completes(self):
         reply = self.example_reply()
         cart = reply["cart"]
@@ -387,15 +395,16 @@ class HostedOdaForegroundTests(unittest.TestCase):
         binding = {key: frame[key] for key in ("read_id", "plugin_id", "tool", "arguments")}
         binding["observed_at"] = datetime.now(timezone.utc).isoformat()
         url = "https://oda.com/no/recipes/42-fixture/"
-        recipe = {"id": 42, "title": "Synthetic pasta", "url": url, "likeCount": 7, "isLikedByUser": True}
+        title = "Synthetic\u00a0pasta"
+        recipe = {"id": 42, "title": title, "url": url, "likeCount": 7, "isLikedByUser": True}
         with self.assertRaisesRegex(ValueError, "duplicate identities"):
             self.finish({**binding, "catalog": {"recipes": [recipe, recipe], "hasMore": False}})
         ending, code = self.finish({**binding, "catalog": {"hasMore": False, "recipes": [recipe,
             {**recipe, "id": 43, "url": "https://oda.com/no/re\ncipes/43-fixture/"}]}})
         self.assertEqual(code, 0, ending)
         self.assertEqual(ending["result"]["recipes"], [
-            {"recipe_id": 42, "name": "Synthetic pasta", "url": url},
-            {"recipe_id": 43, "name": "Synthetic pasta"},
+            {"recipe_id": 42, "name": title, "url": url},
+            {"recipe_id": 43, "name": title},
         ])
 
     def test_delivery_reads_validate_the_exact_date_without_granting_a_selection(self):
