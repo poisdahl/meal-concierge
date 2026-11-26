@@ -298,7 +298,7 @@ After the inverse acknowledgement, `verify_remove` with
 and cart reads. Submit those with `observe` on the same UUID. Use `retry_read`
 if the read frame expired. The final restoration flags appear after that read.
 If you defer a linked undo before it issues an inverse, a compatible program
-update can abort the unsent undo using its original UUID.
+update can abort it using the undo's own UUID.
 
 If the original successful add returned only an exact subset of the approved
 products and quantities, check `partial_add_quantities`. A fresh matching

@@ -378,19 +378,27 @@ class HostedOdaMenuTests(unittest.TestCase):
 
     def test_damaged_applied_menu_receipt_cannot_start_an_undo(self):
         applied_id = self.identifier
-        self.apply_existing()
+        baseline = cart_data()
+        write = self.step("observe", **self.reads(self.pre_add_existing(baseline), data=baseline))
+        filled = cart_data({TOMATO: 2, PASTA: 1})
+        self.assertEqual(self.step("observe", **self.reads(self.ack(write, filled), data=filled))["status"], "applied")
         path = self.registry / (applied_id + ".json")
         original = install.bounded_json(path)
+        saved_menu = original["menu"]
+        bad_source = dict(saved_menu["source"])
+        del bad_source["menu_ref"]
         ledger = self.registry / "ledger.json"
         before = ledger.read_bytes()
         self.identifier = str(uuid.uuid4())
-        for damaged in (None, {"items": [None]}):
-            with self.subTest(quote=damaged):
-                edited_menu = dict(original["menu"])
+        for field, damaged in (("quote", None), ("quote", {"items": [None]}), ("source", bad_source),
+                               ("baseline_amounts_ore", None), ("baseline_cart", {}), ("baseline_cart", None),
+                               ("baseline_cart", {**saved_menu["baseline_cart"], "lines": {str(OATS): {"quantity": "1"}}})):
+            with self.subTest(field=field, damaged=damaged):
+                edited_menu = dict(saved_menu)
                 if damaged is None:
-                    del edited_menu["quote"]
+                    del edited_menu[field]
                 else:
-                    edited_menu["quote"] = damaged
+                    edited_menu[field] = damaged
                 install.write_json(path, {**original, "menu": edited_menu})
                 with self.assertRaisesRegex(ValueError, "menu receipt is invalid"):
                     self.step("restore_menu", applied_operation_id=applied_id)
@@ -436,6 +444,7 @@ class HostedOdaMenuTests(unittest.TestCase):
         checking = self.pre_add_existing(filled)
         after = self.step("observe", **self.reads(checking, data=filled))
         self.assertEqual(after["status"], "unchanged")
+        self.assertEqual(after["cart_evidence_scope"], "historical_cart_read")
         self.assertFalse(after["dispatch"])
         self.assertNotIn("hosted_request", after)
         self.assertEqual(after["quote"]["additional_package_count"], 0)
@@ -497,6 +506,8 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.identifier = str(uuid.uuid4())
         self.step("restore_menu", applied_operation_id=original)
         self.step("defer")
+        ledger = self.registry / "ledger.json"
+        generation = install.bounded_json(ledger)["write_generation"]
         self.build = {**self.build, "source_commit": "e" * 40}
         recovered = self.step("observe_recovery", **self.reads(self.step("recheck"), data=baseline))
         self.assertEqual(recovered["status"], "added")
@@ -506,6 +517,7 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.assertEqual(aborted["status"], "aborted")
         self.assertFalse(aborted["dispatch"])
         self.assertNotIn("hosted_request", aborted)
+        self.assertEqual(install.bounded_json(ledger)["write_generation"], generation)
 
     def test_linked_undo_lost_reply_stays_pending_after_restart_and_baseline_read(self):
         original = self.identifier

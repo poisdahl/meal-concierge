@@ -551,6 +551,8 @@ def status_view(record):
             result["restores_operation_id"] = record["restores_operation_id"]
         elif record["status"] == "applied":
             result["cart_evidence_scope"] = "historical_application"
+        elif record["status"] == "unchanged":
+            result["cart_evidence_scope"] = "historical_cart_read"
     else:
         result["product_id"] = record["product_id"]
     if record["status"] in WRITE_PHASES:
@@ -649,6 +651,30 @@ def archive_record(directory, record):
         raise ValueError("the original hosted Oda cart history changed")
 
 
+def validate_undo_baseline(menu):
+    amounts = menu["baseline_amounts_ore"]
+    require_fields(amounts, hosted_oda.BREAKDOWN_FIELDS)
+    if any(type(amount) is not int for amount in amounts.values()):
+        raise ValueError("invalid Oda baseline amounts")
+    if "baseline_cart" not in menu and menu["mode"] != "keep_existing":
+        return
+    baseline = menu["baseline_cart"]
+    require_fields(baseline, ("lines", "amounts_ore"))
+    lines = baseline["lines"]
+    if (not isinstance(lines, dict) or len(lines) > hosted_oda_menu.MAX_BASELINE_LINES
+            or baseline["amounts_ore"] != amounts):
+        raise ValueError("invalid Oda baseline cart")
+    for identity, line in lines.items():
+        require_fields(line, ("name", "quantity", "package", "package_price_ore", "details_sha256", "amount_ore"))
+        product_id = int(identity)
+        if (not provider_id(product_id) or str(product_id) != identity
+                or type(line["quantity"]) is not int or line["quantity"] <= 0
+                or type(line["amount_ore"]) is not int or line["amount_ore"] < 0):
+            raise ValueError("invalid Oda baseline cart line")
+    if sum(line["amount_ore"] for line in lines.values()) != amounts["subtotal"]:
+        raise ValueError("invalid Oda baseline merchandise subtotal")
+
+
 def initial_restoration(directory, original_id, owner, plugin, generation):
     path = directory / (original_id + ".json")
     original = read_private(path, JOURNAL_LIMIT) if os.path.lexists(path) else None
@@ -662,6 +688,8 @@ def initial_restoration(directory, original_id, owner, plugin, generation):
             or menu.get("partial_add_quantities") or not isinstance(add_response, dict) or add_response.get("is_error") is not False):
         raise ValueError("restore the latest verified Oda menu that added packages on this original connection")
     try:
+        require_fields(menu["source"]["menu_ref"], ("menu_id", "revision", "digest"))
+        validate_undo_baseline(menu)
         approved_add = mutation_arguments(original, 1)
     except (AttributeError, KeyError, TypeError, ValueError):
         raise ValueError("the original hosted Oda menu receipt is invalid") from None
