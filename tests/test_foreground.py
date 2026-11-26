@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import io
+import json
 from pathlib import Path
 import shutil
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -154,6 +157,20 @@ class ForegroundTests(unittest.TestCase):
             app.handle.assert_called_with({**request, "interactive": True})
             self.call({**request, "interactive": False}, application=lambda: app)
             app.handle.assert_called_with({**request, "interactive": False})
+
+    def test_startup_error_has_one_sanitized_cli_result(self):
+        output, errors = io.StringIO(), io.StringIO()
+        argv = ["foreground.py", "--home", str(self.state), "tools"]
+        with (patch.object(sys, "argv", argv), patch.object(foreground.os, "umask"),
+              patch.object(foreground, "execute", side_effect=SystemExit("fixture-secret")),
+              redirect_stdout(output), redirect_stderr(errors)):
+            self.assertEqual(foreground.main(), 1)
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        self.assertNotIn("fixture-secret", output.getvalue())
+        self.assertEqual(errors.getvalue(), "")
+        receipt = json.loads(output.getvalue())
+        self.assertFalse(receipt["ok"])
+        self.assertIn("install.sh doctor", receipt["error"])
 
 
 if __name__ == "__main__":

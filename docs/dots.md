@@ -85,18 +85,24 @@ The separate [MENY native-browser interface](#native-browser-requests-over-stdin
 supports native-browser reads and guarded cart changes where an operator can
 verify the owner-approved account and tab. It covers catalog search, cart,
 saved-menu product planning, delivery-window reads and rendered order reads.
-The catalog additions have been exercised with browser fixtures.
+The native catalog, shopping-list matching and guarded cart flows have fixture
+coverage. On the tested Dot, live verification stopped before authenticated
+cart access because the signed-in account had not been designated for testing.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
 
 ### Attachments and scheduled planning
 
 Use the shared [recipe delivery workflow](../skill/references/recipe-delivery.md)
-to prepare the saved menu and export the frozen PDF. Use the Dot’s native file
-attachment action to post it in the requested conversation. Verify that a file
-card can be opened. Treat an export path as local output. For an available
-managed cover, export the specific recipe revision’s image and attach it the
-same way. Retain source attribution.
+to prepare the saved menu and export the frozen PDF to a private directory.
+Use a fresh `recipe_delivery.begin` result with `dispatch:true` for the exact
+job, part and conversation before attaching it once. Open the actual file card.
+Record frozen-file acceptance only when the sender evidence binds the original
+bytes. ChatGPT Library can rewrite PDFs. If staging already shows changed bytes,
+stop the exact-file send. If a rewritten file was posted, report the visible
+result and record `unknown` for the frozen part under its original token. Keep
+the original attempt for reconciliation. For a standalone cover requested in
+chat, export the specific recipe revision’s image and verify the actual card.
 
 For scheduled planning, ask the Dot to use its native scheduler. Give it the
 household binding, exact task, time zone and intended chat. Keep this schedule
@@ -114,7 +120,9 @@ prior receipt. Repeat setup means reuse; it does not authorize an update.
 
 Use `install.sh doctor --home ABSOLUTE_HOME` to diagnose installation markers and
 version mismatches. A foreground household does not have a running RPC listener;
-use `foreground.py tools` and a real call for health. If state or the original
+use `foreground.py tools` and a real call for health. If another request holds
+the installation lock, wait for it to finish and check its receipt before any
+retry. If state or the original
 program selection is missing, recover the original installation before making
 changes. Keep the household, its browser profile and its receipts together.
 

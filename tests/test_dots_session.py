@@ -838,6 +838,24 @@ raise SystemExit(client.main())
         self.assertEqual(result["result"]["menu"]["dishes"][0]["ingredients"][0]["quantity"], 300)
         self.assertEqual(self.frames, [])
 
+        code, listed = self.call({"operation": "shopping_list", "action": "get"})
+        self.assertEqual(code, 0, listed)
+        self.assertEqual(listed["result"]["items"][0]["quantity"], {"numerator": 300, "denominator": 1})
+        self.assertEqual(self.frames, [])
+        match = {"operation": "shopping_list", "action": "match", "list_ref": listed["result"]["list_ref"]}
+        code, stale = self.call({**match, "list_ref": {}})
+        self.assertEqual(code, 1, stale)
+        self.assertIn("shopping list changed", stale["error"])
+        self.assertEqual(self.frames, [])
+        code, matched = self.call(match)
+        self.assertEqual(code, 0, matched)
+        self.assertIn(matched["result"]["matching_status"], {"prepared", "needs_input"})
+        self.assertEqual(matched["result"]["product_result"]["menu_ref"], listed["result"]["menu_ref"])
+        self.assertFalse(matched["result"]["cart_changed"])
+        self.assertTrue(any(frame["operation"] == "product_search" for frame in self.frames))
+        self.assertTrue(all(frame["effect"] == "read" for frame in self.frames))
+        self.assertEqual(self.writes, 0)
+
     def test_lost_write_reply_survives_restart_and_only_reconciles_original(self):
         def lose_write(frame):
             reply = self.host(frame)

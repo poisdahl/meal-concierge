@@ -254,8 +254,11 @@ def main():
     command.add_argument("request_id", type=request_id)
     cli.output_options(command)
     subparsers.add_parser("receipt").add_argument("request_id", type=request_id)
+    options = parser.parse_args()
     try:
-        value, code = execute(parser.parse_args())
+        value, code = execute(options)
+    except SystemExit:
+        value, code = {"ok": False, "error": "installed household could not start; run install.sh doctor with the original home"}, 1
     except (OSError, RuntimeError, ValueError, argparse.ArgumentTypeError) as exc:
         value, code = {"ok": False, "error": str(exc)}, 1
     print(json.dumps(value, ensure_ascii=False, allow_nan=False))
