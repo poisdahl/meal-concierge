@@ -912,6 +912,13 @@ raise SystemExit(client.main())
         self.assertEqual([frame["operation"] for frame in self.frames],
                          ["get_cart", "verify_new_cart", "get_cart"])
         self.assertEqual(self.call(self.ensure(), command_id), (1, original))
+        for request in ({"operation": "orders"}, {"operation": "orders", "action": "get", "order_id": "123456"}):
+            with self.subTest(request=request):
+                frame_count = len(self.frames)
+                code, blocked = self.call(request)
+                self.assertEqual(code, 1, blocked)
+                self.assertIn("a cart write is uncertain", blocked["error"])
+                self.assertEqual(len(self.frames), frame_count)
         self.assertEqual(self.state()["pending_cart_change"], pending)
         self.assertEqual(self.writes, 0)
 
@@ -1079,6 +1086,54 @@ raise SystemExit(client.main())
         self.assertEqual(self.call({"operation": "orders"}, host=conflicting_link)[0], 1)
         self.assertEqual(self.writes, 0)
         self.assertIsNone(self.state().get("pending_cart_change"))
+
+    def current_order_layout_host(self, frame):
+        response = self.rendered_orders_host(frame)
+        details = response["result"]
+        if frame["operation"] == "get_orders":
+            details["columns"].append("")
+            details["table_class"] = "ws-order-history-table"
+            details["orders"][0].update(cell_count=6, receipt_cell_class="ws-order-history-table__receipt",
+                                        receipt_label="Se kvittering", same_archived_url=True)
+        else:
+            details.update(source_archived=True, order_number_label="Ordrenummer", heading_matches_pickup_code=True,
+                           item_table_class="ws-order-details-cart", item_disclosure_expanded=True)
+        return response
+
+    def test_current_receipt_layout_stays_a_read_only_visible_window(self):
+        code, listed = self.call({"operation": "orders"}, host=self.current_order_layout_host)
+        self.assertEqual(code, 0, listed)
+        self.assertEqual(listed["result"]["history_scope"], "rendered_last_six_months")
+        self.assertEqual(listed["result"]["orders"][0]["history_scope"], "rendered_last_six_months")
+        self.assertEqual(listed["result"]["backend_freshness"], "unverified")
+        code, detail = self.call({"operation": "orders", "action": "get", "order_id": "123456"},
+                                 host=self.current_order_layout_host)
+        self.assertEqual(code, 0, detail)
+        self.assertEqual(detail["result"]["order"]["productQuantityCount"], 40)
+        self.assertEqual(detail["result"]["order"]["payment_status"], "unknown")
+        self.assertEqual(self.writes, 0)
+
+    def test_current_receipt_layout_rejects_a_different_link_or_closed_disclosure(self):
+        cases = (("list", "row", {"same_archived_url": False}), ("list", "row", {"receipt_label": "Endre"}),
+                 ("list", "row", {"cell_count": 7}), ("list", "result", {"table_class": "other"}),
+                 ("list", "result", {"heading": "Unrelated fixture heading"}),
+                 ("get", "result", {"item_disclosure_expanded": False}), ("get", "result", {"source_archived": False}),
+                 ("get", "result", {"order_number_label": "Bestillingskode"}),
+                 ("get", "result", {"heading": "BESTILLING other", "heading_matches_pickup_code": False}))
+        for action, target, changes in cases:
+            with self.subTest(action=action, changes=changes):
+                def changed(frame):
+                    reply = self.current_order_layout_host(frame)
+                    result = reply["result"]
+                    destination = result["orders"][0] if target == "row" else result
+                    destination.update(changes)
+                    return reply
+                request = {"operation": "orders", "action": action}
+                if action == "get":
+                    request["order_id"] = "123456"
+                code, result = self.call(request, host=changed)
+                self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 0)
 
     def test_native_orders_protected_actions_and_invalid_inputs_stop_before_intent(self):
         before = self.files()

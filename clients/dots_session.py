@@ -34,6 +34,10 @@ OWNER_FILES = (".service-owner.lock", "recipes.sqlite3.owner.lock", "state.json.
 MAX_LINE = 65536
 PRODUCTS_APPLY_BUDGET_SECONDS = 600
 RENDERED_UI_EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
+ORDER_COLUMNS = ["BESTILLINGSKODE", "STATUS", "UTLEVERING", "TID", "SUM"]
+ARCHIVED_DETAIL_LAYOUT = {"source_archived": True, "order_number_label": "Ordrenummer",
+                          "heading_matches_pickup_code": True, "item_table_class": "ws-order-details-cart",
+                          "item_disclosure_expanded": True}
 
 
 def order_ui_text(value, *, optional=False):
@@ -62,7 +66,8 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
     fields = ({"table_count", "columns", "rendered_row_count", "rows_complete", "pagination_count", "orders"}
               if order_id is None else {"order_number", "status_markers", "item_heading", "item_count",
                                       "item_table_count", "item_columns", "item_rows_complete", "products", "amounts"})
-    dots.object_fields(result, common | fields, common | fields)
+    layout_fields = {"table_class"} if order_id is None else ARCHIVED_DETAIL_LAYOUT.keys()
+    dots.object_fields(result, common | fields | layout_fields, common | fields)
     if (result["authenticated"] is not True or result["ready"] is not True
             or any(type(result[key]) is not int or result[key] != 1
                    for key in ("authenticated_count", "main_count", "heading_count"))):
@@ -71,9 +76,12 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
                 result["source_query_keys"], result["source_hash"], order_id)}
     if order_id is None:
         count, rows = result["rendered_row_count"], result["orders"]
+        columns = result["columns"]
+        receipt_column = columns == ORDER_COLUMNS + [""]
         if (result["heading"] != "Bestillinger fra de siste 6 måneder"
+                or (receipt_column and result.get("table_class") != "ws-order-history-table")
+                or (not receipt_column and columns != ORDER_COLUMNS)
                 or type(result["table_count"]) is not int or result["table_count"] != 1
-                or result["columns"] != ["BESTILLINGSKODE", "STATUS", "UTLEVERING", "TID", "SUM"]
                 or type(result["pagination_count"]) is not int or result["pagination_count"] != 0
                 or result["rows_complete"] is not True or type(count) is not int or not 1 <= count <= 10000
                 or not isinstance(rows, list) or len(rows) != min(limit, count)):
@@ -81,12 +89,17 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
         orders, seen = [], set()
         for row in rows:
             keys = {"order_number", "cell_count", "links", "status_marker", "delivery_display", "time_display", "sum_display"}
+            if receipt_column:
+                keys |= {"receipt_cell_class", "receipt_label", "same_archived_url"}
             dots.object_fields(row, keys, keys)
             identity = row["order_number"]
             if (not isinstance(identity, str) or re.fullmatch(r"[0-9]{1,20}", identity) is None
-                    or identity in seen or type(row["cell_count"]) is not int or row["cell_count"] != 5
+                    or identity in seen or type(row["cell_count"]) is not int or row["cell_count"] != len(columns)
                     or not isinstance(row["links"], list) or not 1 <= len(row["links"]) <= 2):
                 raise HouseholdError("native rendered order identities changed")
+            if receipt_column and (len(row["links"]) != 2 or row["receipt_cell_class"] != "ws-order-history-table__receipt"
+                                   or row["receipt_label"] != "Se kvittering" or row["same_archived_url"] is not True):
+                raise HouseholdError("native rendered order receipt link changed")
             for link in row["links"]:
                 dots.object_fields(link, {"origin", "path", "query_keys", "hash"}, {"origin", "path", "query_keys", "hash"})
                 order_ui_location(link["origin"], link["path"], link["query_keys"], link["hash"], identity)
@@ -97,6 +110,10 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
                               for key in ("delivery_display", "time_display", "sum_display")}})
         return {"provider": "meny", **evidence, "history_scope": "rendered_last_six_months",
                 "rendered_row_count": count, "orders": orders}
+    archived_layout = bool(result.keys() & ARCHIVED_DETAIL_LAYOUT.keys())
+    if archived_layout and any(type(result.get(key)) is not type(value) or result.get(key) != value
+                               for key, value in ARCHIVED_DETAIL_LAYOUT.items()):
+        raise HouseholdError("native archived receipt fields or item disclosure changed")
     products, count, markers = result["products"], result["item_count"], result["status_markers"]
     if (result["order_number"] != order_id
             or re.fullmatch(r"BESTILLING\s+\S+", order_ui_text(result["heading"]), re.IGNORECASE) is None

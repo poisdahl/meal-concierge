@@ -87,8 +87,9 @@ saved-menu product planning, delivery-window reads and rendered order reads.
 On the tested Dot, signed-in recipe and product searches, an ordinary cart read
 and delivery-window reads passed. The cart write frame expired without a
 dispatch acknowledgement. The operator reported no click, and a fresh read
-showed the original cart contents. The operation stayed pending. The current
-order pages did not match the rendered order read contract.
+showed the original cart contents. The operation stayed pending. Parser
+fixtures cover the current history table and archived receipt layout. The
+pending cart guard blocks installed native order reads in that household.
 Shopping-list matching and guarded cart changes have fixture coverage.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
@@ -667,19 +668,37 @@ History requires origin `https://meny.no`, path `/trumf-profil/nettbutikk`, hash
 observed `archived` and `mworderid` query keys. This contract covers the archived
 receipt shape actually observed; other route shapes remain unsupported.
 
-History requires heading `Bestillinger fra de siste 6 måneder`, `table_count:1`,
-`columns:["BESTILLINGSKODE","STATUS","UTLEVERING","TID","SUM"]`,
-`pagination_count:0`, positive `rendered_row_count`, `rows_complete:true`, and
-the first `min(size, rendered_row_count)` complete `orders`. Each row contains
-`order_number`, `cell_count:5`, one or two consistent `links` (each with
-`origin`, `path`, `query_keys`, `hash`), the dedicated `status_marker`, and
-`delivery_display`, `time_display`, `sum_display` (null for unknown displays).
-Two links in one row identify one order; conflicting identities fail. The
-returned `history_scope:"rendered_last_six_months"` is not complete account
-history. Empty history is unsupported until a positive rendered empty-state
-contract is observed; absence of rows alone is insufficient.
+History requires one visible table (`table_count:1`), `pagination_count:0`,
+positive `rendered_row_count`, `rows_complete:true`, and the first
+`min(size, rendered_row_count)` complete `orders` under the heading
+`Bestillinger fra de siste 6 måneder`. Accept either table layout.
 
-Detail requires matching `order_number`, one `BESTILLING <code>` heading,
+- Five columns `BESTILLINGSKODE`, `STATUS`, `UTLEVERING`, `TID`, `SUM`.
+  Each row has `cell_count:5` and one or two consistent links.
+- The same columns followed by an unlabeled sixth column (empty string in
+  `columns`), with `table_class:"ws-order-history-table"`. Each row has
+  `cell_count:6`, `receipt_cell_class:"ws-order-history-table__receipt"`,
+  `receipt_label:"Se kvittering"` and exactly two links. Before reporting
+  `same_archived_url:true`, verify on the page that the code link and receipt
+  link have the same actual URL with `archived=True`. Keep opaque query values
+  inside the browser.
+
+Each row includes the `order_number` from the detail path, `links` with
+`origin`, `path`, `query_keys`, `hash`, its dedicated `status_marker`, and
+`delivery_display`, `time_display`, `sum_display` (null for unknown displays).
+The result describes the displayed window for the last six months. Empty
+history remains blocked until a verified visible empty-state contract exists.
+
+Detail requires the requested `order_number` independently observed under the
+`Ordrenummer` label. Read the archived receipt via the verified read-only link.
+Expand the unique visible `Bestilte varer` disclosure once if collapsed, then
+reread the same bound view. Report `source_archived:true`,
+`order_number_label:"Ordrenummer"`, `item_disclosure_expanded:true` and
+`item_table_class:"ws-order-details-cart"` for the current archived layout.
+Both layouts require a `BESTILLING <code>` heading. For the current archived
+layout, compare the suffix with the independently labeled pickup code in the
+browser and only then supply `heading_matches_pickup_code:true`. Verify the
+order number separately via `Ordrenummer`. Both layouts also require
 `status_markers` containing at most one dedicated active marker, positive
 `item_count`, exact `item_heading:"Bestilte varer (<item_count>)"`,
 `item_table_count:1`, `item_columns:["VARE","MENGDE"]`,
