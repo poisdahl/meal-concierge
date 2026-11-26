@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -122,11 +123,19 @@ def receipt_view(record, identifier):
     if record.get("target"):
         receipt["original_target"] = record["target"]
     if "response" not in record:
+        if record.get("hosted_read"):
+            from hosted_oda import response_time
+
+            if datetime.now(timezone.utc) >= response_time(record["hosted_read"]["expires_at"]):
+                return {**receipt, "ok": False, "status": "hosted_read_expired",
+                        "recovery": "Use a new request ID for a fresh read."}, 1
         return {**receipt, "ok": False, "status": "incomplete",
                 "operation": record["operation"], "action": record["action"],
                 "recovery": "Inspect the original operation before any retry."}, 1
     response = replay_value(record["response"])
     result = response.get("result") or {}
+    if record.get("operation") == "catalog" and result.get("scope") == "public_catalog":
+        return {**response, **receipt, "status": "historical_public_catalog"}, record["exit_code"]
     if result.get("output_path"):
         try:
             if output_matches(result):

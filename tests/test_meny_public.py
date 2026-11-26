@@ -1,4 +1,5 @@
 """Anonymous MENY reads exercise the same paths and payload scopes as the Dot."""
+from datetime import datetime
 from decimal import Decimal
 from email.message import Message
 import io
@@ -44,6 +45,7 @@ class MenyPublicTests(unittest.TestCase):
         self.assertEqual(request.full_url, self.url)
         self.assertEqual(request.get_method(), "GET")
         self.assertEqual(dict(request.header_items()), {"Accept": "application/json", "Accept-encoding": "identity"})
+        self.assertEqual(len(build.call_args.args), 1)
         self.assertIsNone(build.call_args.args[0].redirect_request(None, None, 302, None, None, self.url))
 
     def test_invalid_route_is_rejected_before_network(self):
@@ -97,6 +99,7 @@ class MenyPublicTests(unittest.TestCase):
         url = urlsplit(fetch.call_args.args[0])
         self.assertEqual(parse_qs(url.query), {"search": ["ris & grønt"], "page": ["1"],
                                              "page_size": ["1"], "fieldset": ["maximal"]})
+        self.assertIsNotNone(datetime.fromisoformat(result.pop("observed_at")).tzinfo)
         self.assertEqual(result, {"provider": "meny", "scope": "public_catalog", "query": "ris & grønt",
                                   "total_matches": 2, "products": [{"name": "Synthetic oats",
                                       "product_id": "/varer/catalog/oats-1234567890123", "ean": "1234567890123",

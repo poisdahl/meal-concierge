@@ -110,8 +110,10 @@ Results have `scope:"public_catalog"`. They use fixed anonymous HTTPS requests
 from the Dot. Prices are public catalog figures per retailer unit. A cart plan
 still needs signed-in product availability, fulfillment and a fresh price review.
 If the public response is unavailable or incomplete, the command reports an
-error. Use a new request for a fresh public search. Follow the native-browser
-steps for a signed-in read or a pending cart operation.
+error. `observed_at` records when the public result was read. A replay reports
+`historical_public_catalog` and keeps the original observation time when known.
+Use a new request for a fresh search. Follow the native-browser steps for a
+signed-in read or a pending cart operation.
 
 ### Oda cart reads
 
@@ -153,16 +155,18 @@ Put only `groups`, `productQuantityCount`, `totalGrossAmount`, `totalBreakdown`,
 and `url` from the structured tool response into `cart`. Pass these fields as
 received. Keep account and delivery details out of the handoff. On an unavailable
 tool or authorization failure, use `error:"unavailable"` instead of `cart`.
-Use the plugin result for every successful cart observation.
+For a successful cart read, `arguments` may be omitted or set to `{}`.
 
 The runtime checks the original request, installed program and environment,
 the echoed plugin ID and expiry, the cart quantities and the recognized fees
 and discounts. When there are no adjustments, it also checks the sum of the
-lines against the subtotal. `host_supplied_oda_mcp`
-identifies a result supplied by ChatGPT. The owner confirms the intended Oda
-account when connecting or reauthorizing the plugin. `receipt REQUEST_UUID`
-recovers the historical outcome without saving cart contents. A fresh read
-uses a new request. Large carts show `lines.truncated` and their full count.
+lines against the subtotal. `host_supplied_oda_mcp` identifies a result supplied
+by ChatGPT. The invocation and observation time are host-reported. The runner
+checks the plugin entry ID, and the owner confirms the underlying Oda account
+when connecting or reauthorizing it. Report backend freshness as unverified.
+`receipt REQUEST_UUID` recovers the historical outcome without saving cart
+contents. `hosted_read_expired` means a new read can start with a new request
+ID. Large carts show `lines.truncated` and their full count.
 Open the returned cart link for the complete contents and to finish checkout
 in Oda. Update the same program and home with the foreground update procedure.
 
@@ -192,8 +196,9 @@ summaries, then `orders.get` or `orders.track` with the exact `order_id` from
 the list. Echo the frame’s exact `arguments` and put the structured response
 in `delivery` or `orders`, respectively, when completing the original request.
 Each call has a new request ID.
-`orders.track` reports Oda’s current tracking status. Keep the results in
-the owner’s chat. The installed receipt does not retain line items or order IDs.
+`orders.track` reports the status supplied by the Oda plugin. Keep the results
+in the owner’s chat. The receipt stores request fingerprints and metadata.
+These private fingerprints may be guessable for short order IDs or queries.
 Delivery reservations and order changes are outside this foreground workflow.
 
 ### Attachments and scheduled planning
@@ -219,9 +224,11 @@ through the Dot’s Scheduled view. Shell background execution is not a schedule
 Select a new published stable program tag and resolve it to its full commit.
 From that checkout, use the same home in `prepare-program` and `update` with the
 returned `--prepared-program` ID, following [bounded maintenance](maintenance.md).
-Wait for active foreground work to finish. Use the same `current` path afterward,
-refresh the skill binding and verify `tools`, `status`, the saved menu and a
-prior receipt. Repeat setup means reuse; it does not authorize an update.
+Wait for active foreground work to finish. Use the same `current` path afterward
+and refresh the skill binding. In the planning home, verify `tools`, `status`,
+the saved menu and a prior receipt. In the hosted Oda home, verify `tools`,
+reopen a previous receipt and use the attached plugin for a fresh read.
+Reuse the original home for repeat setup.
 
 Use `install.sh doctor --home ABSOLUTE_HOME` to diagnose installation markers and
 version mismatches. A foreground household does not have a running RPC listener;
@@ -237,7 +244,7 @@ MENY cart change, reconcile in the original household as described below.
 Keep its target registry and operation receipt available through recovery.
 
 Use the existing [Optional Recipe Collection procedure](runtime.md#versioned-recipe-package-integration)
-against the same home. Between foreground calls no service needs stopping.
+in the planning home. Between foreground calls no service needs stopping.
 Collection installation, withdrawals and removal remain separate from program
 updates. For a failed dependency install use the original installation paths
 and [installer recovery](runtime.md#recover-an-interrupted-attempt).

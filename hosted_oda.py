@@ -5,7 +5,6 @@ import hashlib
 import json
 import math
 import re
-from urllib.parse import urlsplit
 import uuid
 
 from agent_views import project_agent_result
@@ -97,7 +96,7 @@ def cart_line(item):
         raise ValueError("hosted Oda cart product identity is unavailable")
     product_id, name = product.get("id"), product.get("name")
     if (type(product_id) is not int or not 0 < product_id <= 2**53 - 1
-            or not isinstance(name, str) or not name.strip() or len(name) > 1_000):
+            or not isinstance(name, str) or not name.strip() or len(name) > 1_000 or not name.isprintable()):
         raise ValueError("hosted Oda cart product identity is unavailable")
     return {"product": {"id": product_id, "name": name}, "quantity": item.get("quantity"),
             "totalGrossAmount": money(item.get("totalGrossAmount"))}
@@ -147,15 +146,13 @@ def recipes(data, arguments):
         recipe_id = recipe.get("id") if isinstance(recipe, dict) else None
         title = recipe.get("title") if recipe_id is not None else None
         if (type(recipe_id) is not int or not 0 < recipe_id <= 2**53 - 1
-                or not isinstance(title, str) or not title.strip() or len(title) > 300):
+                or not isinstance(title, str) or not title.strip() or len(title) > 300 or not title.isprintable()):
             raise ValueError("hosted Oda recipe identity is unavailable")
         row = {"recipe_id": recipe_id, "name": title}
         url = recipe.get("url")
-        if isinstance(url, str) and len(url) <= 2083:
-            parts = urlsplit(url)
-            if ((parts.scheme, parts.netloc) == ("https", "oda.com") and not parts.query and not parts.fragment
-                    and re.fullmatch(rf"/no/recipes/{recipe_id}(?:-[A-Za-z0-9._~-]+)?/?", parts.path)):
-                row["url"] = url
+        if (isinstance(url, str) and len(url) <= 2083
+                and re.fullmatch(rf"https://oda\.com/no/recipes/{recipe_id}(?:-[A-Za-z0-9._~-]+)?/?", url)):
+            row["url"] = url
         rows.append(row)
     if len({row["recipe_id"] for row in rows}) != len(rows):
         raise ValueError("hosted Oda recipe search returned duplicate identities")
@@ -244,8 +241,10 @@ def complete(frame, reply):
     common = {"read_id", "plugin_id", "tool", "observed_at"}
     tool = frame["tool"]
     field = PAYLOAD_FIELDS[tool]
-    result_fields = common | ({field} if field == "cart" else {field, "arguments"})
-    if not isinstance(reply, dict) or set(reply) not in (result_fields, common | {"error"}):
+    result_shapes = [common | {field, "arguments"}, common | {"error"}]
+    if field == "cart":
+        result_shapes.append(common | {field})
+    if not isinstance(reply, dict) or set(reply) not in result_shapes:
         raise ValueError("expected one structured Oda read result or a hosted-unavailable ending")
     if any(reply[key] != frame[key] for key in ("read_id", "plugin_id", "tool")):
         raise ValueError("reply does not match the original hosted Oda request")
@@ -261,6 +260,8 @@ def complete(frame, reply):
     if not isinstance(data, dict) or data.get("isError", False) is not False or "error" in data:
         raise ValueError("expected a successful structured Oda result")
     arguments = reply.get("arguments")
+    if field == "cart" and "arguments" in reply and arguments != {}:
+        raise ValueError("the hosted Oda cart read takes no arguments")
     if field != "cart" and (not isinstance(arguments, dict) or arguments_digest(arguments) != frame["arguments_sha256"]):
         raise ValueError("arguments do not match the original hosted Oda request")
     if field == "cart":

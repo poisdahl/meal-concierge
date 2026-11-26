@@ -1,4 +1,5 @@
 """Bounded, anonymous MENY catalog reads on a foreground cloud runtime."""
+from datetime import datetime, timezone
 from decimal import Decimal, DecimalException
 import json
 from queue import Empty, SimpleQueue
@@ -135,11 +136,14 @@ def products(query, limit):
 
 def read(request):
     arguments = validate(request)
-    result = {"provider": "meny", "scope": "public_catalog"}
-    if request["action"] == "recipe_get":
-        return {**result, "recipe": read_meny_recipe_detail(arguments, timeout=TIMEOUT, fetch=fetch)}
-    query, limit = arguments
-    if request["action"] == "recipes":
-        return {**result, "query": query, "recipes": read_meny_recipe_search(query, limit, timeout=TIMEOUT, fetch=fetch)}
-    rows, total = products(query, limit)
-    return {**result, "query": query, "products": rows, "total_matches": total}
+    action = request["action"]
+    if action == "recipe_get":
+        result = {"recipe": read_meny_recipe_detail(arguments, timeout=TIMEOUT, fetch=fetch)}
+    else:
+        query, limit = arguments
+        if action == "recipes":
+            result = {"query": query, "recipes": read_meny_recipe_search(query, limit, timeout=TIMEOUT, fetch=fetch)}
+        else:
+            rows, total = products(query, limit)
+            result = {"query": query, "products": rows, "total_matches": total}
+    return {**result, "provider": "meny", "scope": "public_catalog", "observed_at": datetime.now(timezone.utc).isoformat()}

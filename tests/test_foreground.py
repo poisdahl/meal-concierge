@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -19,6 +21,8 @@ from core import HouseholdError, StateStore
 import foreground
 import hosted_oda
 import meny_public
+import runtime_ownership
+import service
 from service import Application
 
 
@@ -119,6 +123,7 @@ class ForegroundTests(unittest.TestCase):
             replay, code = self.call(request, identifier=current["request_id"], application=application)
             self.assertEqual(code, 0)
             self.assertTrue(replay["replayed"])
+            self.assertEqual(replay["status"], "historical_public_catalog")
             self.assertEqual(replay["result"], current["result"])
         get.assert_called_once_with("havregryn", 5)
         application.assert_not_called()
@@ -271,12 +276,24 @@ class HostedOdaForegroundTests(unittest.TestCase):
         self.assertEqual((unavailable["status"], code), ("hosted_oda_unavailable", 1))
         self.assertNotIn("result", unavailable)
 
+    def test_expired_read_is_distinct_from_an_uncertain_mutation(self):
+        reply = self.example_reply()
+        record = foreground.read_receipt(self.calls, self.identifier)
+        record["hosted_read"]["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        foreground.install.write_json(self.calls / f"{self.identifier}.json", record)
+        ending, code = self.begin()
+        self.assertEqual((code, ending["status"]), (1, "hosted_read_expired"))
+        self.assertIn("new request ID", ending["recovery"])
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.finish(reply)
+
     def test_nested_cart_fields_and_inconsistent_amounts_do_not_record_a_read(self):
         reply = self.example_reply()
         cart = reply["cart"]
         item = cart["groups"][0]["items"][0]
         for patch in ({"totalGrossAmount": {"private": "marker"}}, {"totalGrossAmount": float("inf")},
                       {"product": {"id": 42, "name": {"private": "marker"}}},
+                      {"product": {"id": 42, "name": "Synthetic\ncontrol"}},
                       {"quantity": float("inf")}, {"quantity": 3}):
             with self.subTest(patch=patch), self.assertRaises((ValueError, HouseholdError)):
                 self.finish({**reply, "cart": {**cart, "groups": [{"items": [{**item, **patch}]}]}})
@@ -374,7 +391,7 @@ class HostedOdaForegroundTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate identities"):
             self.finish({**binding, "catalog": {"recipes": [recipe, recipe], "hasMore": False}})
         ending, code = self.finish({**binding, "catalog": {"hasMore": False, "recipes": [recipe,
-            {**recipe, "id": 43, "url": "https://oda.com/no/recipes/42-fixture/?token=marker"}]}})
+            {**recipe, "id": 43, "url": "https://oda.com/no/re\ncipes/43-fixture/"}]}})
         self.assertEqual(code, 0, ending)
         self.assertEqual(ending["result"]["recipes"], [
             {"recipe_id": 42, "name": "Synthetic pasta", "url": url},
@@ -435,6 +452,64 @@ class HostedOdaForegroundTests(unittest.TestCase):
                 historical = self.begin(request)[0]
                 self.assertEqual(historical["status"], "historical_orders_read")
                 self.assertNotIn('"12345"', path.read_text())
+
+    def test_installed_hosted_front_door_issues_completes_and_recovers(self):
+        root = self.state.resolve()
+        home, code_root = root / "home", root / "program"
+        release = code_root / "fixture-release"
+        venv = release / "venv"
+        venv.mkdir(parents=True)
+        home.mkdir(mode=0o700)
+        state = home / "state"
+        state.mkdir(mode=0o700)
+        (code_root / "current").symlink_to(release, target_is_directory=True)
+        config = home / "config.json"
+        manifest = {"manager": "external", "home": str(home), "code_root": str(code_root), "release": str(release),
+                    "hosted_oda_plugin": self.plugin, "runtime_identity": self.build,
+                    "paths": {"state": str(state), "config": str(config), "socket": str(home / "service.sock")}}
+        foreground.install.write_json(home / "runtime.json", manifest)
+        foreground.install.write_json(code_root / "owner.json", {"home": str(home)})
+        foreground.install.write_json(config, {"provider": "oda", "household": "Synthetic Dot",
+                                               "hosted_oda_plugin": self.plugin})
+        foreground.install.write_json(state / "state.json", {"fixture": "retain this state"})
+        recipes = state / "recipes.sqlite3"
+        fd = os.open(recipes, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as file:
+            file.write(b"retained fixture database")
+
+        def execute(action, body=b""):
+            options = Namespace(home=home, action=action, request_id=self.identifier,
+                                image_output=None, delivery_output=None)
+            with patch.object(sys, "stdin", Namespace(buffer=io.BytesIO(body))):
+                return foreground.execute(options)
+
+        with (patch.object(foreground, "SOURCE", release), patch.object(sys, "prefix", str(venv)),
+              patch.object(service, "BUILD_IDENTITY", {**self.build, "identity_status": "recorded"}),
+              patch.object(runtime_ownership, "assert_no_legacy_service"),
+              patch.object(foreground, "verify_release_layout"),
+              patch.object(service, "build_application", side_effect=AssertionError("started a service"))):
+            discovered, code = execute("tools")
+            self.assertEqual((code, discovered["transport"]), (0, "hosted_mcp"))
+            self.assertEqual(discovered["cart_actions"], ["get"])
+            with self.assertRaisesRegex(ValueError, "read-only actions"):
+                execute("call", b'{"operation":"cart","action":"ensure"}')
+            self.assertEqual(execute("receipt")[0]["status"], "not_found")
+            frame = execute("call", b'{"operation":"cart","action":"get"}')[0]["hosted_request"]
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                execute("complete-hosted", b" " * (foreground.cli.MAX_INPUT + 1))
+            reply = {key: frame[key] for key in ("read_id", "plugin_id", "tool")}
+            reply.update(observed_at=datetime.now(timezone.utc).isoformat(),
+                         cart={"groups": [], "productQuantityCount": 0, "totalGrossAmount": "0.00",
+                               "totalBreakdown": dict.fromkeys(hosted_oda.BREAKDOWN_FIELDS, "0.00"),
+                               "url": "https://oda.com/no/cart/"})
+            with self.assertRaisesRegex(ValueError, "takes no arguments"):
+                execute("complete-hosted", json.dumps({**reply, "arguments": {"override": True}}).encode())
+            reply["arguments"] = frame["arguments"]
+            self.assertEqual(execute("complete-hosted", json.dumps(reply).encode())[0]["status"], "cart_read")
+            historical, code = execute("receipt")
+            self.assertEqual((code, historical["status"]), (0, "historical_cart_read"))
+            self.assertNotIn("result", historical)
+        self.assertEqual(recipes.read_bytes(), b"retained fixture database")
 
 
 if __name__ == "__main__":

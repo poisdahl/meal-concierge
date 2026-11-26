@@ -10,7 +10,9 @@ use the household's [foreground tool binding](references/dots.md). The runtime
 owns the configured household, recipe bank and any connected store/account/payment
 path. With `provider=none`, recipes, menus and ordinary shopping lists work
 without login. Do not require store, delivery or payment setup for these tasks.
-For an Oda or Mathem sign-in problem, call status with
+For hosted Oda authorization, use the original attached plugin as described
+in the [Dots guide](references/dots.md). For an Oda or Mathem sign-in problem
+in a managed service, call status with
 `check_store_connection=true`. If sign-in is required, explain the private
 owner login from `store_readiness.connection_check.next_action`. Use the site's private login flow for host-managed installations. The runtime
 owner launches the helper in a private terminal and the account owner completes
@@ -40,8 +42,9 @@ unidentified protected work, follow that operation's status and recovery path;
 do not confirm payment merely to unlock planning. Reading back the saved menu
 does not fulfill a request to create one.
 
-For “which Meal Concierge version/release are you running?”, read the connected
-service's `status.build`. Report `release_tag` first when present. With
+For “which Meal Concierge version/release are you running?”, read `tools.build`
+on the foreground runner or `status.build` on a managed service. Report
+`release_tag` first when present. With
 `source_modified=true`, describe it as that release **with local changes**, not
 an unchanged release. Missing/null `release_tag` means the release is unknown;
 provide `source_commit` if available, without guessing whether it is newer than

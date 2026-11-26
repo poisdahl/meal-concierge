@@ -32,10 +32,13 @@ When discovery returns `provider:"oda"` and `transport:"hosted_mcp"`, bind
 this installation to its reported official Oda plugin. Use the discovered
 cart, catalog, delivery and order read actions documented in `docs/dots.md`
 in the retained source checkout. Start with `call` and the exact read request.
-Invoke only the emitted tool in the attached plugin, then complete that same
-request with the structured result. Use the normalized current result. The
-original receipt is historical. If the plugin cannot provide the result,
-report it as unavailable. The owner completes checkout with the Oda cart link.
+Invoke only the emitted tool in the attached plugin. Run `complete-hosted
+REQUEST_UUID` with the structured reply on stdin. Treat the response and its
+observation time as host-reported. The runtime checks the plugin entry and the
+request binding. The owner confirms the underlying Oda account when authorizing
+it. A receipt is historical. Use a new ID for a fresh read after expiry. If the
+plugin is unavailable, use the private ChatGPT authorization for that original
+entry. The owner completes checkout with the Oda cart link.
 
 For a saved-menu delivery, prepare the actual job and export its exact frozen part
 to a new file in a private directory. Pass the
@@ -56,9 +59,8 @@ For a standalone recipe image, use
 and verify the card with its attribution. Use the existing PDF/photo input workflow to
 read supplied attachments on the cloud computer before passing a transcript.
 
-For a plan-only native schedule, name the intended household, task and chat in
+For a plan-only native schedule, name the planning household, task and chat in
 the schedule. Reuse the same installed paths on its later turn. Check the
-destination for the actual result. The foreground runner works with a
-store-free household. For the separate native MENY interface, follow its
+destination for the actual result. For the separate native MENY interface, follow its
 account binding and original receipt recovery in the Dots guide for this
 commit.

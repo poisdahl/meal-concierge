@@ -80,10 +80,11 @@ installed version and attaches to it; it does not select a newer release.
 - A separate data directory for each household/store. Additional trusted agents
   should connect to the same installation instead of making copies.
 
-Oda, Mathem and MENY require the same browser dependencies during installation.
+Managed Oda, Mathem and MENY services validate browser dependencies during installation.
 For Oda and Mathem, dependency validation is separate from both MCP authorization
 and dedicated-browser login; installation does not open a browser or require a
-store account session.
+store account session. The [hosted Oda setup on Dots](dots.md#oda-cart-reads)
+uses ChatGPT’s official Oda plugin for retailer reads.
 
 ### 1. Find or create the installation
 
