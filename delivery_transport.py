@@ -29,6 +29,8 @@ def export_chunks(read_chunk, output):
             offset, expected, checksum = 0, None, hashlib.sha256()
             while True:
                 result = read_chunk(offset)
+                if "text" in result:
+                    raise ValueError("the selected delivery part is text; read it without an output path")
                 metadata = (result.get("bytes"), result.get("sha256"), result.get("content_type"), result.get("filename"))
                 if expected is None:
                     expected = metadata

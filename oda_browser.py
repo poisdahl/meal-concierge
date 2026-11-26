@@ -1384,6 +1384,11 @@ class OdaBrowser:
             raise HouseholdError("Dedicated browser provider client is unavailable or mismatched")
         return client
 
+    def verify_connection_account(self, address: str, *, deadline: float) -> None:
+        """Check the dedicated browser against the selected retail account, without checkout."""
+        with self._checkout_operation(deadline, preserve_session=True), self._inspection_tab():
+            self._verify_checkout_account(address)
+
     def _verify_checkout_account(
         self, address: str, *, retry_cold_open: bool = False,
     ) -> str:

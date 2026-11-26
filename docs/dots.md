@@ -65,10 +65,11 @@ printf '%s\n' '{"operation":"setup","action":"show"}' | \
   "$program/venv/bin/python" -I -B "$program/foreground.py" --home "$household" call REQUEST_UUID
 ```
 
-Read `status` for the running build. Use `receipt REQUEST_UUID` to recover a
-result from a previous process. Identical input with that UUID returns the
-original receipt. Different input conflicts. An incomplete receipt never
-replays the original request.
+Read `status` with a new UUID for a fresh build or household check. Use
+`receipt REQUEST_UUID` to recover the previous result and its build identity.
+Identical input with that UUID returns the historical receipt. Different input
+conflicts. A recovered receipt grants no new native send authority and checks
+whether an exported file still matches its original bytes.
 
 ### Store connections
 
@@ -82,6 +83,10 @@ program/home/profile paths for Oda and MENY. Follow the shared
 [browser and login procedure](runtime-reference.md#grok-browser-and-login) for
 the required browser configuration and private sign-in. Setup alone never
 authorizes a cart change, delivery reservation, order change or payment.
+After login, use `{"operation":"store_check"}` in a new foreground command.
+It verifies a fresh authenticated ordinary cart and, for Oda, matches the
+dedicated browser account to the retailer OAuth account. It returns status
+without account details or a slot selection.
 
 If the managed browser and OAuth cannot run on your Dot, meal planning still
 works through the no-store setup above. A Dot with the supported native browser
@@ -123,17 +128,21 @@ changes. Keep the household, its browser profile and its receipts together.
 For an interrupted merchant call, check its original receipt and the shared
 [order and cart recovery guidance](../skill/references/order-recovery.md). A later
 read may establish the original result. Do not use a new UUID to repeat the
-action. When the exact outcome has been reconciled, `acknowledge REQUEST_UUID
---evidence 'verified outcome'` records that evidence locally and releases the
-foreground fence. It does not clear any core pending operation or authorize
-another action. For a timeout with an unknown ending, preserve the original
-receipt and leave the fence in place until the result can be checked.
+action. When a fresh household command verifies the original result, use
+`acknowledge REQUEST_UUID --checked-receipt READ_UUID --evidence 'verified outcome'`
+to record that reconciliation and release the foreground fence. Core pending
+operations retain their original recovery procedures and authority requirements.
+For a timeout with an unknown ending, keep the fence in place until the result
+can be checked.
 
 Use the existing [Optional Recipe Collection procedure](runtime.md#versioned-recipe-package-integration)
 against the same home. Between foreground calls no service needs stopping.
 Collection installation, withdrawals and removal remain separate from program
 updates. For a failed dependency install use the original installation paths
 and [installer recovery](runtime.md#recover-an-interrupted-attempt).
+If uv reports `UnknownIssuer` while downloading Python, use the cloud computer’s
+trusted system certificate store with `UV_SYSTEM_CERTS=true` and retry the same
+paths. Keep normal certificate verification enabled. [uv certificate settings](https://docs.astral.sh/uv/concepts/authentication/certificates/)
 
 ## Standalone exports and native MENY browser integration
 

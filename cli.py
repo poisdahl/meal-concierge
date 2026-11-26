@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import argparse
 import base64
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -75,6 +76,7 @@ def perform(request, send, *, image_output=None, delivery_output=None):
                 with os.fdopen(descriptor, "wb") as output:
                     output.write(body)
                 result["output_path"] = str(image_output.absolute())
+                result["sha256"] = hashlib.sha256(body).hexdigest()
             except (OSError, ValueError) as exc:
                 return {"ok": False, "error": str(exc), "image_status": "local_output_failed"}, 1
     return {'ok': True, 'result': result}, 0
