@@ -136,6 +136,7 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
     if not isinstance(amounts, dict) or set(amounts) - {"Betalt beløp (kort)"}:
         raise HouseholdError("native rendered order amount labels changed")
     return {"provider": "meny", **evidence, "order_number": order_id,
+            "receipt_layout": "archived" if archived_layout else "unclassified",
             "status": meny_order_card_status(order_ui_text(markers[0])) if markers else "unknown",
             "amount_displays": {key: order_ui_text(value) for key, value in amounts.items()},
             "order_total": None, "payment_status": "unknown", "productQuantityCount": count, "products": items}

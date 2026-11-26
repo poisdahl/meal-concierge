@@ -219,6 +219,7 @@ def hosted_call(directory, identifier, request, plugin, build, *, selection=None
     record = {"format": 1, "request_id": identifier, "operation": request["operation"], "action": request["action"],
               "input_sha256": digest,
               "hosted_read": binding, "runtime_sha256": build["installed_runtime_sha256"],
+              "source_sha256": build["source_sha256"],
               "build": {key: build.get(key) for key in ("source_commit", "release_tag", "source_modified")}}
     install.write_json(directory / f"{identifier}.json", record)
     return {"ok": True, "status": "awaiting_hosted_read", f"{request['operation']}_read": False, "hosted_request": frame,
@@ -230,7 +231,10 @@ def hosted_complete(directory, identifier, reply, plugin, build):
 
     record = read_receipt(directory, identifier)
     frame = (record or {}).get("hosted_read", {})
-    if not record or frame.get("plugin_id") != plugin or record.get("runtime_sha256") != build["installed_runtime_sha256"]:
+    if (not record or frame.get("plugin_id") != plugin
+            or record.get("runtime_sha256") != build["installed_runtime_sha256"]
+            or record.get("source_sha256") != build["source_sha256"]
+            or record["build"].get("source_commit") != build.get("source_commit")):
         raise ValueError("use the original hosted Oda request and its installed build")
     if "response" in record:
         raise ValueError("the original hosted Oda read already ended; use receipt to inspect it")

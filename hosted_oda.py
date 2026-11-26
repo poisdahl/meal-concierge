@@ -1,5 +1,6 @@
 """Bound read-only responses supplied by the Dot's attached Oda plugin."""
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -108,8 +109,12 @@ def cart_view(cart):
             or not isinstance(cart["url"], str) or cart["url"] not in CART_LINKS):
         raise ValueError("incomplete hosted Oda cart result or unexpected Oda cart link")
     breakdown = cart["totalBreakdown"]
-    if not isinstance(breakdown, dict) or not BREAKDOWN_FIELDS <= breakdown.keys():
-        raise ValueError("incomplete hosted Oda cart breakdown")
+    if (not isinstance(breakdown, dict) or not BREAKDOWN_FIELDS <= breakdown.keys()
+            or breakdown.keys() - BREAKDOWN_FIELDS - {"surchargeThresholdDescription"}):
+        raise ValueError("incomplete or unrecognized hosted Oda cart breakdown")
+    threshold = breakdown.get("surchargeThresholdDescription")
+    if threshold is not None and (not isinstance(threshold, str) or len(threshold) > 1_000):
+        raise ValueError("hosted Oda surcharge description is invalid")
     amounts = {key: money(breakdown[key], signed=key in {"productDiscounts", "couponDiscount"})
                for key in sorted(BREAKDOWN_FIELDS)}
     groups = []
@@ -120,6 +125,10 @@ def cart_view(cart):
     observed = {"groups": groups, "totalGrossAmount": money(cart["totalGrossAmount"]),
                 "totalBreakdown": amounts, "productQuantityCount": cart["productQuantityCount"]}
     cart_contents(observed, require_quantities=True)
+    if not any(Decimal(amounts[key]) for key in BREAKDOWN_FIELDS - {"subtotal", "total"}):
+        line_total = sum(Decimal(item["totalGrossAmount"]) for group in groups for item in group["items"])
+        if line_total != Decimal(amounts["subtotal"]):
+            raise ValueError("hosted Oda cart line totals do not match the unadjusted subtotal")
     view = project_agent_result("cart", "get", observed, limit=20)
     if view.get("cart_normalization") is not None or "amounts" not in view:
         raise ValueError("hosted Oda cart totals could not be verified")

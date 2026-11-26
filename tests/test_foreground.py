@@ -195,7 +195,8 @@ class HostedOdaForegroundTests(unittest.TestCase):
     def setUp(self):
         self.state = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.calls = foreground.receipt_directory(self.state, create=True)
-        self.build = {"source_commit": "a" * 40, "installed_runtime_sha256": "b" * 64}
+        self.build = {"source_commit": "a" * 40, "installed_runtime_sha256": "b" * 64,
+                      "source_sha256": "d" * 64}
         self.plugin = "plugin_fixture_oda"
         self.identifier = str(uuid.uuid4())
 
@@ -249,6 +250,10 @@ class HostedOdaForegroundTests(unittest.TestCase):
                 self.finish({**reply, key: value})
         with self.assertRaisesRegex(ValueError, "installed build"):
             self.finish(reply, build={**self.build, "installed_runtime_sha256": "c" * 64})
+        with self.assertRaisesRegex(ValueError, "installed build"):
+            self.finish(reply, build={**self.build, "source_sha256": "e" * 64})
+        with self.assertRaisesRegex(ValueError, "installed build"):
+            self.finish(reply, build={**self.build, "source_commit": "f" * 40})
         with self.assertRaisesRegex(ValueError, "expired|observation time"):
             self.finish({**reply, "observed_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()})
         with self.assertRaisesRegex(ValueError, "unexpected Oda cart link"):
@@ -275,10 +280,15 @@ class HostedOdaForegroundTests(unittest.TestCase):
                       {"quantity": float("inf")}, {"quantity": 3}):
             with self.subTest(patch=patch), self.assertRaises((ValueError, HouseholdError)):
                 self.finish({**reply, "cart": {**cart, "groups": [{"items": [{**item, **patch}]}]}})
-        with self.assertRaisesRegex(ValueError, "incomplete hosted Oda cart breakdown"):
+        with self.assertRaisesRegex(ValueError, "unrecognized hosted Oda cart breakdown"):
             self.finish({**reply, "cart": {**cart, "totalBreakdown": {}}})
+        with self.assertRaisesRegex(ValueError, "unrecognized hosted Oda cart breakdown"):
+            self.finish({**reply, "cart": {**cart, "totalBreakdown": {**cart["totalBreakdown"], "newFee": "3.00"}}})
+        with self.assertRaisesRegex(ValueError, "line totals do not match"):
+            too_low = {**cart["totalBreakdown"], "subtotal": "9.00", "total": "9.00"}
+            self.finish({**reply, "cart": {**cart, "totalGrossAmount": "9.00", "totalBreakdown": too_low}})
         with self.assertRaisesRegex(ValueError, "cart totals could not be verified"):
-            self.finish({**reply, "cart": {**cart, "totalBreakdown": {**cart["totalBreakdown"], "subtotal": "9.00"}}})
+            self.finish({**reply, "cart": {**cart, "totalBreakdown": {**cart["totalBreakdown"], "total": "9.00"}}})
         self.assertEqual(self.begin()[0]["status"], "incomplete")
 
     def test_bounded_cart_summary_reports_truncation_without_a_paging_token(self):
@@ -287,6 +297,8 @@ class HostedOdaForegroundTests(unittest.TestCase):
         item = cart["groups"][0]["items"][0]
         cart["groups"][0]["items"] = [item] * 21
         cart["productQuantityCount"] = 42
+        cart["totalGrossAmount"] = "210.00"
+        cart["totalBreakdown"].update(subtotal="210.00", total="210.00")
         result, code = self.finish(reply)
         self.assertEqual(code, 0, result)
         self.assertEqual(result["result"]["count"], 42)

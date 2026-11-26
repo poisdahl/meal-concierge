@@ -853,7 +853,7 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     return view
 
 
-ORDER_EVIDENCE_FIELDS = ("evidence_kind", "backend_freshness", "source_origin", "source_path", "source_query_keys",
+ORDER_EVIDENCE_FIELDS = ("evidence_kind", "backend_freshness", "source_origin", "source_path", "source_query_keys", "receipt_layout",
                          "history_scope", "rendered_row_count")
 
 

@@ -155,8 +155,10 @@ received. Keep account and delivery details out of the handoff. On an unavailabl
 tool or authorization failure, use `error:"unavailable"` instead of `cart`.
 Use the plugin result for every successful cart observation.
 
-The runtime checks the original request and build, the echoed plugin ID and
-expiry, and the cart structure, quantities and totals. `host_supplied_oda_mcp`
+The runtime checks the original request, installed program and environment,
+the echoed plugin ID and expiry, the cart quantities and the recognized fees
+and discounts. When there are no adjustments, it also checks the sum of the
+lines against the subtotal. `host_supplied_oda_mcp`
 identifies a result supplied by ChatGPT. The owner confirms the intended Oda
 account when connecting or reauthorizing the plugin. `receipt REQUEST_UUID`
 recovers the historical outcome without saving cart contents. A fresh read
@@ -710,6 +712,10 @@ the uniquely labeled raw display map, currently allowing only the observed
 `amount_displays`; full `order_total` and `payment_status` remain unknown,
 and no `grossAmount` is inferred. Provenance remains on the collection, order,
 derived tracking, agent sections and paged item envelopes.
+
+Order detail reports `receipt_layout:"archived"` when the host supplied all
+current archived-layout observations. Legacy-shaped detail returns
+`receipt_layout:"unclassified"` with the same unverified backend status.
 
 ## Capability limits
 

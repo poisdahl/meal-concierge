@@ -1043,6 +1043,7 @@ raise SystemExit(client.main())
             self.assertEqual(value["evidence_kind"], "host_attested_rendered_ui")
             self.assertEqual(value["backend_freshness"], "unverified")
         order = detail["result"]["order"]
+        self.assertEqual(order["receipt_layout"], "unclassified")
         self.assertIsNone(order["order_total"])
         self.assertEqual(order["payment_status"], "unknown")
         self.assertNotIn("grossAmount", order)
@@ -1054,6 +1055,7 @@ raise SystemExit(client.main())
         view = projected["result"]
         self.assertEqual(view["order_items"]["items"][0]["quantity"], 4)
         self.assertEqual(view["order_items"]["backend_freshness"], "unverified")
+        self.assertEqual(view["order"]["receipt_layout"], "unclassified")
         self.assertEqual(view["order"]["tracking"]["backend_freshness"], "unverified")
         self.assertIn("unverified", view["next"])
         for key in ("profile", "menu", "pending_cart_change", "cart_plan", "native_cart_writes_enabled"):
@@ -1110,6 +1112,7 @@ raise SystemExit(client.main())
                                  host=self.current_order_layout_host)
         self.assertEqual(code, 0, detail)
         self.assertEqual(detail["result"]["order"]["productQuantityCount"], 40)
+        self.assertEqual(detail["result"]["order"]["receipt_layout"], "archived")
         self.assertEqual(detail["result"]["order"]["payment_status"], "unknown")
         self.assertEqual(self.writes, 0)
 
