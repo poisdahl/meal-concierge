@@ -41,6 +41,13 @@ for a fresh read after expiry. If the plugin is unavailable, use the private
 ChatGPT authorization for that original entry. The owner completes checkout
 with the Oda cart link.
 
+When the owner explicitly designates the connected active cart for one
+reversible product test and discovery shows `cart_write_command`, use the
+same UUID and the one-item test workflow in the retained source’s `docs/dots.md`.
+Use the original attached mutation response and independent cart reads
+before each next stage. Stop on an unknown ending. Keep test writes out of
+scheduled planning.
+
 For a saved-menu delivery, prepare the actual job and export its exact frozen part
 to a new file in a private directory. Pass the
 `recipe_delivery.read` `job_id` and `part_id` using `call REQUEST_UUID

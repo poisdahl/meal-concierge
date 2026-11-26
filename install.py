@@ -1470,6 +1470,10 @@ def main():
                 raise RuntimeError('repeat setup must use the original hosted Oda plugin')
             if meta.get('hosted_oda_plugin') and args.action in {'start', 'stop', 'restart', 'run', 'connect-store'}:
                 raise RuntimeError('this hosted Oda installation uses foreground tools')
+            if path.exists() and meta.get('hosted_oda_plugin') and args.action in {'update', 'rollback'}:
+                from hosted_oda_cart import require_idle
+
+                require_idle(Path(meta['paths']['state']))
             settings = meta.pop('initial_config', None)
             meta.pop('update_operation', None)
             if args.action == 'install' and path.exists():

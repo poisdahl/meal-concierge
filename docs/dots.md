@@ -76,7 +76,9 @@ whether an exported file still matches its original bytes.
 The planning installation uses `provider=none`. A separate hosted Oda
 installation can search products and recipes and read the cart, delivery
 windows and orders when the official Oda plugin is callable in the Dot.
-Follow the [hosted Oda setup](#oda-cart-reads) below. The planning
+The same installation has a [guarded one-item test](#oda-one-item-test-cart)
+for an owner-designated empty cart. Follow the [hosted Oda setup](#oda-cart-reads).
+The planning
 installation can also search the [public MENY catalog](#public-meny-catalog).
 Full MENY shopping uses the shared store runtime with a working dedicated browser.
 
@@ -201,6 +203,69 @@ in the owner’s chat. The receipt stores request fingerprints and metadata.
 These private fingerprints may be guessable for short order IDs or queries.
 Delivery reservations and order changes are outside this foreground workflow.
 
+#### Oda one-item test cart
+
+This check adds one exact product to an empty, unreserved new-order cart, then
+removes that unit. Use it only when the owner designates that cart for the test
+and leaves it to the Dot until the original quantities are verified. Keep the
+same attached official Oda plugin and authenticated account throughout. Start a
+fresh session for a changed connection after resolving any existing operation.
+
+> Use the Meal Concierge Oda household on your cloud computer to test the
+> attached Oda plugin. I designate its active cart for one reversible test.
+> Check that it is an empty new cart with no delivery slot, add one unit of an
+> ordinary packaged product, verify the quantity with a fresh cart read,
+> remove that unit, and verify that the cart is empty again. Use the same
+> Meal Concierge operation for the whole test. If a result is uncertain,
+> inspect the original operation before any further action.
+
+Keep one canonical operation UUID throughout. Run the installed command on
+the Dot with a private JSON object on stdin for each stage:
+
+```sh
+"$program/venv/bin/python" -I -B "$program/foreground.py" --home "$household" hosted-cart "$operation_id"
+```
+
+1. Read the selected-address context using the same owner-authorized
+   plugin and find one exact in-stock product with `catalog.products`.
+   Use `{"action":"begin","product_id":123,"isolated_new_cart":true,"authorized_addresses":[…]}`
+   with the actual numeric product ID and the address response projected to
+   `id` and `isSelected` for every returned entry. Keep those values private.
+2. For each read frame, invoke its exact `get_delivery_addresses` then
+   `get_cart` in the attached plugin. Send `action:"observe"`, the frame’s
+   `frame_id` and `plugin_id`, actual UTC `address_observed_at` and
+   `cart_observed_at`, projected `addresses`, and `cart`. Preserve the five
+   cart fields listed above and the original `deliverySlot`. Supply explicit
+   null only when the complete provider return establishes that there is no
+   slot. Preserve the original group metadata.
+3. Use `action:"add"` after `baseline_verified`. Observe the pre-dispatch read
+   frame. Call `manipulate_cart` once with the exact arguments from the
+   resulting `dispatch:true` frame, within its expiry. Use
+   `action:"acknowledge"` with the original `frame_id`, `plugin_id`, `tool`,
+   `arguments`, actual UTC `dispatched_at` and `observed_at`,
+   `result_source:"original_attached_mutation_response"`, `is_error:false`, and
+   `cart` from that actual mutation response. Supply the actual
+   `invocation_id` if available or null. A confirmed provider terminal error
+   uses `is_error:true` and `cart:null`. A transport failure or a missing reply
+   is uncertain. A later cart read cannot serve as the original response.
+4. Complete the new independent read frame. After `added`, use
+   `action:"remove"` and the same pre-dispatch, acknowledgement and fresh
+   readback sequence for the one negative delta. Report success at
+   `restored` with both acknowledgements present, an empty cart and no slot.
+
+`action:"status"` reads the original private journal. It never issues a
+mutation. `action:"retry_read"` replaces only an outstanding read frame.
+After a lost mutation reply, retain the original operation, its installed
+build and the retained workspace registry. Use the original attached tool
+result if it becomes available. Stop on a divergent response, changed
+connection, or unknown ending. Use a separate `cart.get` to inspect actual
+quantities while resolving the original operation without repeating a delta.
+An unresolved test blocks further tests in this workspace and program
+updates in its home. The plugin supplies the mutation results, account
+markers and observation times. It exposes neither a cart selector nor a
+provider idempotency key here. This check is limited to one ordinary item in
+an initially empty cart. Checkout stays on Oda’s site.
+
 ### Attachments and scheduled planning
 
 Use the shared [recipe delivery workflow](../skill/references/recipe-delivery.md)
@@ -229,6 +294,7 @@ and refresh the skill binding. In the planning home, verify `tools`, `status`,
 the saved menu and a prior receipt. In the hosted Oda home, verify `tools`,
 reopen a previous receipt and use the attached plugin for a fresh read.
 Reuse the original home for repeat setup.
+Finish any Oda test-cart operation before updating or rolling back its program.
 
 Use `install.sh doctor --home ABSOLUTE_HOME` to diagnose installation markers and
 version mismatches. A foreground household does not have a running RPC listener;
@@ -646,8 +712,16 @@ the write frame or translate lost replies into a definite pre-click stop.
 An unchanged cart cannot release a native write fence. Retain the original
 journal and use the original native dispatch ending and bound readback for
 recovery. If the core saved that ending before its caller lost the command
-result, read-only reconciliation can still verify the cart. A missing native
-dispatch reply keeps the operation pending and blocks managed product preparation.
+result, read-only reconciliation can still verify the cart. Use
+`python -I -B clients/dots_session.py inspect-cart --root ABSOLUTE_ORIGINAL_ROOT`
+from the selected source to see redacted evidence without opening a retailer
+tab. `frame_prepared` means the core saved a frame for emission.
+`host_acknowledged` means the reply to that exact frame was validated and
+saved before updating the core. In that case `reconcile_change` can pair the
+ending with fresh bound readback after a restart. `no_frame_record` also
+covers older attempts. It does not prove that a click did or did not happen.
+A missing native dispatch reply keeps the operation pending and blocks managed
+product preparation.
 If the native interface cannot preserve these guards, leave writes disabled.
 Synthetic protocol/recovery tests do not establish authenticated browser
 execution, payment support or dependable long-running availability.

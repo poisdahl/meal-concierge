@@ -136,6 +136,14 @@ class DotsSessionTests(unittest.TestCase):
     def call(self, request, command_id=None, host=None):
         return self.run_session("call", {"request_id": command_id or str(uuid.uuid4()), "request": request}, host)
 
+    def inspect_cart(self):
+        before = self.files()
+        result = subprocess.run([sys.executable, "-I", "-B", str(SOURCE / "clients/dots_session.py"),
+                                 "inspect-cart", "--root", str(self.root)],
+                                check=True, capture_output=True)
+        self.assertEqual(self.files(), before)
+        return json.loads(result.stdout)["result"]
+
     def ensure(self, quantity=1):
         return {"operation": "cart", "action": "ensure",
                 "requirements": [{"product_id": PRODUCT, "product_name": "Synthetic oats", "quantity": quantity}]}
@@ -866,6 +874,8 @@ raise SystemExit(client.main())
         self.assertEqual(self.quantity, 1)
         self.assertEqual(self.writes, 1)
         self.assertEqual(self.state()["pending_cart_change"]["expected"], {PRODUCT: 1})
+        self.assertEqual(self.inspect_cart(), {"pending": True, "writes_enabled": True,
+                                              "dispatch_evidence": "frame_prepared", "core_acknowledged": False})
         before = self.files()
         count = len(self.frames)
         code, cached = self.call(self.ensure(), command_id)
@@ -882,6 +892,50 @@ raise SystemExit(client.main())
         self.assertIn("pending_cart_change", self.state())
         self.assertEqual(self.writes, 1)
         self.assertEqual(self.quantity, 1)
+
+    def test_saved_host_ack_recovers_managed_batch_after_restart_with_original_id(self):
+        request = self.managed_request()
+        command_id = str(uuid.uuid4())
+        launch = f"""
+import sys
+sys.path.insert(0, {str(SOURCE)!r})
+from clients import dots_session
+original = dots_session.dots.exclusive_json
+def fail_after_ack(path, record, maximum):
+    original(path, record, maximum)
+    if path.name == "ack.json":
+        raise OSError("fixture interrupted after saving the original host acknowledgement")
+dots_session.dots.exclusive_json = fail_after_ack
+raise SystemExit(dots_session.main())
+"""
+        code, result = self.run_session("call", {"request_id": command_id, "request": request},
+                                        launch_code=launch)
+        self.assertEqual(code, 1, result)
+        self.assertEqual((self.quantity, self.writes), (2, 1))
+        self.assertEqual(self.inspect_cart(), {"pending": True, "writes_enabled": True,
+                                              "dispatch_evidence": "host_acknowledged", "core_acknowledged": False})
+        code, result = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, result)
+        operation_id = result["result"]["operation_id"]
+        reconcile = {"operation": "cart", "action": "reconcile_change", "operation_id": operation_id}
+        code, result = self.call({**reconcile, "operation_id": "wrong-operation"})
+        self.assertEqual(code, 1, result)
+        self.assertFalse(self.inspect_cart()["core_acknowledged"])
+
+        def changed_tab(frame):
+            reply = self.host(frame)
+            reply["browser_binding"] = {**self.binding, "tab_id": "synthetic-different-tab"}
+            return reply
+
+        code, result = self.call(reconcile, host=changed_tab)
+        self.assertEqual(code, 1, result)
+        self.assertTrue(self.inspect_cart()["core_acknowledged"])
+        self.frames.clear()
+        code, result = self.call(reconcile)
+        self.assertEqual(code, 0, result)
+        self.assertEqual([frame["operation"] for frame in self.frames], ["verify_new_cart", "get_cart"])
+        self.assertFalse(self.inspect_cart()["pending"])
+        self.assertEqual((self.quantity, self.writes), (2, 1))
 
     def test_unchanged_cart_cannot_retire_a_native_write_without_its_ending(self):
         def lose_reply_before_click(frame):

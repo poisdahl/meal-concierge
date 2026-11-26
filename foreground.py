@@ -267,7 +267,7 @@ def execute(options):
     if options.action == "call":
         request = cli.read_request(sys.stdin.buffer)
         request.setdefault("response_view", "agent")
-    elif options.action == "complete-hosted":
+    elif options.action in {"complete-hosted", "hosted-cart"}:
         from on_demand import _json
 
         data = sys.stdin.buffer.read(cli.MAX_INPUT + 1)
@@ -299,6 +299,8 @@ def execute(options):
             raise ValueError("the foreground runner requires store-free or hosted Oda installation")
         if options.action == "complete-hosted" and plugin is None:
             raise ValueError("complete-hosted requires a hosted Oda installation")
+        if options.action == "hosted-cart" and plugin is None:
+            raise ValueError("hosted-cart requires a hosted Oda installation")
         if options.action == "call" and plugin is None:
             validate_request(request)
         state = Path(meta["paths"]["state"])
@@ -316,6 +318,7 @@ def execute(options):
                     return {"ok": True, "provider": "oda", "household": settings["household"], "build": build,
                             "transport": "hosted_mcp", "plugin_id": plugin, "operations": sorted(ODA_TOOLS),
                             **{f"{operation}_actions": sorted(actions) for operation, actions in ODA_TOOLS.items()},
+                            "cart_write_command": "hosted-cart",
                             "skill": str(SOURCE / "skill/SKILL.md")}, 0
                 from meny_public import ACTIONS as MENY_CATALOG_ACTIONS
 
@@ -326,6 +329,11 @@ def execute(options):
 
             if options.action == "complete-hosted":
                 return hosted_complete(directory, options.request_id, reply, plugin, build)
+            if options.action == "hosted-cart":
+                import hosted_oda_cart
+
+                directory = hosted_oda_cart.workspace_registry(state)
+                return hosted_oda_cart.run(state, directory, options.request_id, reply, plugin, build), 0
             if plugin is not None:
                 import hosted_oda
 
@@ -358,6 +366,8 @@ def main():
     cli.output_options(command)
     subparsers.add_parser("receipt").add_argument("request_id", type=request_id)
     subparsers.add_parser("complete-hosted").add_argument("request_id", type=request_id)
+    cart = subparsers.add_parser("hosted-cart", help="run an owner-isolated hosted Oda cart test")
+    cart.add_argument("request_id", type=request_id)
     options = parser.parse_args()
     try:
         value, code = execute(options)

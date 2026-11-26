@@ -470,6 +470,8 @@ class HostedOdaForegroundTests(unittest.TestCase):
                 self.assertNotIn('"12345"', path.read_text())
 
     def test_installed_hosted_front_door_issues_completes_and_recovers(self):
+        import hosted_oda_cart
+
         root = self.state.resolve()
         home, code_root = root / "home", root / "program"
         release = code_root / "fixture-release"
@@ -502,11 +504,13 @@ class HostedOdaForegroundTests(unittest.TestCase):
         with (patch.object(foreground, "SOURCE", release), patch.object(sys, "prefix", str(venv)),
               patch.object(service, "BUILD_IDENTITY", {**self.build, "identity_status": "recorded"}),
               patch.object(runtime_ownership, "assert_no_legacy_service"),
+              patch.object(hosted_oda_cart, "DOT_WORKSPACE", root),
               patch.object(foreground, "verify_release_layout"),
               patch.object(service, "build_application", side_effect=AssertionError("started a service"))):
             discovered, code = execute("tools")
             self.assertEqual((code, discovered["transport"]), (0, "hosted_mcp"))
             self.assertEqual(discovered["cart_actions"], ["get"])
+            self.assertEqual(discovered["cart_write_command"], "hosted-cart")
             with self.assertRaisesRegex(ValueError, "read-only actions"):
                 execute("call", b'{"operation":"cart","action":"ensure"}')
             self.assertEqual(execute("receipt")[0]["status"], "not_found")
@@ -525,6 +529,11 @@ class HostedOdaForegroundTests(unittest.TestCase):
             historical, code = execute("receipt")
             self.assertEqual((code, historical["status"]), (0, "historical_cart_read"))
             self.assertNotIn("result", historical)
+            begun, code = execute("hosted-cart", b'{"action":"begin","product_id":515,"isolated_new_cart":true,'
+                                  b'"authorized_addresses":[{"id":7,"isSelected":true}]}')
+            self.assertEqual((code, begun["status"], begun["dispatch"]), (0, "reading_baseline", False))
+            stopped, code = execute("hosted-cart", b'{"action":"abort"}')
+            self.assertEqual((code, stopped["status"], stopped["dispatch"]), (0, "aborted", False))
         self.assertEqual(recipes.read_bytes(), b"retained fixture database")
 
 

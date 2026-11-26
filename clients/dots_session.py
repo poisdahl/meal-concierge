@@ -282,6 +282,63 @@ def cart_policy(store, config, request):
         return {"enabled": cart_writes_enabled(config, state)}
 
 
+def cart_dispatch_digest(config_digest, pending):
+    # The ending and readback can be saved later without changing the original batch.
+    batch = {key: value for key, value in pending.items() if key not in {"dispatch_finished", "native_managed"}}
+    if "native_managed" in pending:
+        batch["native_managed"] = {key: value for key, value in pending["native_managed"].items()
+                                   if key != "verified"}
+    return dots.digest(dots.encoded({"config_sha256": config_digest, "batch": batch}))
+
+
+def prepare_cart_dispatch(state, config_digest, pending, frame):
+    directory = state / "native-cart-dispatch"
+    if not os.path.lexists(directory):
+        directory.mkdir(mode=0o700)
+        on_demand._sync_directory(state)
+    dots.existing_root(directory)
+    identity = cart_dispatch_digest(config_digest, pending)
+    attempt = directory / identity
+    attempt.mkdir(mode=0o700)
+    on_demand._sync_directory(directory)
+    dots.exclusive_json(attempt / "frame.json", {
+        "batch_sha256": identity, **{key: frame[key] for key in ("command_id", "call_id", "emitted_at", "expires_at")}
+    }, MAX_LINE)
+    return attempt
+
+
+def cart_dispatch_status(state, config_digest, pending):
+    directory = state / "native-cart-dispatch"
+    identity = cart_dispatch_digest(config_digest, pending)
+    attempt = directory / identity
+    if not os.path.lexists(directory):
+        return "no_frame_record"
+    dots.existing_root(directory)
+    if not os.path.lexists(attempt):
+        return "no_frame_record"
+    dots.existing_root(attempt)
+    frame = attempt / "frame.json"
+    if not os.path.lexists(frame):
+        return "no_frame_record"
+    frame = on_demand._json(on_demand._read_file(frame, MAX_LINE))
+    fields = {"batch_sha256", "command_id", "call_id", "emitted_at", "expires_at"}
+    dots.object_fields(frame, fields, fields)
+    if (frame["batch_sha256"] != identity
+            or any(str(uuid.UUID(frame[key])) != frame[key] for key in ("command_id", "call_id"))
+            or not dots.timestamp(frame["emitted_at"]) < dots.timestamp(frame["expires_at"])):
+        raise HouseholdError("original native cart frame record changed")
+    ending = attempt / "ack.json"
+    if not os.path.lexists(ending):
+        return "frame_prepared"
+    ending = on_demand._json(on_demand._read_file(ending, MAX_LINE))
+    fields = {"command_id", "call_id", "observed_at"}
+    dots.object_fields(ending, fields, fields)
+    if (any(ending[key] != frame[key] for key in ("command_id", "call_id"))
+            or not dots.timestamp(frame["emitted_at"]) <= dots.timestamp(ending["observed_at"]) < dots.timestamp(frame["expires_at"])):
+        raise HouseholdError("original native cart acknowledgement record changed")
+    return "host_acknowledged"
+
+
 class NativeHost:
     owns_managed_cart_journal = True
 
@@ -340,6 +397,7 @@ class NativeHost:
                 frame["preconditions"] = ["same approved cloud browser/account/cart context", "no order edit",
                                            "complete current cart equals before_quantities",
                                            "exact product and unique enabled unobscured control", "unexpired request"]
+                attempt = prepare_cart_dispatch(self.store.directory, state["native_config_sha256"], pending, frame)
         emit(frame)  # Core intent and immutable household identity precede issuance.
         reply = self.reader.line(deadline)
         dots.object_fields(reply, {"reply_to", "browser_binding", "observed_at", "result", "error"},
@@ -354,6 +412,12 @@ class NativeHost:
             raise HouseholdError("native host operation failed; reconcile any pending write without resend")
         if not isinstance(reply["result"], dict):
             raise HouseholdError("native host result must be an object")
+        if write:
+            if set(reply["result"]) != {"dispatched"} or reply["result"]["dispatched"] is not True:
+                raise HouseholdError("native cart dispatch ending is unknown; reconcile without resend")
+            dots.exclusive_json(attempt / "ack.json", {
+                "command_id": self.command_id, "call_id": call_id, "observed_at": observed.isoformat(),
+            }, MAX_LINE)
         return (reply["result"], observed) if observation_time else reply["result"]
 
     def probe(self, **kwargs):
@@ -479,8 +543,6 @@ class NativeHost:
                 raise HouseholdError("native cart batch exceeds the existing two-click limit")
             managed = self.managed_intent(operations)
             result = self.exchange(tool, arguments, deadline=deadline, write=True)
-            if set(result) != {"dispatched"} or result["dispatched"] is not True:
-                raise HouseholdError("native cart dispatch ending is unknown; reconcile without resend")
             if not managed:
                 return result
             with self.store.locked() as state:
@@ -594,6 +656,47 @@ def init(root, value, reader):
                     "setup": app.handle({"operation": "setup", "action": "show"})}
 
 
+def load_bound_state(root, config_data):
+    state = dots.existing_root(root / "state")
+    regular(state / "state.json")
+    regular(state / "recipes.sqlite3")
+    saved = on_demand._json(on_demand._read_file(state / "state.json", on_demand.MAX_MENU))
+    if saved.get("native_config_sha256") != dots.digest(config_data):
+        raise ValueError("original native configuration binding changed; no replacement account/context")
+    return state, saved
+
+
+def inspect_cart(root):
+    root = dots.existing_root(root)
+    on_demand._read_file(root / "command.lock", 0)
+    with file_lock(root / "command.lock"):
+        data = on_demand._read_file(root / "config.json", MAX_LINE)
+        config = configuration(on_demand._json(data))
+        state, saved = load_bound_state(root, data)
+        pending = saved.get("pending_cart_change")
+        ending = cart_dispatch_status(state, saved["native_config_sha256"], pending) if pending else "none"
+        return {"pending": bool(pending), "writes_enabled": cart_writes_enabled(config, saved),
+                "dispatch_evidence": ending, "core_acknowledged": bool(pending and pending.get("dispatch_finished") is True)}
+
+
+def restore_cart_acknowledgement(app, request):
+    with app.store.locked() as state:
+        pending = state.get("pending_cart_change")
+        if not pending or pending["provider"] != "meny":
+            return request
+        supplied = request.get("operation_id")
+        if supplied not in (None, app._cart_operation_ref(pending)):
+            original = {key: value for key, value in pending.items() if key != "dispatch_finished"}
+            if supplied != app._cart_operation_ref(original):
+                return request
+        if cart_dispatch_status(app.store.directory, state["native_config_sha256"], pending) != "host_acknowledged":
+            return request
+        pending["dispatch_finished"] = True
+        if supplied is not None:
+            return {**request, "operation_id": app._cart_operation_ref(pending)}
+    return request
+
+
 def command(root, value, reader):
     dots.object_fields(value, {"request_id", "request"}, {"request_id", "request"})
     command_id = value["request_id"]
@@ -656,12 +759,7 @@ def command(root, value, reader):
                 return {"ok": False, "status": "incomplete", "message": "Original command has no ending; no replay."}
             return on_demand._json(on_demand._read_file(target / "result.json", on_demand.MAX_MENU))
         # Fail missing originals BEFORE publishing a new command intent.
-        state = dots.existing_root(root / "state")
-        regular(state / "state.json")
-        regular(state / "recipes.sqlite3")
-        saved = on_demand._json(on_demand._read_file(state / "state.json", on_demand.MAX_MENU))
-        if saved.get("native_config_sha256") != dots.digest(config_data):
-            raise ValueError("original native configuration binding changed; no replacement account/context")
+        _, saved = load_bound_state(root, config_data)
         write = ((request.get("operation") == "cart" and request.get("action") in {"ensure", "clear"})
                  or (request.get("operation") == "products" and request.get("action") == "apply"))
         if write and not cart_writes_enabled(config, saved):
@@ -674,6 +772,8 @@ def command(root, value, reader):
                       if request.get("operation") == "products" and request.get("action") == "apply" else 240)
             stack, app = application(root, config, reader, command_id, time.monotonic() + budget, request=request)
             with stack:
+                if request["operation"] == "cart" and request.get("action") == "reconcile_change":
+                    request = restore_cart_acknowledgement(app, request)
                 result = (cart_policy(app.store, config, request) if request["operation"] == "native_cart_policy"
                           else app.handle(request))
                 if request.get("operation") == "products" and request.get("action") == "apply":
@@ -687,9 +787,11 @@ def command(root, value, reader):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("init", "call"))
+    parser.add_argument("action", choices=("init", "call", "inspect-cart"))
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
+    if args.action == "inspect-cart":
+        return execute(args, None)
     with input_mode():
         emit({"kind": "core_ready", "input_max_bytes": MAX_LINE})
         return execute(args, Input())
@@ -697,9 +799,12 @@ def main():
 
 def execute(args, reader):
     try:
-        value = reader.line(time.monotonic() + 60)
-        result = ({"ok": True, "result": init(args.root, value, reader)} if args.action == "init"
-                  else command(args.root, value, reader))
+        if args.action == "inspect-cart":
+            result = {"ok": True, "result": inspect_cart(args.root)}
+        else:
+            value = reader.line(time.monotonic() + 60)
+            result = ({"ok": True, "result": init(args.root, value, reader)} if args.action == "init"
+                      else command(args.root, value, reader))
         emit({"kind": "core_result", **result})
         return 0 if result["ok"] else 1
     except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:

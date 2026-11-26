@@ -43,7 +43,7 @@ or a ChatGPT Dot's cloud computer**.
 | [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
-| [ChatGPT Dots](docs/dots.md) | Meal planning, recipe bank, shopping lists and public MENY search on the Dot’s cloud computer. A separate household uses the attached Oda plugin for searches, cart reads, delivery windows and order tracking. |
+| [ChatGPT Dots](docs/dots.md) | Meal planning, recipe bank, shopping lists and public MENY search on the Dot’s cloud computer. A separate household uses the attached Oda plugin for searches, cart reads, delivery windows, order tracking and a guarded one-item test on an isolated cart. |
 
 ### Requirements
 
