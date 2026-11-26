@@ -528,9 +528,9 @@ other clients retain the core's default 240-second product budget. A cloud
 executor's enclosing timeout must allow the command to finish, with a separate
 reserve for cleanup and policy disable. The longer budget does not extend any
 individual observation or permit a later click using an expired frame:
-delivery-picker and product-search read replies have at most 120 seconds, while
-every other host reply, including writes, has at most 60 seconds. The command's existing deadline
-still caps each reply. EOF, timeout, stale/mismatched reply
+delivery-picker, product-search and recipe-search replies have at most 120
+seconds. Every other host reply, including writes, has at most 60 seconds.
+The command's existing deadline still caps each reply. EOF, timeout, stale/mismatched reply
 or ambiguous dispatch leaves the original pending journal. Reopen the same
 household and use `reconcile_change` with a fresh actual read; never resend
 the write frame or translate lost replies into a definite pre-click stop.
