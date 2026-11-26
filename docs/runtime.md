@@ -58,7 +58,8 @@ installed version and attaches to it; it does not select a newer release.
 
 - **Linux** with a working user systemd service manager, or **Apple Silicon
   macOS** with a logged-in user's launchd session. Grok uses its
-  [cloud setup](grok.md). Windows, Intel macOS and WSL are not covered here.
+  [cloud setup](grok.md). ChatGPT Dots use the [cloud foreground setup](dots.md).
+  Windows, Intel macOS and WSL are not covered here.
 - **Python 3.10+** and **uv** for installation. The installer downloads its own
   Python 3.12.12 and dependencies; you do not manage that environment yourself.
 - For browser use: **agent-browser 0.33.1** and **Chrome or non-snap Chromium**.

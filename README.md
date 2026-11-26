@@ -21,8 +21,8 @@
 
 Use food you already have and shop through **Oda, Mathem or MENY**.
 Meal Concierge keeps your recipes and household preferences between conversations.
-It runs as a background service on the computer hosting your agent, including
-Grok's cloud computer.
+It runs on the computer hosting your agent. ChatGPT Dots can run meal planning
+and shopping lists on their own cloud computer through the foreground runner.
 
 [Install](#installation) · [First use](#first-use) ·
 [Update](#update-meal-concierge) · [Recipe collection](#add-or-update-the-recipe-collection) ·
@@ -30,7 +30,8 @@ Grok's cloud computer.
 
 ## Installation
 
-Use an existing agent on **Linux, Apple Silicon macOS, or Grok's cloud computer**.
+Use an existing agent on **Linux, Apple Silicon macOS, Grok's cloud computer,
+or a ChatGPT Dot's cloud computer**.
 
 ### Agent support
 
@@ -42,6 +43,7 @@ Use an existing agent on **Linux, Apple Silicon macOS, or Grok's cloud computer*
 | [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
+| [ChatGPT Dots](docs/dots.md) | Foreground meal planning, recipe bank and shopping lists on the Dot’s cloud computer. See the Dots guide for store limits. |
 
 ### Requirements
 
@@ -149,6 +151,8 @@ Ask the agent managing your installation:
 > Preserve my recipes, settings, login, browser profile and saved data. Check
 > prerequisites before stopping; use the bounded verification in that guide.
 > Report the release tag, running commit and health. Do not update the recipe collection.
+
+For ChatGPT Dots, use the [foreground update steps](docs/dots.md#updates-and-troubleshooting).
 
 To update **both program and collection**, replace the last sentence with:
 

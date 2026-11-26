@@ -5,7 +5,8 @@ description: Operate an installed Meal Concierge household service for meals, gr
 
 # Meal Concierge
 
-Use this household's currently discovered Meal Concierge MCP tools. The service
+Use this household's currently discovered Meal Concierge tools. On ChatGPT Dots,
+use the household's [foreground tool binding](references/dots.md). The runtime
 owns the configured household, recipe bank and any connected store/account/payment
 path. With `provider=none`, recipes, menus and ordinary shopping lists work
 without login. Do not require store, delivery or payment setup for these tasks.

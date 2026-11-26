@@ -1,6 +1,143 @@
-# Dots: foreground menu and observed product planning
+# ChatGPT Dots
 
-Meal Concierge can run supplied recipe/menu/PDF batches in a cloud executor
+Use Meal Concierge on your Dot’s cloud computer. Its foreground runner opens
+the same private household for each command. No persistent service or MCP
+registration is required. Your recipes, menus, shopping lists and command
+receipts live in that household between turns.
+
+## Install with your Dot
+
+Paste this into your Dot:
+
+> Set up Meal Concierge on your own cloud computer from
+> https://github.com/poisdahl/meal-concierge. Follow docs/dots.md at a published
+> stable program release that includes foreground.py. Start with meal planning
+> and shopping lists. Reuse my existing foreground household if present.
+> Load the shared skill, verify the tools, report the release and exact commit,
+> and show me the setup question. Keep all existing households and data.
+
+If you are testing a pull request, give your Dot the **full reviewed commit**
+and ask for a separate test installation at that commit. Use that commit’s
+instructions. Report it as a test build; an untagged commit is not a published
+stable release. For a normal install use the
+[published program release selection](runtime.md#choose-a-program-release).
+If no published release has this runner, report that before installing.
+
+Use a private owned directory in the Dot’s retained cloud workspace, such as
+`/workspace/shared/meal-concierge`, with separate directories for the source
+checkout, program and household. Use an explicit home on every command. Avoid
+`/tmp` for anything needed between turns. Check the intended home and established
+Dot installation locations before creating one. If the existing home has the
+foreground runner, discover its tools and reuse it. If it holds an older
+external installation, use the update procedure below. A legacy `dots_session.py`
+household uses a different layout and ownership model; keep using its original
+commands and registry. Never open it as an installer-managed household.
+
+### First use
+
+Run these commands on the Dot from the selected, clean Git checkout, with Python
+3.10+ and `uv` available. The installer stages its own hash-pinned Python runtime.
+If the Dot’s HOME is read-only, put `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR`
+under the private writable workspace when invoking the installer.
+
+```sh
+./install.sh install --manager external --provider none --household 'My Dot household' \
+  --home /workspace/shared/meal-concierge/household \
+  --code-root /workspace/shared/meal-concierge/program
+
+program=/workspace/shared/meal-concierge/program/current
+household=/workspace/shared/meal-concierge/household
+"$program/venv/bin/python" -I -B "$program/foreground.py" --home "$household" tools
+```
+
+Keep the existing home and its exact program path in your Dot’s setup context.
+Load the `skill` path returned by discovery and bind it to the household’s
+[foreground commands](../skill/references/dots.md). If your Dot offers a cloud
+skill installer, install or refresh the shared skill and its references using
+that supported path, with the binding for this household. Otherwise have the
+Dot read the installed files. Check discovery and use in a later turn.
+
+Use a new canonical UUID for each new command. `call` reads one JSON request
+from stdin. Start by reading `setup.show`, then present the returned question.
+
+```sh
+printf '%s\n' '{"operation":"setup","action":"show"}' | \
+  "$program/venv/bin/python" -I -B "$program/foreground.py" --home "$household" call REQUEST_UUID
+```
+
+Read `status` for the running build. Use `receipt REQUEST_UUID` to recover a
+result from a previous process. Identical input with that UUID returns the
+original receipt. Different input conflicts. An incomplete receipt never
+replays the original request.
+
+### Store connections
+
+An installer-managed store household needs the existing supported dedicated
+browser, visible to the owner for a private sign-in, and its adapter to work in
+the **same cloud execution environment**. Oda also needs the OAuth helper's
+callback to be reachable from that browser. Check these prerequisites before
+making a store installation. An executable version check alone cannot establish
+browser launch, private sign-in, or OAuth callback reachability. Use separate
+program/home/profile paths for Oda and MENY. Follow the shared
+[browser and login procedure](runtime-reference.md#grok-browser-and-login) for
+the required browser configuration and private sign-in. Setup alone never
+authorizes a cart change, delivery reservation, order change or payment.
+
+If the managed browser and OAuth cannot run on your Dot, meal planning still
+works through the no-store setup above. A Dot with the supported native browser
+can use the existing [MENY native-browser interface](#native-browser-requests-over-stdinstdout)
+under its separate private core root, subject to the capabilities listed there.
+Native browser sign-in alone does not connect the managed runtime. The native
+MENY interface cannot place orders or reserve delivery. Oda public catalog
+access does not establish an authenticated Oda connection or checkout browser.
+
+### Attachments and scheduled planning
+
+Use the shared [recipe delivery workflow](../skill/references/recipe-delivery.md)
+to prepare the saved menu and export the frozen PDF. Use the Dot’s native file
+attachment action to post it in the requested conversation. Verify that a file
+card can be opened. Treat an export path as local output. For an available
+managed cover, export the specific recipe revision’s image and attach it the
+same way. Retain source attribution.
+
+For scheduled planning, ask the Dot to use its native scheduler. Give it the
+household binding, exact task, time zone and intended chat. Keep this schedule
+planning-only. Verify a later result in the intended destination and manage it
+through the Dot’s Scheduled view. Shell background execution is not a schedule.
+
+### Updates and troubleshooting
+
+Select a new published stable program tag and resolve it to its full commit.
+From that checkout, use the same home in `prepare-program` and `update` with the
+returned `--prepared-program` ID, following [bounded maintenance](maintenance.md).
+Wait for active foreground work to finish. Use the same `current` path afterward,
+refresh the skill binding and verify `tools`, `status`, the saved menu and a
+prior receipt. Repeat setup means reuse; it does not authorize an update.
+
+Use `install.sh doctor --home ABSOLUTE_HOME` to diagnose installation markers and
+version mismatches. A foreground household does not have a running RPC listener;
+use `foreground.py tools` and a real call for health. If state or the original
+program selection is missing, recover the original installation before making
+changes. Keep the household, its browser profile and its receipts together.
+
+For an interrupted merchant call, check its original receipt and the shared
+[order and cart recovery guidance](../skill/references/order-recovery.md). A later
+read may establish the original result. Do not use a new UUID to repeat the
+action. When the exact outcome has been reconciled, `acknowledge REQUEST_UUID
+--evidence 'verified outcome'` records that evidence locally and releases the
+foreground fence. It does not clear any core pending operation or authorize
+another action. For a timeout with an unknown ending, preserve the original
+receipt and leave the fence in place until the result can be checked.
+
+Use the existing [Optional Recipe Collection procedure](runtime.md#versioned-recipe-package-integration)
+against the same home. Between foreground calls no service needs stopping.
+Collection installation, withdrawals and removal remain separate from program
+updates. For a failed dependency install use the original installation paths
+and [installer recovery](runtime.md#recover-an-interrupted-attempt).
+
+## Standalone exports and native MENY browser integration
+
+Meal Concierge can also run supplied recipe/menu/PDF batches in a cloud executor
 without a service or a local computer. `clients/dots.py` adds read-only product
 planning from facts observed by the agent's native browser. It calls the real
 MENY normalizer and product planner. It does not connect Python to the browser.

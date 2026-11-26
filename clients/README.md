@@ -10,6 +10,7 @@ Start with the [setup prompt](../README.md#installation) or choose your guide:
 | OpenClaw | [OpenClaw](../docs/openclaw.md) |
 | NanoClaw | [NanoClaw](../docs/nanoclaw.md) |
 | Grok Bot | [Grok Bot](../docs/grok.md) |
+| ChatGPT Dots | [Cloud foreground setup](../docs/dots.md) |
 
 ## Reuse your household
 
