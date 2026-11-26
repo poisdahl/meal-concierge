@@ -30,11 +30,16 @@ def source(home, workspace):
     _private_directory(directory)
     with file_lock(directory / ".installer.lock"):
         meta = install.completed_manifest(directory)
-        root = Path(meta["code_root"])
-        paths = {key: Path(meta["paths"][key]) for key in ("state", "config")}
+        try:
+            root = Path(meta["code_root"])
+            release = Path(meta["release"])
+            paths = {key: Path(meta["paths"][key]) for key in ("state", "config")}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("the original planning installation manifest is invalid") from exc
         if (meta.get("manager") != "external" or meta.get("home") != home
-                or install.bounded_json(root / "owner.json").get("home") != home
-                or (root / "current").resolve(strict=True) != Path(meta["release"]).resolve(strict=True)
+                or not root.is_absolute() or root.resolve(strict=True) != root or not root.is_relative_to(workspace)
+                or read_private_json(root / "owner.json", 16384).get("home") != home
+                or (root / "current").resolve(strict=True) != release.resolve(strict=True)
                 or any(not path.is_relative_to(directory) or path.resolve(strict=True) != path for path in paths.values())):
             raise ValueError("the original planning installation or ownership changed")
         settings = read_private_json(paths["config"], 16384)
@@ -51,7 +56,10 @@ def source(home, workspace):
 def read_private_json(path, maximum):
     if path.lstat().st_mode & 0o077:
         raise ValueError("the original planning household files must be private")
-    return _json(_read_file(path, maximum))
+    value = _json(_read_file(path, maximum))
+    if not isinstance(value, dict):
+        raise ValueError("the original planning household file must contain a JSON object")
+    return value
 
 
 def menu_source(state, home):
@@ -72,8 +80,12 @@ def menu_source(state, home):
         raise ValueError("Oda saved-menu shopping requires one to eight measured requirements and no unresolved rows")
     binding = {"home": home, "menu_ref": current["menu_ref"], "list_ref": current["list_ref"],
                "stock_ref": stock["stock_ref"], "context_sha256": mp.digest({"shopping": shopping, "profile": profile})}
+    unanswered = [{key: row[key] for key in ("requirement_id", "item", "unit", "status", "pantry",
+                                          "accepted_pantry_assumption")}
+                  | {"remaining_quantity": row.get("remaining_quantity")}
+                  for row in stock["items"] if row["status"] in {"unanswered", "partial"}]
     return {"binding": binding, "requirements": requirements, "menu": shopping, "profile": profile,
-            "decisions": decisions, "pending_stock_count": stock["pending_count"]}
+            "decisions": decisions, "unanswered_stock": unanswered}
 
 
 def search_arguments(context):
@@ -137,7 +149,7 @@ def quote(context, views, choices):
         raise ValueError("Oda saved-menu shopping can apply up to 24 packages in one cart operation")
     return {"currency": "NOK", "items": rows, "package_count": package_count,
             "merchandise_ore": sum(row["merchandise_ore"] for row in rows),
-            "unanswered_stock_rows": context["pending_stock_count"]}
+            "unanswered_stock_rows": len(context["unanswered_stock"]), "unanswered_stock": context["unanswered_stock"]}
 
 
 def ore(value, *, signed=False):

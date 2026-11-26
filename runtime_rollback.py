@@ -194,6 +194,10 @@ def rollback(home, meta):
         if (code / "current").resolve() not in allowed_targets or old_identity(prior) != record["previous_identity"]:
             raise RuntimeError("selected release or previous program bytes changed")
         state = Path(meta["paths"]["state"])
+        if meta.get("hosted_oda_plugin"):
+            from hosted_oda_cart import require_idle
+
+            require_idle(state, target_program=prior)
         evidence = bounded_json(state / GUARD)
         if evidence != guard and not (resuming and evidence == {**guard, "status": "rolling_back"}):
             raise RuntimeError("release may have started; preserve all journals and recover forward")

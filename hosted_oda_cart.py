@@ -132,7 +132,7 @@ def registry(state, directory, *, initialize, allow_unbound=False):
         yield anchor, ledger, saved
 
 
-def require_idle(state):
+def require_idle(state, *, target_program=None):
     """Keep the issuing program selectable until its original cart is settled."""
     bound = os.path.lexists(state / BINDING_NAME) or os.path.lexists(state / GENERATION_NAME)
     if not bound and not state.is_relative_to(DOT_WORKSPACE):
@@ -142,10 +142,14 @@ def require_idle(state):
         return
     with registry(state, directory, initialize=False, allow_unbound=True) as (_, ledger, saved):
         current = saved["current"]
-        if (current and current["owner"] == str(state) and current["status"] not in FINISHED
-                and current.get("maintenance_deferred") is not True):
-            raise ValueError("finish the original hosted Oda cart operation before changing its program")
-        if current and current["owner"] == str(state) and "menu" in current and current["status"] in FINISHED:
+        if not current or current["owner"] != str(state):
+            return
+        if current["status"] not in FINISHED:
+            if current.get("maintenance_deferred") is not True:
+                raise ValueError("finish the original hosted Oda cart operation before changing its program")
+            if target_program is not None and "menu" in current and not (target_program / "hosted_oda_menu.py").is_file():
+                raise ValueError("the target program cannot read the deferred Oda menu operation; retain a menu-capable release")
+        elif "menu" in current:
             archive_record(directory, current)
             write_json(ledger, {**saved, "current": None})
 

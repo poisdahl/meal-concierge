@@ -1710,6 +1710,10 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
             raise RuntimeError('interrupted candidate changed; preserve the original backup')
     else:
         release = prepared_release or stage_release(code, uv_binary)
+    if path.exists() and meta.get('hosted_oda_plugin'):
+        from hosted_oda_cart import require_idle
+
+        require_idle(Path(meta['paths']['state']), target_program=Path(release))
     with offline(meta):
         if operation and operation['phase'] == 'published':
             if bounded_json(path) != operation['published_manifest'] or (code / 'current').resolve() != release.resolve():

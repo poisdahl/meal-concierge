@@ -146,6 +146,7 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.assertEqual(by_product[TOMATO]["package_count"], 2)
         self.assertEqual(by_product[PASTA]["package_count"], 1)
         self.assertEqual(quote["merchandise_ore"], 4730)
+        self.assertEqual([row["item"] for row in quote["unanswered_stock"]], ["Spagetti"])
         write = self.step("observe", **self.reads(pre_add))
         self.assertTrue(write["dispatch"])
         self.assertEqual({row["productId"]: row["quantity"] for row in write["hosted_request"]["arguments"]["operations"]},
@@ -210,9 +211,22 @@ class HostedOdaMenuTests(unittest.TestCase):
         observed = self.step("observe_recovery", **self.reads(self.step("recheck"), data=cart_data()))
         self.assertEqual(observed["status"], "add_response_unverified")
         self.assertFalse(observed["dispatch"])
+        self.assertTrue(self.step("defer")["maintenance_deferred"])
+        program = self.root / "rollback-program"
+        program.mkdir()
+        with self.assertRaisesRegex(ValueError, "target program cannot read"):
+            cart.require_idle(self.state, target_program=program)
+        (program / "hosted_oda_menu.py").touch()
+        cart.require_idle(self.state, target_program=program)
         self.identifier = str(uuid.uuid4())
         with self.assertRaisesRegex(ValueError, "original.*owns"):
             self.begin()
+
+    def test_invalid_planning_manifest_fails_before_an_operation_is_created(self):
+        install.write_json(self.home / "runtime.json", {"home": str(self.home), "code_root": None})
+        with self.assertRaisesRegex(ValueError, "manifest is invalid"):
+            self.begin()
+        self.assertIsNone(install.bounded_json(self.registry / "ledger.json")["current"])
 
     def test_proven_partial_cart_can_restore_only_verified_subset(self):
         write = self.step("observe", **self.reads(self.pre_add()))

@@ -243,11 +243,13 @@ stage below runs on the selected Oda program with private JSON on stdin:
    for each `requirement_id`. Send `action:"select_menu"` with a `choices`
    object mapping those requirement IDs to numeric Oda product IDs. The
    returned `quote` lists the coverage, package count, merchandise price in
-   øre and any dietary evidence gaps. Present the quote to the owner. Oda
-   search supplies merchandise prices. Deposits, discounts, fees and
+   øre, unanswered stock rows and any dietary evidence gaps. Present the
+   quote to the owner. Oda search supplies merchandise prices. Deposits,
+   discounts, fees and
    delivery appear separately in the verified cart.
-4. After approval, send `action:"approve_menu"` with the exact
-   `review_digest`. Use the normal `observe`, `add` and `acknowledge`
+4. After the owner's explicit approval of that quote, send
+   `action:"approve_menu"` with the exact `review_digest`. Use the normal
+   `observe`, `add` and `acknowledge`
    handoff below. The read frame after `add` requires the fresh product
    search between the address and cart reads. Include `products_observed_at`,
    `catalog_arguments` and `catalog` on that `observe`. Changed menu, stock,
@@ -255,7 +257,9 @@ stage below runs on the selected Oda program with private JSON on stdin:
    a new review after aborting a changed pre-write plan.
 5. Use the original mutation result and the new independent cart read to
    verify every product, package count and merchandise amount. A complete
-   matching keep-cart plan ends as `applied`. Share the Oda cart link.
+   matching keep-cart plan ends as `applied`. Share the Oda cart link. If
+   the quantity is verified and product or price facts differ, show the
+   difference and ask whether to restore the added quantities.
    In restore mode, use `remove` only after the successful original result
    and exact cart readback. Invoke the resulting inverse once and verify
    the original empty quantities and slot state. Check
@@ -265,8 +269,9 @@ If the original successful add returned only an exact subset of the approved
 products and quantities, check `partial_add_quantities`. A fresh matching
 read can authorize cleanup of that subset. An unapproved addition,
 unverifiable result or lost reply keeps the original operation fenced. The
-same recovery and maintenance rules below apply. Keep the menu-capable
-program available for an active menu operation and its historical receipts.
+same recovery and maintenance rules below apply. A deferred menu operation
+requires a menu-capable program for update or rollback. Keep that program
+available for archived menu receipts.
 
 #### Oda one-item test cart
 
