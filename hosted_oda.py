@@ -124,10 +124,12 @@ def cart_view(cart):
     observed = {"groups": groups, "totalGrossAmount": money(cart["totalGrossAmount"]),
                 "totalBreakdown": amounts, "productQuantityCount": cart["productQuantityCount"]}
     cart_contents(observed, require_quantities=True)
-    if not any(Decimal(amounts[key]) for key in BREAKDOWN_FIELDS - {"subtotal", "total"}):
+    if not observed["productQuantityCount"] or not any(
+        Decimal(amounts[key]) for key in BREAKDOWN_FIELDS - {"subtotal", "total"}
+    ):
         line_total = sum(Decimal(item["totalGrossAmount"]) for group in groups for item in group["items"])
         if line_total != Decimal(amounts["subtotal"]):
-            raise ValueError("hosted Oda cart line totals do not match the unadjusted subtotal")
+            raise ValueError("hosted Oda cart line totals do not match the subtotal")
     view = project_agent_result("cart", "get", observed, limit=20)
     if view.get("cart_normalization") is not None or "amounts" not in view:
         raise ValueError("hosted Oda cart totals could not be verified")
@@ -168,6 +170,8 @@ def catalog_view(tool, data, arguments, observed_at):
         # The hosted product search schema supplies no ingredient or allergen labels.
         for product in view["products"]:
             product.pop("dietary_evidence", None)
+            if any(contains_line_controls(text) for text in product["display"].values()):
+                raise ValueError("hosted Oda product display contains control text")
         return view
     return recipes(data, arguments)
 
@@ -221,7 +225,8 @@ def orders_view(tool, data, arguments):
         result = project_agent_result("orders", "list", {"orders": rows}, limit=arguments["size"])
         displayed = result["orders"]
         displayed["truncated"] = displayed.pop("next_offset", None) is not None
-        return {**result, "provider": "oda", "has_more": data["hasMore"]}
+        return {**result, "provider": "oda", "has_more": data["hasMore"],
+                "next": "Use the exact listed order ID for its host-reported detail or tracking."}
     expected = arguments["order_number"]
     require_provider_identity(data, expected, tracking=tool == "order_tracking")
     if data.get("orderNumber") != expected:

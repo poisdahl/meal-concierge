@@ -339,6 +339,9 @@ class HostedOdaForegroundTests(unittest.TestCase):
         cart.update(groups=[], productQuantityCount=0, totalGrossAmount="0.00",
                     totalBreakdown={**dict.fromkeys(hosted_oda.BREAKDOWN_FIELDS, "0.00"),
                                     "surchargeThresholdDescription": "Omitted from the cart view"})
+        with self.assertRaisesRegex(ValueError, "line totals do not match"):
+            false_amounts = {**cart["totalBreakdown"], "subtotal": "9.00", "deliveryFee": "1.00", "total": "10.00"}
+            self.finish({**reply, "cart": {**cart, "totalGrossAmount": "10.00", "totalBreakdown": false_amounts}})
         result, code = self.finish(reply)
         self.assertEqual(code, 0, result)
         self.assertEqual(result["result"]["count"], 0)
@@ -373,6 +376,10 @@ class HostedOdaForegroundTests(unittest.TestCase):
                 self.finish({**binding, "catalog": {"result": [other]}})
         with self.assertRaisesRegex(ValueError, "successful structured"):
             self.finish({**binding, "catalog": {"isError": True, "result": [batch]}})
+        for field, value in (("description", "250 g\x1b[31m"), ("unitPrice", "79.60\u202e"), ("brand", "A\x00B")):
+            changed = {**batch, "products": [{**item, field: value}]}
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "display contains control text"):
+                self.finish({**binding, "catalog": {"result": [changed]}})
         ending, code = self.finish({**binding, "catalog": {"result": [batch]}})
         self.assertEqual(code, 0, ending)
         self.assertEqual(ending["status"], "catalog_read")

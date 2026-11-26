@@ -159,9 +159,9 @@ For a successful cart read, `arguments` may be omitted or set to `{}`.
 
 The runtime checks the original request, installed program and environment,
 the echoed plugin ID and expiry, the cart quantities and the recognized fees
-and discounts. When there are no adjustments, it also checks the sum of the
-lines against the subtotal. `host_supplied_oda_mcp` identifies a result supplied
-by ChatGPT. The invocation and observation time are host-reported. The runner
+and discounts. For an empty cart or a cart without adjustments, it also checks
+the sum of the lines against the subtotal. `host_supplied_oda_mcp` identifies a
+result supplied by ChatGPT. The invocation and observation time are host-reported. The runner
 checks the plugin entry ID, and the owner confirms the underlying Oda account
 when connecting or reauthorizing it. Report backend freshness as unverified.
 `receipt REQUEST_UUID` recovers the historical outcome without saving cart

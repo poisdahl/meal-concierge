@@ -36,9 +36,10 @@ Invoke only the emitted tool in the attached plugin. Run `complete-hosted
 REQUEST_UUID` with the structured reply on stdin. Treat the response and its
 observation time as host-reported. The runtime checks the plugin entry and the
 request binding. The owner confirms the underlying Oda account when authorizing
-it. A receipt is historical. Use a new ID for a fresh read after expiry. If the
-plugin is unavailable, use the private ChatGPT authorization for that original
-entry. The owner completes checkout with the Oda cart link.
+it. Backend freshness remains unverified. A receipt is historical. Use a new ID
+for a fresh read after expiry. If the plugin is unavailable, use the private
+ChatGPT authorization for that original entry. The owner completes checkout
+with the Oda cart link.
 
 For a saved-menu delivery, prepare the actual job and export its exact frozen part
 to a new file in a private directory. Pass the
