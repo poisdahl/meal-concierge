@@ -22,7 +22,7 @@ from runtime_ownership import file_lock
 
 
 TOOLS = frozenset({"health", "status", "setup", "profile", "recipes", "menu", "shopping_list",
-                   "feedback", "recipe_delivery", "recipe_pack", "schedule", "products"})
+                   "feedback", "recipe_delivery", "recipe_pack", "schedule", "products", "catalog"})
 RECEIPT_LIMIT = 8 * 1024 * 1024
 
 
@@ -146,6 +146,10 @@ def validate_request(request):
         raise ValueError("action must be text")
     if request["operation"] == "products" and action != "record_ingredients":
         raise ValueError("the no-store products operation supports record_ingredients")
+    if request["operation"] == "catalog":
+        from meny_public import validate
+
+        validate(request)
 
 
 def call(directory, identifier, request, outputs, make_application, build):
@@ -162,7 +166,8 @@ def call(directory, identifier, request, outputs, make_application, build):
             raise ValueError("request ID belongs to a different input")
         return receipt_view(record, identifier)
 
-    app = make_application()
+    public_catalog = request["operation"] == "catalog"
+    app = None if public_catalog else make_application()
     target = {key: request[key] for key in ("recipe_ref", "menu_ref", "job_id", "part_id", "request_id", "idempotency_key")
               if key in request}
     record = {"format": 1, "request_id": identifier, "input_sha256": digest,
@@ -173,6 +178,10 @@ def call(directory, identifier, request, outputs, make_application, build):
 
     def send(operation, **arguments):
         try:
+            if public_catalog:
+                from meny_public import read
+
+                return read({"operation": operation, **arguments})
             if operation == "menu" or (operation == "recipes" and arguments.get("action") == "discover"):
                 arguments.setdefault("interactive", True)
             result = app.handle({"operation": operation, **arguments})
@@ -285,8 +294,11 @@ def execute(options):
                     return {"ok": True, "provider": "oda", "household": settings["household"], "build": build,
                             "transport": "hosted_mcp", "plugin_id": plugin, "operations": ["cart"],
                             "cart_actions": ["get"], "skill": str(SOURCE / "skill/SKILL.md")}, 0
+                from meny_public import ACTIONS as MENY_CATALOG_ACTIONS
+
                 return {"ok": True, "provider": "none", "household": settings["household"], "build": build,
                         "operations": sorted(TOOLS), "products_actions": ["record_ingredients"],
+                        "catalog": {"provider": "meny", "scope": "public_catalog", "actions": MENY_CATALOG_ACTIONS},
                         "skill": str(SOURCE / "skill/SKILL.md")}, 0
 
             if options.action == "complete-hosted":

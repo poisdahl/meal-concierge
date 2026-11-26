@@ -75,8 +75,9 @@ whether an exported file still matches its original bytes.
 
 The planning installation uses `provider=none`. A separate hosted Oda
 installation can read the ordinary cart when the official Oda plugin is callable
-in the Dot. Follow the [hosted Oda setup](#oda-cart-reads) below. Full MENY
-shopping uses the shared store runtime with a working dedicated browser.
+in the Dot. Follow the [hosted Oda setup](#oda-cart-reads) below. The planning
+installation can also search the [public MENY catalog](#public-meny-catalog).
+Full MENY shopping uses the shared store runtime with a working dedicated browser.
 
 The separate [MENY native-browser interface](#native-browser-requests-over-stdinstdout)
 supports native-browser reads and guarded cart changes where an operator can
@@ -90,6 +91,25 @@ order pages did not match the rendered order read contract.
 Shopping-list matching and guarded cart changes have fixture coverage.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
+
+### Public MENY catalog
+
+The foreground planning installation can search MENY for products and recipes
+and open a recipe returned by search. Use the same `call REQUEST_UUID` command
+and one of these JSON requests.
+
+```json
+{"operation":"catalog","provider":"meny","action":"products","query":"havregryn","limit":5}
+{"operation":"catalog","provider":"meny","action":"recipes","query":"fiskesuppe","limit":5}
+{"operation":"catalog","provider":"meny","action":"recipe_get","recipe_id":"EXACT_RECIPE_PATH_FROM_SEARCH"}
+```
+
+Results have `scope:"public_catalog"`. They use fixed anonymous HTTPS requests
+from the Dot. Prices are public catalog figures per retailer unit. A cart plan
+still needs signed-in product availability, fulfillment and a fresh price review.
+If the public response is unavailable or incomplete, the command reports an
+error. Use a new request for a fresh public search. Follow the native-browser
+steps for a signed-in read or a pending cart operation.
 
 ### Oda cart reads
 

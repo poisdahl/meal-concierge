@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError, StateStore
 import foreground
 import hosted_oda
+import meny_public
 from service import Application
 
 
@@ -106,6 +107,21 @@ class ForegroundTests(unittest.TestCase):
                 self.call(request, application=application)
         application.assert_not_called()
         self.assertEqual([path.name for path in self.calls.iterdir()], ["ledger.json"])
+
+    def test_public_meny_search_never_opens_the_household_or_replays_https(self):
+        application = Mock(side_effect=AssertionError("store-free app should stay closed"))
+        request = {"operation": "catalog", "action": "products", "provider": "meny",
+                   "query": "havregryn", "response_view": "agent"}
+        with patch.object(meny_public, "products", return_value=([], 0)) as get:
+            current, code = self.call(request, application=application)
+            self.assertEqual(code, 0)
+            self.assertEqual(current["result"]["scope"], "public_catalog")
+            replay, code = self.call(request, identifier=current["request_id"], application=application)
+            self.assertEqual(code, 0)
+            self.assertTrue(replay["replayed"])
+            self.assertEqual(replay["result"], current["result"])
+        get.assert_called_once_with("havregryn", 5)
+        application.assert_not_called()
 
     def test_history_never_restores_native_send_grants(self):
         app = Mock()
@@ -279,6 +295,19 @@ class HostedOdaForegroundTests(unittest.TestCase):
         self.assertTrue(lines["truncated"])
         self.assertGreater(len(lines["items"]), 0)
         self.assertNotIn("next_offset", lines)
+
+    def test_empty_cart_with_optional_provider_fields_completes(self):
+        reply = self.example_reply()
+        cart = reply["cart"]
+        cart.update(groups=[], productQuantityCount=0, totalGrossAmount="0.00",
+                    totalBreakdown={**dict.fromkeys(hosted_oda.BREAKDOWN_FIELDS, "0.00"),
+                                    "surchargeThresholdDescription": "Omitted from the cart view"})
+        result, code = self.finish(reply)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["result"]["count"], 0)
+        self.assertEqual(result["result"]["total"], 0)
+        self.assertEqual(result["result"]["lines"]["items"], [])
+        self.assertNotIn("Omitted from the cart view", json.dumps(result))
 
 
 if __name__ == "__main__":

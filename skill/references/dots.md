@@ -22,6 +22,12 @@ arguments as instructed by the shared skill. Generate a canonical UUID and
 retain it before calling. A new UUID is for a new command, not for repeating
 an uncertain one. Treat errors and incomplete receipts as recovery steps.
 
+When discovery lists the public MENY catalog, use `catalog.products` or
+`catalog.recipes` with `provider:"meny"` and a search query. Use
+`catalog.recipe_get` with the exact `recipe_id` from search. Present prices as
+public catalog figures. Use a separately verified signed-in store connection
+for stock, cart actions and checkout.
+
 When discovery returns `provider:"oda"` and `transport:"hosted_mcp"`, bind
 this installation to its reported official Oda plugin and use `cart.get`
 as documented in `docs/dots.md` in the retained source checkout. Start with

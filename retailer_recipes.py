@@ -250,14 +250,15 @@ def _meny_recipe_summary(document: Mapping[str, Any], name: str) -> str:
     return " ".join(parts)
 
 
-def read_meny_recipe_search(query: str, limit: int, *, timeout: float) -> list[dict[str, str]]:
+def read_meny_recipe_search(query: str, limit: int, *, timeout: float, fetch=None) -> list[dict[str, str]]:
     """Read the ranked, bounded first page of MENY's public recipe search."""
-    from recipe_import_sources import _get_bytes
+    if fetch is None:
+        from recipe_import_sources import _get_bytes as fetch
 
     try:
         params = urlencode({"query": query, "include": "recipes", "page": 1, "size": limit})
-        raw, content_type = _get_bytes(f"{MENY_RECIPE_SEARCH}?{params}", maximum=_MAX_MENY_RECIPE_RESPONSE,
-                                       timeout=timeout, accept="application/json")
+        raw, content_type = fetch(f"{MENY_RECIPE_SEARCH}?{params}", maximum=_MAX_MENY_RECIPE_RESPONSE,
+                                  timeout=timeout, accept="application/json")
         if content_type != "application/json":
             raise ValueError("recipe search did not return JSON")
         data = json.loads(raw, object_pairs_hook=_object, parse_constant=_invalid_constant)
@@ -355,13 +356,14 @@ class _MenyRecipePage(HTMLParser):
             self.current = None
 
 
-def read_meny_recipe_detail(recipe_id: str, *, timeout: float) -> dict[str, Any]:
-    from recipe_import_sources import _get_bytes
+def read_meny_recipe_detail(recipe_id: str, *, timeout: float, fetch=None) -> dict[str, Any]:
+    if fetch is None:
+        from recipe_import_sources import _get_bytes as fetch
 
     path = meny_recipe_path(recipe_id)
     url = MENY_ORIGIN + path
     try:
-        raw, content_type = _get_bytes(url, maximum=_MAX_MENY_RECIPE_RESPONSE, timeout=timeout, accept="text/html")
+        raw, content_type = fetch(url, maximum=_MAX_MENY_RECIPE_RESPONSE, timeout=timeout, accept="text/html")
         if content_type != "text/html":
             raise ValueError("recipe page did not return HTML")
         page = _MenyRecipePage()

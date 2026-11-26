@@ -43,7 +43,7 @@ or a ChatGPT Dot's cloud computer**.
 | [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
-| [ChatGPT Dots](docs/dots.md) | Foreground meal planning, recipe bank and shopping lists on the Dot’s cloud computer. A separate Oda household can read the cart through the attached Oda plugin. |
+| [ChatGPT Dots](docs/dots.md) | Meal planning, recipe bank, shopping lists and public MENY search on the Dot’s cloud computer. A separate Oda household can read the cart through the attached Oda plugin. |
 
 ### Requirements
 
@@ -51,7 +51,7 @@ or a ChatGPT Dot's cloud computer**.
   environment and dependencies.
 - **Native background services** use user systemd on Linux or a logged-in user's
   launchd session on Apple Silicon macOS. See the cloud guides for those hosts.
-- **With a store:** agent-browser and Chrome or non-snap Chromium. See
+- **Managed store runtimes** use agent-browser and Chrome or non-snap Chromium. See
   [shared setup](docs/runtime.md#what-you-need) for supported versions and host
   requirements, or [Grok's browser setup](docs/grok.md#browser-and-login) for its
   native browser option.
