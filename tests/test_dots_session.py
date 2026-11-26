@@ -883,6 +883,38 @@ raise SystemExit(client.main())
         self.assertEqual(self.writes, 1)
         self.assertEqual(self.quantity, 1)
 
+    def test_unchanged_cart_cannot_retire_a_native_write_without_its_ending(self):
+        def lose_reply_before_click(frame):
+            if frame["operation"] == "manipulate_cart":
+                return None
+            return self.host(frame)
+
+        command_id = str(uuid.uuid4())
+        code, original = self.call(self.ensure(), command_id, lose_reply_before_click)
+        self.assertEqual(code, 1, original)
+        pending = self.state()["pending_cart_change"]
+        self.frames.clear()
+        code, readback = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, readback)
+        shown = readback["result"]
+        self.assertEqual(shown["count"], 0)
+        self.assertEqual(shown["operation_id"], pending["operation_id"])
+        self.assertTrue(shown["cart_write_pending"])
+        self.assertNotIn("accept_current_available", shown)
+        code, check = self.call({"operation": "cart", "action": "reconcile_change",
+                                 "operation_id": pending["operation_id"]})
+        self.assertEqual(code, 1, check)
+        self.assertIn("the original dispatch ending and bound readback", check["error"])
+        code, blocked = self.call({"operation": "cart", "action": "accept_current",
+                                   "operation_id": pending["operation_id"], "cart_digest": shown["cart_digest"]})
+        self.assertEqual(code, 1, blocked)
+        self.assertEqual(self.call(self.ensure(2))[0], 1)
+        self.assertEqual([frame["operation"] for frame in self.frames],
+                         ["get_cart", "verify_new_cart", "get_cart"])
+        self.assertEqual(self.call(self.ensure(), command_id), (1, original))
+        self.assertEqual(self.state()["pending_cart_change"], pending)
+        self.assertEqual(self.writes, 0)
+
     def test_multibatch_ensure_and_binding_drift_never_clear_pending(self):
         code, result = self.call(self.ensure(3))
         self.assertEqual(code, 0, result)

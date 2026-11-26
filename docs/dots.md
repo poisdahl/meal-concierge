@@ -78,16 +78,19 @@ shopping use the shared store runtime on a host with a working dedicated
 browser and private sign-in. Oda also requires an authenticated retailer OAuth
 connection and a verified account match in that browser. During Dots testing,
 the executor denied Unix socket creation and its native browser could not reach
-the executor’s OAuth loopback callback. Full Oda and MENY shopping remains
-unverified on this Dots host.
+the executor’s loopback listener. Oda OAuth and the matching dedicated checkout
+browser could not be established on this host.
 
 The separate [MENY native-browser interface](#native-browser-requests-over-stdinstdout)
 supports native-browser reads and guarded cart changes where an operator can
 verify the owner-approved account and tab. It covers catalog search, cart,
 saved-menu product planning, delivery-window reads and rendered order reads.
-The native catalog, shopping-list matching and guarded cart flows have fixture
-coverage. On the tested Dot, live verification stopped before authenticated
-cart access because the signed-in account had not been designated for testing.
+On the tested Dot, signed-in recipe and product searches, an ordinary cart read
+and delivery-window reads passed. The cart write frame expired without a
+dispatch acknowledgement. The operator reported no click, and a fresh read
+showed the original cart contents. The operation stayed pending. The current
+order pages did not match the rendered order read contract.
+Shopping-list matching and guarded cart changes have fixture coverage.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
 
@@ -531,6 +534,11 @@ still caps each reply. EOF, timeout, stale/mismatched reply
 or ambiguous dispatch leaves the original pending journal. Reopen the same
 household and use `reconcile_change` with a fresh actual read; never resend
 the write frame or translate lost replies into a definite pre-click stop.
+An unchanged cart cannot release a native write fence. Retain the original
+journal and use the original native dispatch ending and bound readback for
+recovery. If the core saved that ending before its caller lost the command
+result, read-only reconciliation can still verify the cart. A missing native
+dispatch reply keeps the operation pending and blocks managed product preparation.
 If the native interface cannot preserve these guards, leave writes disabled.
 Synthetic protocol/recovery tests do not establish authenticated browser
 execution, payment support or dependable long-running availability.

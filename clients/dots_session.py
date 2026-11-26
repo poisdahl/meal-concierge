@@ -541,6 +541,8 @@ def application(root, config, reader, command_id, deadline, *, new=False, reques
         host = NativeHost(store, config, reader, command_id, deadline, request)
         app = Application(store, host, None,
                           products_apply_budget_seconds=PRODUCTS_APPLY_BUDGET_SECONDS)
+        # Native writes require their original acknowledgement and bound readback.
+        app.allow_observed_cart_recovery = False
         host.app = app
         if new:
             app.recipes.search(limit=1)  # The core opens SQLite lazily; create the original bank once.
