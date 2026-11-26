@@ -309,6 +309,121 @@ class HostedOdaForegroundTests(unittest.TestCase):
         self.assertEqual(result["result"]["lines"]["items"], [])
         self.assertNotIn("Omitted from the cart view", json.dumps(result))
 
+    def test_catalog_product_search_requires_the_exact_query_and_scope(self):
+        request = {"operation": "catalog", "action": "products", "query": "rosenkål", "limit": 1,
+                   "response_view": "agent"}
+        pending, code = self.begin(request)
+        self.assertEqual(code, 0)
+        self.assertFalse(pending["catalog_read"])
+        frame = pending["hosted_request"]
+        self.assertEqual(frame["tool"], "product_search")
+        self.assertEqual(frame["arguments"], {"queries": ["rosenkål"], "page": 1, "size": 1})
+        with self.assertRaisesRegex(ValueError, "different input"):
+            self.begin({**request, "query": "potet"})
+        with self.assertRaisesRegex(ValueError, "different input"):
+            self.begin()
+        binding = {key: frame[key] for key in ("read_id", "plugin_id", "tool", "arguments")}
+        binding["observed_at"] = datetime.now(timezone.utc).isoformat()
+        item = {"id": 42, "name": "Synthetic sprouts", "description": "250 g", "price": "19.90",
+                "availability": {"isAvailable": True}, "unitPrice": "79.60", "unitName": "kg",
+                "allergen_free_from": ["peanut"]}
+        batch = {"query": "rosenkål", "hasMore": True, "products": [item]}
+        with self.assertRaisesRegex(ValueError, "arguments do not match"):
+            self.finish({**binding, "arguments": {**frame["arguments"], "size": 2},
+                         "catalog": {"result": [batch]}})
+        for other in ({**batch, "query": "potet"}, {**batch, "products": [item, {**item, "id": 43}]}):
+            with self.subTest(batch=other), self.assertRaises(HouseholdError):
+                self.finish({**binding, "catalog": {"result": [other]}})
+        with self.assertRaisesRegex(ValueError, "successful structured"):
+            self.finish({**binding, "catalog": {"isError": True, "result": [batch]}})
+        ending, code = self.finish({**binding, "catalog": {"result": [batch]}})
+        self.assertEqual(code, 0, ending)
+        self.assertEqual(ending["status"], "catalog_read")
+        self.assertTrue(ending["result"]["scope"]["has_more"])
+        self.assertEqual(ending["result"]["products"][0]["observed_at"], binding["observed_at"])
+        self.assertEqual(ending["result"]["products"][0]["purchase_options"][0]["merchandise_ore"], 1990)
+        self.assertNotIn("dietary_evidence", ending["result"]["products"][0])
+        self.assertEqual(self.begin(request)[0]["status"], "historical_catalog_read")
+        payload = (self.calls / f"{self.identifier}.json").read_text()
+        self.assertNotIn("rosenkål", payload)
+        self.assertNotIn("Synthetic sprouts", payload)
+
+    def test_catalog_recipe_search_keeps_only_distinct_recipe_identity_and_shop_link(self):
+        request = {"operation": "catalog", "action": "recipes", "query": "pasta", "limit": 2,
+                   "response_view": "agent"}
+        pending, _ = self.begin(request)
+        frame = pending["hosted_request"]
+        self.assertEqual(frame["tool"], "recipe_search")
+        self.assertEqual(frame["arguments"], {"query": "pasta", "page": 1, "size": 2})
+        binding = {key: frame[key] for key in ("read_id", "plugin_id", "tool", "arguments")}
+        binding["observed_at"] = datetime.now(timezone.utc).isoformat()
+        url = "https://oda.com/no/recipes/42-fixture/"
+        recipe = {"id": 42, "title": "Synthetic pasta", "url": url, "likeCount": 7, "isLikedByUser": True}
+        with self.assertRaisesRegex(ValueError, "duplicate identities"):
+            self.finish({**binding, "catalog": {"recipes": [recipe, recipe], "hasMore": False}})
+        ending, code = self.finish({**binding, "catalog": {"hasMore": False, "recipes": [recipe,
+            {**recipe, "id": 43, "url": "https://oda.com/no/recipes/42-fixture/?token=marker"}]}})
+        self.assertEqual(code, 0, ending)
+        self.assertEqual(ending["result"]["recipes"], [
+            {"recipe_id": 42, "name": "Synthetic pasta", "url": url},
+            {"recipe_id": 43, "name": "Synthetic pasta"},
+        ])
+
+    def test_delivery_reads_validate_the_exact_date_without_granting_a_selection(self):
+        day = "2027-01-04"
+        request = {"operation": "delivery", "action": "list", "date": day, "response_view": "agent"}
+        frame = self.begin(request)[0]["hosted_request"]
+        self.assertEqual(frame["tool"], "get_delivery_slots")
+        self.assertEqual(frame["arguments"], {"delivery_date": day})
+        binding = {key: frame[key] for key in ("read_id", "plugin_id", "tool", "arguments")}
+        binding["observed_at"] = datetime.now(timezone.utc).isoformat()
+        with self.assertRaisesRegex(ValueError, "date changed"):
+            self.finish({**binding, "delivery": {"deliveryDate": "2027-01-05", "slots": []}})
+        with self.assertRaisesRegex(HouseholdError, "slot changed"):
+            self.finish({**binding, "delivery": {"deliveryDate": day, "slots": [{"isFull": True}]}})
+        slot = {"id": 22, "openDatetime": f"{day}T11:00:00+01:00", "closeDatetime": f"{day}T12:00:00+01:00",
+                "price": "kr\u00a039", "isSelected": False, "isFull": False, "isUnavailable": False}
+        ending, code = self.finish({**binding, "delivery": {"deliveryDate": day, "slots": [slot]}})
+        self.assertEqual(code, 0, ending)
+        self.assertEqual(ending["status"], "delivery_read")
+        self.assertEqual(ending["result"]["slots"][0]["price_ore"], 3900)
+        with self.assertRaisesRegex(ValueError, "read-only actions"):
+            self.begin({**request, "action": "select"})
+
+    def test_orders_read_only_actions_bind_an_exact_id_and_keep_details_out_of_history(self):
+        common = {"operation": "orders", "response_view": "agent"}
+        item = {"product": {"id": 42, "name": "Synthetic order contents"}, "quantity": 2,
+                "totalGrossAmount": "10.00"}
+        order = {"orderNumber": "12345", "deliveryDate": "2027-01-04", "currency": "NOK",
+                 "grossAmount": 20.0, "products": [item], "private_extra": "Never displayed"}
+        for action, tool, fields in (("list", "get_orders", {}), ("get", "get_order", {"order_id": "12345"}),
+                                     ("track", "order_tracking", {"order_id": "12345"})):
+            with self.subTest(action=action):
+                self.identifier = str(uuid.uuid4())
+                request = {**common, "action": action, **fields}
+                frame = self.begin(request)[0]["hosted_request"]
+                self.assertEqual(frame["tool"], tool)
+                binding = {key: frame[key] for key in ("read_id", "plugin_id", "tool", "arguments")}
+                binding["observed_at"] = datetime.now(timezone.utc).isoformat()
+                path = self.calls / f"{self.identifier}.json"
+                self.assertNotIn('"12345"', path.read_text())
+                if action == "list":
+                    payload = {"hasMore": False, "orders": [order]}
+                else:
+                    self.assertEqual(frame["arguments"], {"order_number": "12345"})
+                    payload = order if action == "get" else {"orderNumber": "12345", "status": "picking"}
+                    with self.assertRaises(HouseholdError):
+                        self.finish({**binding, "orders": {**payload, "orderNumber": "34567"}})
+                    with self.assertRaisesRegex(ValueError, "orderNumber does not match"):
+                        self.finish({**binding, "orders": {**payload, "orderNumber": None, "id": "12345"}})
+                ending, code = self.finish({**binding, "orders": payload})
+                self.assertEqual(code, 0, ending)
+                self.assertEqual(ending["status"], "orders_read")
+                self.assertNotIn("Never displayed", json.dumps(ending))
+                historical = self.begin(request)[0]
+                self.assertEqual(historical["status"], "historical_orders_read")
+                self.assertNotIn('"12345"', path.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

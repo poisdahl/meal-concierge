@@ -29,13 +29,13 @@ public catalog figures. Use a separately verified signed-in store connection
 for stock, cart actions and checkout.
 
 When discovery returns `provider:"oda"` and `transport:"hosted_mcp"`, bind
-this installation to its reported official Oda plugin and use `cart.get`
-as documented in `docs/dots.md` in the retained source checkout. Start with
-`call` and the exact cart request. Invoke only the
-emitted `get_cart` in the attached plugin, then complete that same request with
-the structured result. Use the normalized current result and its Oda cart link.
-The original receipt is historical. If the plugin cannot provide the result,
-report it as unavailable. The owner completes checkout at Oda.
+this installation to its reported official Oda plugin. Use the discovered
+cart, catalog, delivery and order read actions documented in `docs/dots.md`
+in the retained source checkout. Start with `call` and the exact read request.
+Invoke only the emitted tool in the attached plugin, then complete that same
+request with the structured result. Use the normalized current result. The
+original receipt is historical. If the plugin cannot provide the result,
+report it as unavailable. The owner completes checkout with the Oda cart link.
 
 For a saved-menu delivery, prepare the actual job and export its exact frozen part
 to a new file in a private directory. Pass the

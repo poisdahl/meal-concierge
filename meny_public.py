@@ -1,13 +1,14 @@
 """Bounded, anonymous MENY catalog reads on a foreground cloud runtime."""
-from http.client import HTTPException
+from decimal import Decimal, DecimalException
+import json
+from queue import Empty, SimpleQueue
 import re
-import time
+from threading import Thread
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from core import HouseholdError, money_cents
-from meny_catalog import CATALOG_HOST
-from on_demand import _json
+from core import HouseholdError
+from meny_catalog import CATALOG_HOST, _catalog_ore, _display_text, _unique_object
 from retailer_recipes import (MENY_ORIGIN, MENY_RECIPE_SEARCH, meny_recipe_path,
                               read_meny_recipe_detail, read_meny_recipe_search)
 
@@ -39,29 +40,40 @@ def fetch(url, *, maximum, timeout, accept):
         raise ValueError("unexpected MENY public request bounds")
 
     request = Request(url, headers={"Accept": accept, "Accept-Encoding": "identity"}, method="GET")
-    deadline = time.monotonic() + timeout
+    transfer = SimpleQueue()
+
+    def download():
+        try:
+            transfer.put(read_response(request, maximum=maximum, timeout=timeout, accept=accept))
+        except Exception as exc:
+            transfer.put(exc)
+
+    # urllib's timeout applies per I/O. Bound the foreground command even
+    # when the host's DNS, headers or response body never finish.
+    Thread(target=download, daemon=True).start()
     try:
-        with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
-            content_type = response.headers.get_content_type()
-            content_length = response.headers.get("Content-Length")
-            if (response.status != 200 or response.url != url or content_type != accept
-                    or response.headers.get("Content-Encoding", "identity").lower() != "identity"):
-                raise ValueError("unexpected MENY public response")
-            if content_length is not None and (not re.fullmatch(r"[0-9]{1,10}", content_length)
-                                               or not 0 < int(content_length) <= maximum):
-                raise ValueError("unexpected MENY public response length")
-            body = bytearray()
-            while len(body) <= maximum:
-                if time.monotonic() >= deadline:
-                    raise ValueError("MENY public response deadline passed")
-                chunk = response.read1(min(64 * 1024, maximum + 1 - len(body)))
-                if not chunk:
-                    break
-                body.extend(chunk)
-            if not body or len(body) > maximum or (content_length is not None and len(body) != int(content_length)):
-                raise ValueError("incomplete or oversized MENY public response")
-    except (OSError, HTTPException) as exc:
-        raise ValueError("could not read MENY public HTTPS response") from exc
+        ending = transfer.get(timeout=timeout)
+    except Empty as exc:
+        raise ValueError("MENY public response deadline passed") from exc
+    if isinstance(ending, Exception):
+        raise ValueError("could not read MENY public HTTPS response") from ending
+    return ending
+
+
+def read_response(request, *, maximum, timeout, accept):
+    with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+        content_type = response.headers.get_content_type()
+        lengths = response.headers.get_all("Content-Length", [])
+        encodings = [value.strip().casefold() for value in response.headers.get_all("Content-Encoding", ["identity"])]
+        if (response.status != 200 or response.url != request.full_url or content_type != accept
+                or encodings != ["identity"]):
+            raise ValueError("unexpected MENY public response")
+        if len(lengths) > 1 or (lengths and (not re.fullmatch(r"[0-9]{1,10}", lengths[0])
+                                             or not 0 < int(lengths[0]) <= maximum)):
+            raise ValueError("unexpected MENY public response length")
+        body = response.read(maximum + 1)
+        if not body or len(body) > maximum or (lengths and len(body) != int(lengths[0])):
+            raise ValueError("incomplete or oversized MENY public response")
     return bytes(body), content_type
 
 
@@ -85,20 +97,20 @@ def validate(request):
 def product(row):
     if not isinstance(row, dict):
         raise HouseholdError("MENY public product row changed")
-    ean, slug, name = row.get("ean"), row.get("slugifiedUrl"), row.get("title")
+    ean, slug, name = row.get("ean"), row.get("slugifiedUrl"), _display_text(row.get("title"))
     if (not isinstance(ean, str) or not _EAN.fullmatch(ean)
             or not isinstance(slug, str) or len(slug) > 400 or not _PRODUCT_PATH.fullmatch(slug)
             or not slug.endswith("-" + ean)
-            or not isinstance(name, str) or not name.strip() or not name.isprintable() or len(name) > 300):
+            or not name or not name.isprintable() or len(name) > 300):
         raise HouseholdError("MENY public product identity changed")
     # MENY's catalog omits the /varer prefix on the shop path.
     path = "/varer" + slug
     result = {"product_id": path, "url": MENY_ORIGIN + path, "ean": ean, "name": name}
-    subtitle = row.get("subtitle")
-    if isinstance(subtitle, str) and subtitle.strip() and len(subtitle) <= 300 and subtitle.isprintable():
+    subtitle = _display_text(row.get("subtitle"))
+    if subtitle and len(subtitle) <= 300 and subtitle.isprintable():
         result["package_label"] = subtitle
-    price = row.get("pricePerUnit")
-    if type(price) in (int, float) and (cents := money_cents(price)):
+    cents = _catalog_ore(row.get("pricePerUnit"))
+    if cents is not None:
         result["public_price_per_unit_ore"] = cents
     return result
 
@@ -107,8 +119,8 @@ def products(query, limit):
     params = urlencode({"search": query, "page": 1, "page_size": limit, "fieldset": "maximal"})
     try:
         raw, _ = fetch(f"{PRODUCT_SEARCH}?{params}", maximum=MAX_BYTES, timeout=TIMEOUT, accept="application/json")
-        document = _json(raw)
-    except (ValueError, RecursionError) as exc:
+        document = json.loads(raw, parse_float=Decimal, parse_constant=Decimal, object_pairs_hook=_unique_object)
+    except (ValueError, RecursionError, DecimalException) as exc:
         raise HouseholdError("MENY public product search is unavailable") from exc
     hits = document.get("hits") if isinstance(document, dict) else None
     total = document.get("total") if isinstance(document, dict) else None

@@ -200,22 +200,28 @@ def call(directory, identifier, request, outputs, make_application, build):
     return {**response, "request_id": identifier, "receipt_build": record["build"]}, code
 
 
-def hosted_call(directory, identifier, request, plugin, build):
+def hosted_call(directory, identifier, request, plugin, build, *, selection=None):
     import hosted_oda
 
-    if request != hosted_oda.CART_REQUEST:
-        raise ValueError("the hosted Oda foreground installation supports only cart get")
+    tool, arguments = selection or hosted_oda.tool_request(request)
+    digest = hashlib.sha256(json.dumps(request, sort_keys=True, allow_nan=False).encode()).hexdigest()
     record = read_receipt(directory, identifier)
     if record is not None:
         if record.get("hosted_read", {}).get("plugin_id") != plugin:
             raise ValueError("request does not belong to this hosted Oda installation")
+        expected = record.get("input_sha256", digest if request == hosted_oda.CART_REQUEST else None)
+        if digest != expected:
+            raise ValueError("request ID belongs to a different input")
         return receipt_view(record, identifier)
-    frame = hosted_oda.issue(plugin)
-    record = {"format": 1, "request_id": identifier, "operation": "cart", "action": "get",
-              "hosted_read": frame, "runtime_sha256": build["installed_runtime_sha256"],
+    frame = hosted_oda.issue(plugin, tool, arguments)
+    binding = {key: value for key, value in frame.items() if key != "arguments"}
+    binding["arguments_sha256"] = hosted_oda.arguments_digest(arguments)
+    record = {"format": 1, "request_id": identifier, "operation": request["operation"], "action": request["action"],
+              "input_sha256": digest,
+              "hosted_read": binding, "runtime_sha256": build["installed_runtime_sha256"],
               "build": {key: build.get(key) for key in ("source_commit", "release_tag", "source_modified")}}
     install.write_json(directory / f"{identifier}.json", record)
-    return {"ok": True, "status": "awaiting_hosted_read", "cart_read": False, "hosted_request": frame,
+    return {"ok": True, "status": "awaiting_hosted_read", f"{request['operation']}_read": False, "hosted_request": frame,
             "request_id": identifier, "receipt_build": record["build"]}, 0
 
 
@@ -234,10 +240,11 @@ def hosted_complete(directory, identifier, reply, plugin, build):
         raise ValueError("hosted Oda response exceeded the output limit")
     code = 0 if response["ok"] else 1
     if code == 0:
-        receipt = {"ok": True, "status": "historical_cart_read", "observed_at": response["observed_at"],
-                   "evidence": response["evidence"], "next": "Read the cart again for its current contents."}
+        receipt = {"ok": True, "status": "historical_" + response["status"], "observed_at": response["observed_at"],
+                   "evidence": response["evidence"], "next": "Make a new request for a current result."}
     else:
         receipt = response
+    frame.pop("arguments", None)
     record.update(response=receipt, exit_code=code)
     install.write_json(directory / f"{identifier}.json", record)
     return ending, code
@@ -291,9 +298,12 @@ def execute(options):
                 return receipt_view(read_receipt(directory, options.request_id), options.request_id)
             if options.action == "tools":
                 if plugin is not None:
+                    from hosted_oda import TOOLS as ODA_TOOLS
+
                     return {"ok": True, "provider": "oda", "household": settings["household"], "build": build,
-                            "transport": "hosted_mcp", "plugin_id": plugin, "operations": ["cart"],
-                            "cart_actions": ["get"], "skill": str(SOURCE / "skill/SKILL.md")}, 0
+                            "transport": "hosted_mcp", "plugin_id": plugin, "operations": sorted(ODA_TOOLS),
+                            **{f"{operation}_actions": sorted(actions) for operation, actions in ODA_TOOLS.items()},
+                            "skill": str(SOURCE / "skill/SKILL.md")}, 0
                 from meny_public import ACTIONS as MENY_CATALOG_ACTIONS
 
                 return {"ok": True, "provider": "none", "household": settings["household"], "build": build,
@@ -306,10 +316,11 @@ def execute(options):
             if plugin is not None:
                 import hosted_oda
 
-                if request != hosted_oda.CART_REQUEST or options.image_output or options.delivery_output:
-                    raise ValueError("the hosted Oda foreground installation supports only cart get")
+                if options.image_output or options.delivery_output:
+                    raise ValueError("hosted Oda foreground reads have no file outputs")
+                selection = hosted_oda.tool_request(request)
                 directory = receipt_directory(state, create=True)
-                return hosted_call(directory, options.request_id, request, plugin, build)
+                return hosted_call(directory, options.request_id, request, plugin, build, selection=selection)
             directory = receipt_directory(state, create=True)
 
             def make_application():

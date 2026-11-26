@@ -74,8 +74,9 @@ whether an exported file still matches its original bytes.
 ### Store availability
 
 The planning installation uses `provider=none`. A separate hosted Oda
-installation can read the ordinary cart when the official Oda plugin is callable
-in the Dot. Follow the [hosted Oda setup](#oda-cart-reads) below. The planning
+installation can search products and recipes and read the cart, delivery
+windows and orders when the official Oda plugin is callable in the Dot.
+Follow the [hosted Oda setup](#oda-cart-reads) below. The planning
 installation can also search the [public MENY catalog](#public-meny-catalog).
 Full MENY shopping uses the shared store runtime with a working dedicated browser.
 
@@ -161,7 +162,36 @@ recovers the historical outcome without saving cart contents. A fresh read
 uses a new request. Large carts show `lines.truncated` and their full count.
 Open the returned cart link for the complete contents and to finish checkout
 in Oda. Update the same program and home with the foreground update procedure.
-The hosted installation exposes `cart.get`.
+
+#### Oda product and recipe searches
+
+Use the same hosted Oda household and a new request ID for each search.
+
+```json
+{"operation":"catalog","action":"products","query":"havregryn","limit":5}
+{"operation":"catalog","action":"recipes","query":"pasta","limit":5}
+```
+
+Invoke the emitted `product_search` or `recipe_search` in the attached plugin,
+with the exact arguments. For `complete-hosted`, pass the same request, plugin,
+tool and time fields as for a cart read. Echo the frame’s exact `arguments`.
+Put the structured search result into
+`catalog`. Product results include package and price observations when supplied
+by Oda. Recipe results include the exact recipe ID and the Oda link when present.
+Completed search receipts keep only the status and request metadata. Search
+results do not authorize a cart change or a purchase.
+
+#### Oda delivery windows and orders
+
+Use `delivery.list` with an optional ISO calendar `date` to read windows for
+the current Oda delivery context. Use `orders.list` to read recent order
+summaries, then `orders.get` or `orders.track` with the exact `order_id` from
+the list. Echo the frame’s exact `arguments` and put the structured response
+in `delivery` or `orders`, respectively, when completing the original request.
+Each call has a new request ID.
+`orders.track` reports Oda’s current tracking status. Keep the results in
+the owner’s chat. The installed receipt does not retain line items or order IDs.
+Delivery reservations and order changes are outside this foreground workflow.
 
 ### Attachments and scheduled planning
 

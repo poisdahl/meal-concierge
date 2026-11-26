@@ -1,25 +1,77 @@
-"""Normalize one cart response supplied by the Dot's attached Oda plugin."""
-from datetime import datetime, timedelta, timezone
+"""Bound read-only responses supplied by the Dot's attached Oda plugin."""
+from datetime import date, datetime, timedelta, timezone
+import hashlib
+import json
+import math
 import re
+from urllib.parse import urlsplit
 import uuid
 
 from agent_views import project_agent_result
 from core import cart_contents
+from product_observations import normalize_retail_product_search_batch
+from service_common import require_provider_identity, safe_order_id
 
 
 CART_REQUEST = {"operation": "cart", "action": "get", "response_view": "agent"}
+TOOLS = {"cart": {"get": "get_cart"}, "catalog": {"products": "product_search", "recipes": "recipe_search"},
+         "delivery": {"list": "get_delivery_slots"},
+         "orders": {"list": "get_orders", "get": "get_order", "track": "order_tracking"}}
+PAYLOAD_FIELDS = {tool: operation for operation, actions in TOOLS.items() for tool in actions.values()}
 CART_FIELDS = {"groups", "productQuantityCount", "totalGrossAmount", "totalBreakdown", "url"}
 CART_LINKS = {"https://oda.com/no/cart/", "https://oda.com/no/cart"}
 BREAKDOWN_FIELDS = {"subtotal", "productDiscounts", "couponDiscount", "surcharge",
                     "bottleDeposit", "packaging", "deliveryFee", "total"}
 EVIDENCE = "host_supplied_oda_mcp"
+TRACKING_STATUSES = {"unpaid_order", "unpaid_order_change", "paid_and_modifiable", "paid_and_not_modifiable",
+                     "picking", "shipped", "delivered", "failed", "cancelled"}
 
 
-def issue(plugin):
+def tool_request(request):
+    operation, action = request.get("operation"), request.get("action")
+    tool = TOOLS.get(operation, {}).get(action) if isinstance(operation, str) and isinstance(action, str) else None
+    if not tool or request.get("response_view") != "agent":
+        raise ValueError("hosted Oda supports only cart get and the discovered read-only actions")
+    extras = set(request) - {"operation", "action", "response_view"}
+    if tool == "get_cart" and not extras:
+        return tool, {}
+    if tool == "get_delivery_slots" and extras <= {"date"}:
+        return tool, {"delivery_date": observed_date(request["date"])} if "date" in request else {}
+    if tool in {"get_order", "order_tracking"} and extras == {"order_id"}:
+        return tool, {"order_number": safe_order_id(request["order_id"])}
+    if tool == "get_orders" and extras <= {"limit"}:
+        return tool, page_arguments(request)
+    if operation == "catalog" and extras <= {"query", "limit"}:
+        query = request.get("query")
+        if not isinstance(query, str) or not query.strip() or len(query) > 200 or not query.isprintable():
+            raise ValueError("hosted Oda search requires a bounded text query")
+        arguments = {"queries": [query.strip()]} if tool == "product_search" else {"query": query.strip()}
+        return tool, {**arguments, **page_arguments(request)}
+    raise ValueError("unexpected arguments for the hosted Oda read")
+
+
+def page_arguments(request):
+    limit = request.get("limit", 5)
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError("hosted Oda reads require a limit of 1 to 20")
+    return {"page": 1, "size": limit}
+
+
+def observed_date(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise ValueError("hosted Oda reads require an ISO calendar date")
+    return date.fromisoformat(value).isoformat()
+
+
+def issue(plugin, tool, arguments):
     issued = datetime.now(timezone.utc)
-    return {"read_id": str(uuid.uuid4()), "plugin_id": plugin, "provider": "oda", "tool": "get_cart",
-            "arguments": {}, "issued_at": issued.isoformat(),
+    return {"read_id": str(uuid.uuid4()), "plugin_id": plugin, "provider": "oda", "tool": tool,
+            "arguments": arguments, "issued_at": issued.isoformat(),
             "expires_at": (issued + timedelta(minutes=5)).isoformat()}
+
+
+def arguments_digest(arguments):
+    return hashlib.sha256(json.dumps(arguments, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
 def response_time(value):
@@ -76,10 +128,116 @@ def cart_view(cart):
     return {**view, "provider": "oda", "cart_url": cart["url"]}
 
 
+def recipes(data, arguments):
+    values = data.get("recipes") if isinstance(data, dict) else None
+    if (not isinstance(values, list) or len(values) > arguments["size"]
+            or type(data.get("hasMore")) is not bool):
+        raise ValueError("hosted Oda recipe search scope changed")
+    rows = []
+    for recipe in values:
+        recipe_id = recipe.get("id") if isinstance(recipe, dict) else None
+        title = recipe.get("title") if recipe_id is not None else None
+        if (type(recipe_id) is not int or not 0 < recipe_id <= 2**53 - 1
+                or not isinstance(title, str) or not title.strip() or len(title) > 300):
+            raise ValueError("hosted Oda recipe identity is unavailable")
+        row = {"recipe_id": recipe_id, "name": title}
+        url = recipe.get("url")
+        if isinstance(url, str) and len(url) <= 2083:
+            parts = urlsplit(url)
+            if ((parts.scheme, parts.netloc) == ("https", "oda.com") and not parts.query and not parts.fragment
+                    and re.fullmatch(rf"/no/recipes/{recipe_id}(?:-[A-Za-z0-9._~-]+)?/?", parts.path)):
+                row["url"] = url
+        rows.append(row)
+    if len({row["recipe_id"] for row in rows}) != len(rows):
+        raise ValueError("hosted Oda recipe search returned duplicate identities")
+    return {"provider": "oda", "query": arguments["query"], "recipes": rows, "has_more": data["hasMore"]}
+
+
+def catalog_view(tool, data, arguments, observed_at):
+    if tool == "product_search":
+        queries = arguments["queries"]
+        view = normalize_retail_product_search_batch(data, queries, size=arguments["size"],
+                                                    observed_at=observed_at)[queries[0]]
+        view["scope"]["evidence"] = EVIDENCE
+        # The hosted product search schema supplies no ingredient or allergen labels.
+        for product in view["products"]:
+            product.pop("dietary_evidence", None)
+        return view
+    return recipes(data, arguments)
+
+
+def delivery_view(data, arguments):
+    from retail_mcp import normalize_retail_delivery_slot, normalize_retail_delivery_slots
+
+    observed = observed_date(data.get("deliveryDate") if isinstance(data, dict) else None)
+    if "delivery_date" in arguments and observed != arguments["delivery_date"]:
+        raise ValueError("hosted Oda delivery date changed")
+    slots = data.get("slots")
+    if not isinstance(slots, list) or len(slots) > 400:
+        raise ValueError("hosted Oda delivery slot scope changed")
+    seen = set()
+    for raw in slots:
+        slot = normalize_retail_delivery_slot(raw)
+        reference = slot["slot_ref"]
+        if (not isinstance(raw["price"], str) or reference.rsplit(":", 1)[0] != f"oda:{observed}"
+                or reference in seen):
+            raise ValueError("hosted Oda delivery slot identity changed")
+        seen.add(reference)
+    return normalize_retail_delivery_slots(data)
+
+
+def order_row(order, *, include_products=False):
+    if not isinstance(order, dict) or not isinstance(order.get("orderNumber"), str):
+        raise ValueError("hosted Oda order identity is unavailable")
+    order_id = safe_order_id(order["orderNumber"])
+    total, products = order.get("grossAmount"), order.get("products")
+    if (order.get("currency") != "NOK" or type(total) not in (int, float)
+            or not 0 <= total <= 10**12 or not math.isfinite(total) or not isinstance(products, list)):
+        raise ValueError("hosted Oda order amounts or lines are unavailable")
+    summary = {"orderNumber": order_id, "deliveryDate": observed_date(order.get("deliveryDate")),
+               "currency": "NOK", "grossAmount": total}
+    if include_products:
+        lines = [cart_line(line) for line in products]
+        cart_contents({"items": lines}, require_quantities=True)
+        summary["products"] = lines
+    return summary
+
+
+def orders_view(tool, data, arguments):
+    if tool == "get_orders":
+        orders = data.get("orders") if isinstance(data, dict) else None
+        if (not isinstance(orders, list) or len(orders) > arguments["size"]
+                or type(data.get("hasMore")) is not bool):
+            raise ValueError("hosted Oda order list scope changed")
+        rows = [order_row(order) for order in orders]
+        if len({row["orderNumber"] for row in rows}) != len(rows):
+            raise ValueError("hosted Oda returned duplicate order identities")
+        result = project_agent_result("orders", "list", {"orders": rows}, limit=arguments["size"])
+        displayed = result["orders"]
+        displayed["truncated"] = displayed.pop("next_offset", None) is not None
+        return {**result, "provider": "oda", "has_more": data["hasMore"]}
+    expected = arguments["order_number"]
+    require_provider_identity(data, expected, tracking=tool == "order_tracking")
+    if data.get("orderNumber") != expected:
+        raise ValueError("hosted Oda orderNumber does not match the original request")
+    if tool == "get_order":
+        result = project_agent_result("orders", "get", {"order": order_row(data, include_products=True)}, limit=20)
+        items = result["order_items"]
+        items["truncated"] = items.pop("next_offset", None) is not None
+        return {**result, "provider": "oda"}
+    status = data.get("status")
+    if not isinstance(status, str) or status not in TRACKING_STATUSES:
+        raise ValueError("hosted Oda tracking status is unavailable")
+    return {"provider": "oda", "order_id": arguments["order_number"], "status": status}
+
+
 def complete(frame, reply):
     common = {"read_id", "plugin_id", "tool", "observed_at"}
-    if not isinstance(reply, dict) or set(reply) not in (common | {"cart"}, common | {"error"}):
-        raise ValueError("expected one structured Oda cart result or a hosted-unavailable ending")
+    tool = frame["tool"]
+    field = PAYLOAD_FIELDS[tool]
+    result_fields = common | ({field} if field == "cart" else {field, "arguments"})
+    if not isinstance(reply, dict) or set(reply) not in (result_fields, common | {"error"}):
+        raise ValueError("expected one structured Oda read result or a hosted-unavailable ending")
     if any(reply[key] != frame[key] for key in ("read_id", "plugin_id", "tool")):
         raise ValueError("reply does not match the original hosted Oda request")
     observation = response_time(reply["observed_at"])
@@ -90,5 +248,19 @@ def complete(frame, reply):
             raise ValueError("report only the fixed hosted Oda unavailable status")
         return {"ok": False, "status": "hosted_oda_unavailable",
                 "next": "Check the original Oda plugin and authorization before asking for a new read."}
-    return {"ok": True, "status": "cart_read", "observed_at": observation.isoformat(),
-            "evidence": EVIDENCE, "result": cart_view(reply["cart"])}
+    data = reply[field]
+    if not isinstance(data, dict) or data.get("isError", False) is not False or "error" in data:
+        raise ValueError("expected a successful structured Oda result")
+    arguments = reply.get("arguments")
+    if field != "cart" and (not isinstance(arguments, dict) or arguments_digest(arguments) != frame["arguments_sha256"]):
+        raise ValueError("arguments do not match the original hosted Oda request")
+    if field == "cart":
+        result = cart_view(data)
+    elif field == "catalog":
+        result = catalog_view(tool, data, arguments, observation.isoformat())
+    elif field == "delivery":
+        result = delivery_view(data, arguments)
+    else:
+        result = orders_view(tool, data, arguments)
+    return {"ok": True, "status": f"{field}_read", "observed_at": observation.isoformat(),
+            "evidence": EVIDENCE, "result": result}

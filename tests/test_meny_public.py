@@ -1,9 +1,11 @@
 """Anonymous MENY reads exercise the same paths and payload scopes as the Dot."""
+from decimal import Decimal
 from email.message import Message
 import io
 import json
 from pathlib import Path
 import sys
+from threading import Event
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -56,13 +58,33 @@ class MenyPublicTests(unittest.TestCase):
         build.assert_not_called()
 
     def test_invalid_response_is_not_an_empty_result(self):
+        duplicate = Response(b"{}", self.url, length=2)
+        duplicate.headers["Content-Length"] = "2"
         cases = (Response(b"too long" * 3, self.url), Response(b"{}", self.url, length=16),
-                 Response(b"{}", self.url, content_type="text/html"), Response(b"{}", self.url + "&changed=1"))
+                 Response(b"{}", self.url, content_type="text/html"), Response(b"{}", self.url + "&changed=1"),
+                 duplicate)
         for response in cases:
             with self.subTest(response=response), patch.object(meny_public, "build_opener") as build:
                 build.return_value.open.return_value = response
                 with self.assertRaises(ValueError):
                     meny_public.fetch(self.url, maximum=20, timeout=2, accept="application/json")
+
+    def test_whole_response_deadline_does_not_wait_for_dns_headers_or_eof(self):
+        release = Event()
+        ending = Event()
+
+        def slow_response(*_args, **_kwargs):
+            release.wait(2)
+            ending.set()
+            return b"{}", "application/json"
+
+        with patch.object(meny_public, "read_response", side_effect=slow_response):
+            try:
+                with self.assertRaisesRegex(ValueError, "deadline passed"):
+                    meny_public.fetch(self.url, maximum=20, timeout=0.01, accept="application/json")
+            finally:
+                release.set()
+                self.assertTrue(ending.wait(2))
 
     def test_public_products_expose_only_scoped_catalog_facts(self):
         row = {"ean": "1234567890123", "title": "Synthetic oats", "subtitle": "1 kg",
@@ -83,6 +105,9 @@ class MenyPublicTests(unittest.TestCase):
         for changes in ({"ean": "2222222222222"}, {"slugifiedUrl": "/%2e%2e/oats-1234567890123"}):
             with self.subTest(changes=changes), self.assertRaises(HouseholdError):
                 meny_public.product({**row, **changes})
+        self.assertEqual(meny_public.product({**row, "pricePerUnit": Decimal("0.00")})["public_price_per_unit_ore"], 0)
+        for value in (Decimal("12.345"), Decimal("Infinity"), True, "12.30"):
+            self.assertNotIn("public_price_per_unit_ore", meny_public.product({**row, "pricePerUnit": value}))
         with patch.object(meny_public, "fetch", return_value=(body, "application/json")):
             with self.assertRaisesRegex(HouseholdError, "scope changed"):
                 meny_public.read({**request, "limit": 2})
