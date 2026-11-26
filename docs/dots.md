@@ -73,13 +73,10 @@ whether an exported file still matches its original bytes.
 
 ### Store availability
 
-The installed foreground runner is for `provider=none`. Oda and full MENY
-shopping use the shared store runtime on a host with a working dedicated
-browser and private sign-in. Oda also requires an authenticated retailer OAuth
-connection and a verified account match in that browser. During Dots testing,
-the executor denied Unix socket creation and its native browser could not reach
-the executor’s loopback listener. Oda OAuth and the matching dedicated checkout
-browser could not be established on this host.
+The planning installation uses `provider=none`. A separate hosted Oda
+installation can read the ordinary cart when the official Oda plugin is callable
+in the Dot. Follow the [hosted Oda setup](#oda-cart-reads) below. Full MENY
+shopping uses the shared store runtime with a working dedicated browser.
 
 The separate [MENY native-browser interface](#native-browser-requests-over-stdinstdout)
 supports native-browser reads and guarded cart changes where an operator can
@@ -93,6 +90,56 @@ order pages did not match the rendered order read contract.
 Shopping-list matching and guarded cart changes have fixture coverage.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
+
+### Oda cart reads
+
+Connect [Oda’s official MCP endpoint](https://oda.com/mcp?lang=en) through
+ChatGPT Plugins and approve the account privately. Attach that exact installed
+plugin in the Dot’s conversation. A plugin appearing in the picker does not
+establish that the Dot can invoke it. A successful call is required on each
+fresh read. The Dot uses the connection ChatGPT holds for this plugin.
+
+Install a **separate** external Oda home and program. Use the plugin ID from the
+connected entry’s ChatGPT `/plugins/<plugin_id>` page. The ID identifies the
+entry. Keep the original planning installation.
+
+```sh
+./install.sh install --manager external --provider oda --oda-plugin ACTUAL_PLUGIN_ID \
+  --household 'My Oda household' \
+  --home /workspace/shared/meal-concierge-oda/household \
+  --code-root /workspace/shared/meal-concierge-oda/program
+
+program=/workspace/shared/meal-concierge-oda/program/current
+household=/workspace/shared/meal-concierge-oda/household
+"$program/venv/bin/python" -I -B "$program/foreground.py" --home "$household" tools
+```
+
+Paste to the Dot after connecting Oda:
+
+> On your cloud computer, set up a separate Meal Concierge Oda household using
+> the hosted Oda instructions in docs/dots.md. Use my attached official Oda
+> plugin and the exact build selected for setup. Keep my original planning
+> household. Then read my Oda cart through the installed Meal Concierge tool.
+
+Use `call REQUEST_UUID` with `{"operation":"cart","action":"get"}`. The
+installed tool records the request before returning `awaiting_hosted_read`.
+Run the exact attached plugin’s emitted `get_cart` with the given arguments
+once. Complete that same request within its expiry with `complete-hosted
+REQUEST_UUID`, passing one JSON object on stdin. Supply `read_id`, `plugin_id`,
+`tool` from the request, and `observed_at` as the actual UTC observation time.
+Put only `groups`, `productQuantityCount`, `totalGrossAmount`, `totalBreakdown`,
+and `url` from the structured tool response into `cart`. Pass these fields as
+received. Keep account and delivery details out of the handoff. On an unavailable
+tool or authorization failure, use `error:"unavailable"` instead of `cart`.
+Use the plugin result for every successful cart observation.
+
+The runtime checks the build, original request, plugin, expiry and result. The
+cart observation is supplied by the host. The foreground process can validate
+the response and its binding, and ChatGPT holds the OAuth authorization.
+`receipt REQUEST_UUID` recovers the historical outcome without saving cart
+contents. A fresh read uses a new request. Update the same program and home
+with the regular foreground update procedure. Checkout is completed by the
+owner using Oda’s returned cart link. The hosted installation exposes `cart.get`.
 
 ### Attachments and scheduled planning
 

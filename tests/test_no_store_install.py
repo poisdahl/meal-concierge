@@ -66,6 +66,32 @@ class NoStoreInstallTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue().splitlines()[0]),
                          {'provider': 'none', 'browser_required': False})
 
+    def test_hosted_oda_is_browser_free_and_retains_binding_during_update(self):
+        args = [value if value != 'none' else 'oda' for value in self.install_arguments()]
+        args += ['--oda-plugin', 'plugin_fixture_oda']
+        with patch.object(sys, 'argv', args), \
+             patch.object(install, 'discover_browser_paths', side_effect=AssertionError('browser discovery')), \
+             patch.object(install, 'publish') as publish:
+            install.main()
+        meta, _, _, settings = publish.call_args.args
+        self.assertEqual(settings['provider'], 'oda')
+        self.assertEqual(install.hosted_oda_plugin(meta, settings), 'plugin_fixture_oda')
+        self.assertEqual(set(meta['paths']), {'config', 'state', 'socket'})
+        self.assertNotIn('browser_launch', meta)
+
+        install.write_json(self.home / 'config.json', settings)
+        install.write_json(self.home / 'runtime.json', meta)
+        with patch.object(sys, 'argv', ['install.py', 'update', '--home', str(self.home)]), \
+             patch.object(install, 'discover_browser_paths', side_effect=AssertionError('browser discovery')), \
+             patch.object(runtime, 'assert_no_legacy_service'), \
+             patch.object(install, 'publish') as update:
+            install.main()
+        self.assertEqual(update.call_args.args[0]['hosted_oda_plugin'], meta['hosted_oda_plugin'])
+        for action in ('run', 'attach', 'connect-store'):
+            with self.subTest(action=action), patch.object(sys, 'argv', ['install.py', action, '--home', str(self.home)]):
+                with self.assertRaisesRegex(RuntimeError, 'uses foreground tools'):
+                    install.main()
+
     def test_legacy_default_and_connected_browser_validation_are_preserved(self):
         self.assertEqual(install.configured_provider({}), 'oda')
         self.assertEqual(install.configured_provider({'provider': 'MaThEm'}), 'mathem')

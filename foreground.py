@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Call one installed store-free household tool in a foreground process."""
+"""Call one installed household tool in a foreground process."""
 from __future__ import annotations
 
 import argparse
@@ -191,11 +191,57 @@ def call(directory, identifier, request, outputs, make_application, build):
     return {**response, "request_id": identifier, "receipt_build": record["build"]}, code
 
 
+def hosted_call(directory, identifier, request, plugin, build):
+    import hosted_oda
+
+    if request != hosted_oda.CART_REQUEST:
+        raise ValueError("the hosted Oda foreground installation supports only cart get")
+    record = read_receipt(directory, identifier)
+    if record is not None:
+        if record.get("hosted_read", {}).get("plugin_id") != plugin:
+            raise ValueError("request does not belong to this hosted Oda installation")
+        return receipt_view(record, identifier)
+    frame = hosted_oda.issue(plugin)
+    record = {"format": 1, "request_id": identifier, "operation": "cart", "action": "get",
+              "hosted_read": frame, "runtime_sha256": build["installed_runtime_sha256"],
+              "build": {key: build.get(key) for key in ("source_commit", "release_tag", "source_modified")}}
+    install.write_json(directory / f"{identifier}.json", record)
+    return {"ok": True, "status": "awaiting_hosted_read", "cart_read": False, "hosted_request": frame,
+            "request_id": identifier, "receipt_build": record["build"]}, 0
+
+
+def hosted_complete(directory, identifier, reply, plugin, build):
+    import hosted_oda
+
+    record = read_receipt(directory, identifier)
+    frame = (record or {}).get("hosted_read", {})
+    if not record or frame.get("plugin_id") != plugin or record.get("runtime_sha256") != build["installed_runtime_sha256"]:
+        raise ValueError("use the original hosted Oda request and its installed build")
+    if "response" in record:
+        return receipt_view(record, identifier)
+    response = hosted_oda.complete(frame, reply)
+    code = 0 if response["ok"] else 1
+    if code == 0:
+        receipt = {"ok": True, "status": "historical_cart_read", "observed_at": response["observed_at"],
+                   "evidence": response["evidence"], "next": "Read the cart again for its current contents."}
+    else:
+        receipt = response
+    record.update(response=receipt, exit_code=code)
+    install.write_json(directory / f"{identifier}.json", record)
+    return {**response, "request_id": identifier, "receipt_build": record["build"]}, code
+
+
 def execute(options):
     if options.action == "call":
         request = cli.read_request(sys.stdin.buffer)
-        validate_request(request)
         request.setdefault("response_view", "agent")
+    elif options.action == "complete-hosted":
+        from on_demand import _json
+
+        data = sys.stdin.buffer.read(cli.MAX_INPUT + 1)
+        if len(data) > cli.MAX_INPUT:
+            raise ValueError("hosted Oda reply exceeds the size limit")
+        reply = _json(data)
     home = options.home.expanduser().resolve(strict=True)
     original_path(home, directory=True)
     with file_lock(home / ".installer.lock"):
@@ -216,8 +262,13 @@ def execute(options):
                 or any(build.get(key) != value for key, value in expected.items())):
             raise ValueError("running build failed installed runtime verification; inspect the original installation")
         settings = service.config(Path(meta["paths"]["config"]))
-        if options.action != "receipt" and settings["provider"] != "none":
-            raise ValueError("the foreground runner requires an existing provider=none household")
+        plugin = install.hosted_oda_plugin(meta, settings)
+        if options.action != "receipt" and settings["provider"] != "none" and plugin is None:
+            raise ValueError("the foreground runner requires store-free or hosted Oda installation")
+        if options.action == "complete-hosted" and plugin is None:
+            raise ValueError("complete-hosted requires a hosted Oda installation")
+        if options.action == "call" and plugin is None:
+            validate_request(request)
         state = Path(meta["paths"]["state"])
         with install.data_ownership(meta):
             original_path(state, directory=True)
@@ -227,10 +278,23 @@ def execute(options):
             if options.action == "receipt":
                 return receipt_view(read_receipt(directory, options.request_id), options.request_id)
             if options.action == "tools":
+                if plugin is not None:
+                    return {"ok": True, "provider": "oda", "household": settings["household"], "build": build,
+                            "transport": "hosted_mcp", "plugin_id": plugin, "operations": ["cart"],
+                            "cart_actions": ["get"], "skill": str(SOURCE / "skill/SKILL.md")}, 0
                 return {"ok": True, "provider": "none", "household": settings["household"], "build": build,
                         "operations": sorted(TOOLS), "products_actions": ["record_ingredients"],
                         "skill": str(SOURCE / "skill/SKILL.md")}, 0
 
+            if options.action == "complete-hosted":
+                return hosted_complete(directory, options.request_id, reply, plugin, build)
+            if plugin is not None:
+                import hosted_oda
+
+                if request != hosted_oda.CART_REQUEST or options.image_output or options.delivery_output:
+                    raise ValueError("the hosted Oda foreground installation supports only cart get")
+                directory = receipt_directory(state, create=True)
+                return hosted_call(directory, options.request_id, request, plugin, build)
             directory = receipt_directory(state, create=True)
 
             def make_application():
@@ -254,12 +318,13 @@ def main():
     command.add_argument("request_id", type=request_id)
     cli.output_options(command)
     subparsers.add_parser("receipt").add_argument("request_id", type=request_id)
+    subparsers.add_parser("complete-hosted").add_argument("request_id", type=request_id)
     options = parser.parse_args()
     try:
         value, code = execute(options)
     except SystemExit:
         value, code = {"ok": False, "error": "installed household could not start; run install.sh doctor with the original home"}, 1
-    except (OSError, RuntimeError, ValueError, argparse.ArgumentTypeError) as exc:
+    except (OSError, RuntimeError, ValueError, RecursionError, argparse.ArgumentTypeError) as exc:
         value, code = {"ok": False, "error": str(exc)}, 1
     print(json.dumps(value, ensure_ascii=False, allow_nan=False))
     return code

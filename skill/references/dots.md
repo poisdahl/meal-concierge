@@ -22,6 +22,15 @@ arguments as instructed by the shared skill. Generate a canonical UUID and
 retain it before calling. A new UUID is for a new command, not for repeating
 an uncertain one. Treat errors and incomplete receipts as recovery steps.
 
+When discovery returns `provider:"oda"` and `transport:"hosted_mcp"`, bind
+this installation to its reported official Oda plugin and use `cart.get` in
+the [hosted Oda workflow](../../docs/dots.md#oda-cart-reads) from the retained
+source checkout. Start with `call` and the exact cart request. Invoke only the
+emitted `get_cart` in the attached plugin, then complete that same request with
+the structured result. Use the normalized current result and its Oda cart link.
+The original receipt is historical. If the plugin cannot provide the result,
+report it as unavailable. The owner completes checkout at Oda.
+
 For a saved-menu delivery, prepare the actual job and export its exact frozen part
 to a new file in a private directory. Pass the
 `recipe_delivery.read` `job_id` and `part_id` using `call REQUEST_UUID

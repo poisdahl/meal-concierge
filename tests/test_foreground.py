@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import StateStore
 import foreground
+import hosted_oda
 from service import Application
 
 
@@ -171,6 +173,74 @@ class ForegroundTests(unittest.TestCase):
         receipt = json.loads(output.getvalue())
         self.assertFalse(receipt["ok"])
         self.assertIn("install.sh doctor", receipt["error"])
+
+
+class HostedOdaForegroundTests(unittest.TestCase):
+    def setUp(self):
+        self.state = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.calls = foreground.receipt_directory(self.state, create=True)
+        self.build = {"source_commit": "a" * 40, "installed_runtime_sha256": "b" * 64}
+        self.plugin = "plugin_fixture_oda"
+        self.identifier = str(uuid.uuid4())
+
+    def begin(self, request=hosted_oda.CART_REQUEST):
+        return foreground.hosted_call(self.calls, self.identifier, request, self.plugin, self.build)
+
+    def example_reply(self):
+        frame, code = self.begin()
+        self.assertEqual(code, 0, frame)
+        self.assertFalse(frame["cart_read"])
+        self.assertEqual(frame["hosted_request"]["arguments"], {})
+        self.assertEqual(frame["hosted_request"]["tool"], "get_cart")
+        reply = {key: frame["hosted_request"][key] for key in ("read_id", "plugin_id", "tool")}
+        return {**reply, "observed_at": datetime.now(timezone.utc).isoformat(), "cart": {
+            "groups": [{"items": [{"product": {"id": 42, "name": "Fixture product"}, "quantity": 2}]}],
+            "productQuantityCount": 2, "totalGrossAmount": "10.00", "totalBreakdown": {},
+            "url": "https://oda.com/no/cart/",
+        }}
+
+    def finish(self, reply, *, build=None):
+        return foreground.hosted_complete(self.calls, self.identifier, reply, self.plugin, build or self.build)
+
+    def test_finish_returns_current_cart_and_replay_contains_only_metadata(self):
+        reply = self.example_reply()
+        replay, code = self.begin()
+        self.assertEqual((replay["status"], code), ("incomplete", 1))
+        self.assertNotIn("hosted_request", replay)
+        result, code = self.finish(reply)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["status"], "cart_read")
+        self.assertEqual(result["result"]["count"], 2)
+        self.assertEqual(result["result"]["total"], 10)
+        self.assertEqual(result["result"]["cart_url"], reply["cart"]["url"])
+        historical, code = self.begin()
+        self.assertEqual((historical["status"], code), ("historical_cart_read", 0))
+        self.assertNotIn("result", historical)
+        self.assertNotIn("Fixture product", (self.calls / f"{self.identifier}.json").read_text())
+
+    def test_rejects_wrong_origin_build_and_invalid_cart_before_acceptance(self):
+        reply = self.example_reply()
+        for key, value in (("plugin_id", "plugin_other"), ("read_id", str(uuid.uuid4())), ("tool", "manipulate_cart")):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "original hosted Oda request"):
+                self.finish({**reply, key: value})
+        with self.assertRaisesRegex(ValueError, "installed build"):
+            self.finish(reply, build={**self.build, "installed_runtime_sha256": "c" * 64})
+        with self.assertRaisesRegex(ValueError, "expired|observation time"):
+            self.finish({**reply, "observed_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()})
+        with self.assertRaisesRegex(ValueError, "unexpected Oda cart link"):
+            self.finish({**reply, "cart": {**reply["cart"], "url": "https://invalid.example/no/cart/"}})
+        self.assertEqual(self.begin()[0]["status"], "incomplete")
+        self.assertEqual(self.finish(reply)[1], 0)
+
+    def test_unsupported_actions_and_unavailable_plugin_never_return_a_cart(self):
+        with self.assertRaisesRegex(ValueError, "only cart get"):
+            self.begin({"operation": "cart", "action": "ensure"})
+        self.assertIsNone(foreground.read_receipt(self.calls, self.identifier))
+        reply = self.example_reply()
+        del reply["cart"]
+        unavailable, code = self.finish({**reply, "error": "unavailable"})
+        self.assertEqual((unavailable["status"], code), ("hosted_oda_unavailable", 1))
+        self.assertNotIn("result", unavailable)
 
 
 if __name__ == "__main__":

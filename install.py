@@ -483,6 +483,16 @@ def configured_provider(settings):
     return provider
 
 
+def hosted_oda_plugin(meta, settings):
+    plugin = settings.get('hosted_oda_plugin')
+    if plugin != meta.get('hosted_oda_plugin') or (plugin is not None and (
+        configured_provider(settings) != 'oda' or meta['manager'] != 'external'
+        or not isinstance(plugin, str) or not re.fullmatch(r'plugin_[A-Za-z0-9_-]{1,120}', plugin)
+    )):
+        raise RuntimeError('original hosted Oda installation binding changed')
+    return plugin
+
+
 def native_manager():
     if platform.system() == 'Linux':
         run('systemctl', '--user', 'show-environment', stdout=subprocess.DEVNULL)
@@ -875,6 +885,8 @@ def bounded_json(path, maximum=16384):
 
 def program_baseline(meta):
     value = {key: meta.get(key) for key in ('home', 'release', 'code_root', 'manager', 'name', 'paths', 'runtime_path', 'browser_launch', 'runtime_identity')}
+    if 'hosted_oda_plugin' in meta:
+        value['hosted_oda_plugin'] = meta['hosted_oda_plugin']
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -1258,6 +1270,7 @@ def main():
     parser.add_argument('--uv', help='explicit uv executable when it is not on the host PATH')
     parser.add_argument('--name', default='meal-concierge' if platform.system() == 'Linux' else 'com.meal-concierge')
     parser.add_argument('--provider', choices=['none', 'oda', 'meny', 'mathem'])
+    parser.add_argument('--oda-plugin', help='new external Oda foreground installation with this ChatGPT plugin ID')
     parser.add_argument('--no-browser', action='store_true', help='store-login: use the local private OAuth handoff for a headless host')
     parser.add_argument('--household')
     parser.add_argument('--adopt', action='store_true')
@@ -1283,6 +1296,14 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
+    if args.oda_plugin is not None and (
+        args.action != 'install' or args.manager != 'external' or args.provider != 'oda' or args.adopt
+        or not re.fullmatch(r'plugin_[A-Za-z0-9_-]{1,120}', args.oda_plugin)
+        or any((args.tokens, args.agent_browser, args.browser_executable, args.browser_profile,
+                args.browser_home, args.browser_socket_directory, args.browser_mode, args.browser_display,
+                args.browser_xauthority))
+    ):
+        raise RuntimeError('--oda-plugin requires a new external Oda install without local tokens or browser settings')
     if args.action == 'resolve-recipe-conflict':
         if not args.prepared or not args.pack_recipe_id or args.expected_revision is None or args.expected_revision < 1 or args.resolution is None:
             raise RuntimeError('resolve-recipe-conflict requires --prepared, --pack-recipe-id, --expected-revision and --resolution')
@@ -1322,6 +1343,8 @@ def main():
         if args.provider or args.tokens or args.code_root or args.config:
             raise RuntimeError('store-login uses the existing installation provider and token location; select it with --home')
         meta = completed_manifest(home)
+        if meta.get('hosted_oda_plugin'):
+            raise RuntimeError('connect the official Oda plugin through ChatGPT; this installation uses foreground tools')
         code_root = Path(meta['code_root'])
         with file_lock(code_root / '.installer.lock'):
             if completed_manifest(home) != meta or bounded_json(code_root / 'owner.json').get('home') != str(home):
@@ -1349,6 +1372,9 @@ def main():
         meta = json.loads(manifest.read_text())
         settings = json.loads(Path(meta['paths']['config']).read_text())
         provider = configured_provider(settings)
+        if hosted_oda_plugin(meta, settings):
+            print(json.dumps({'provider': 'oda', 'transport': 'hosted_mcp', 'browser_required': False}))
+            return
         if provider == 'none':
             print(json.dumps({'provider': provider, 'browser_required': False}))
             print('No store is configured; browser prerequisites are not required.')
@@ -1397,6 +1423,8 @@ def main():
         return
     if args.action == 'attach':
         meta = json.loads((home / 'runtime.json').read_text())
+        if meta.get('hosted_oda_plugin'):
+            raise RuntimeError('this hosted Oda installation uses foreground tools')
         try:
             verify_serving(meta, selected_identity(meta))
         except (OSError, ValueError) as exc:
@@ -1433,6 +1461,10 @@ def main():
             meta = json.loads(manifest.read_text())
             if args.manager is not None and (args.manager == 'external') != (meta['manager'] == 'external'):
                 raise RuntimeError('existing installation manager differs; no implicit ownership transfer')
+            if args.oda_plugin is not None and args.oda_plugin != meta.get('hosted_oda_plugin'):
+                raise RuntimeError('repeat setup must use the original hosted Oda plugin')
+            if meta.get('hosted_oda_plugin') and args.action in {'start', 'stop', 'restart', 'run', 'connect-store'}:
+                raise RuntimeError('this hosted Oda installation uses foreground tools')
             settings = meta.pop('initial_config', None)
             meta.pop('update_operation', None)
             if args.action == 'install' and path.exists():
@@ -1582,7 +1614,9 @@ def main():
                 if args.adopt or not args.provider or not args.household:
                     raise RuntimeError('new install requires --provider and --household; adoption requires an existing config')
                 settings = {'household': args.household, 'instance': 'household', 'provider': args.provider, 'confirmation_policy': 'fresh', 'primary_recipe_library_id': 'builtin', 'recipe_libraries': [{'library_id': 'builtin', 'provider': 'builtin', 'read_only': False}]}
-            if configured_provider(settings) == 'none':
+                if args.oda_plugin is not None:
+                    settings['hosted_oda_plugin'] = args.oda_plugin
+            if configured_provider(settings) == 'none' or settings.get('hosted_oda_plugin'):
                 paths = {key: value for key, value in paths.items() if key in {'config', 'state', 'socket'}}
             else:
                 paths.update(browser_paths(args, configured_provider(settings)))
@@ -1592,13 +1626,17 @@ def main():
                 if target == code_root or target.is_relative_to(code_root) or code_root.is_relative_to(target):
                     raise RuntimeError('code and private data paths must be disjoint')
             meta = {'format': 1, 'home': str(home), 'code_root': str(code_root), 'name': args.name, 'manager': manager, 'unit': str(unit) if unit is not None else None, 'paths': paths, 'runtime_path': os.environ.get('PATH', os.defpath)}
+            if settings.get('hosted_oda_plugin'):
+                meta['hosted_oda_plugin'] = settings['hosted_oda_plugin']
             if manager != 'external' and active(meta):
                 raise RuntimeError('another service already uses this name')
         actual_settings = dict(settings or json.loads(Path(meta['paths']['config']).read_text()))
         actual_settings['provider'] = configured_provider(actual_settings)
-        if actual_settings['provider'] != 'none':
+        plugin = hosted_oda_plugin(meta, actual_settings)
+        managed_store = actual_settings['provider'] != 'none' and plugin is None
+        if managed_store:
             meta['browser_launch'] = configured_browser_launch(args, meta)
-        if manifest.exists() and actual_settings['provider'] != 'none':
+        if manifest.exists() and managed_store:
             # Validate prerequisites while a healthy owner may still be running.
             # Only after this succeeds do we require the caller to stop it and
             # publish the resolved paths as part of the normal atomic update.
@@ -1621,8 +1659,8 @@ def main():
         elif manifest.exists():
             assert_stopped(meta)
         socket_limit = 103 if platform.system() == 'Darwin' else 107
-        socket_paths = [meta['paths']['socket']]
-        if actual_settings['provider'] != 'none' and (actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary')):
+        socket_paths = [meta['paths']['socket']] if plugin is None else []
+        if managed_store and (actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary')):
             prefix = {'meny': 'meal-concierge-meny-', 'mathem': 'mathem-household-'}.get(actual_settings.get('provider'), 'oda-household-')
             session = prefix + str(actual_settings.get('instance') or 'household')
             socket_paths.append(str(Path(meta['paths']['browser_socket_directory']) / (session + '.sock')))
