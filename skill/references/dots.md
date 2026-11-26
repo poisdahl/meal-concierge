@@ -23,9 +23,9 @@ retain it before calling. A new UUID is for a new command, not for repeating
 an uncertain one. Treat errors and incomplete receipts as recovery steps.
 
 When discovery returns `provider:"oda"` and `transport:"hosted_mcp"`, bind
-this installation to its reported official Oda plugin and use `cart.get` in
-the [hosted Oda workflow](../../docs/dots.md#oda-cart-reads) from the retained
-source checkout. Start with `call` and the exact cart request. Invoke only the
+this installation to its reported official Oda plugin and use `cart.get`
+as documented in `docs/dots.md` in the retained source checkout. Start with
+`call` and the exact cart request. Invoke only the
 emitted `get_cart` in the attached plugin, then complete that same request with
 the structured result. Use the normalized current result and its Oda cart link.
 The original receipt is historical. If the plugin cannot provide the result,

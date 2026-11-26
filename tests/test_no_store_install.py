@@ -91,6 +91,14 @@ class NoStoreInstallTests(unittest.TestCase):
             with self.subTest(action=action), patch.object(sys, 'argv', ['install.py', action, '--home', str(self.home)]):
                 with self.assertRaisesRegex(RuntimeError, 'uses foreground tools'):
                     install.main()
+        with patch.object(sys, 'argv', args), self.assertRaisesRegex(RuntimeError, 'reopen its current foreground tools'):
+            install.main()
+        install.write_json(self.home / 'runtime.json', {**meta, 'release': str(self.code / 'fixture-release')})
+        with patch.object(install, 'health', side_effect=AssertionError('socket health')):
+            status = install.doctor(self.home)
+        self.assertEqual(status['socket_health'], 'not_applicable')
+        self.assertEqual(status['transport'], 'hosted_mcp')
+        self.assertFalse(status['browser_required'])
 
     def test_legacy_default_and_connected_browser_validation_are_preserved(self):
         self.assertEqual(install.configured_provider({}), 'oda')

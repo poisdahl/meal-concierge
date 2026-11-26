@@ -15,7 +15,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import StateStore
+from core import HouseholdError, StateStore
 import foreground
 import hosted_oda
 from service import Application
@@ -194,8 +194,12 @@ class HostedOdaForegroundTests(unittest.TestCase):
         self.assertEqual(frame["hosted_request"]["tool"], "get_cart")
         reply = {key: frame["hosted_request"][key] for key in ("read_id", "plugin_id", "tool")}
         return {**reply, "observed_at": datetime.now(timezone.utc).isoformat(), "cart": {
-            "groups": [{"items": [{"product": {"id": 42, "name": "Fixture product"}, "quantity": 2}]}],
-            "productQuantityCount": 2, "totalGrossAmount": "10.00", "totalBreakdown": {},
+            "groups": [{"items": [{"product": {"id": 42, "name": "Fixture product"}, "quantity": 2,
+                                   "totalGrossAmount": "10.00"}]}],
+            "productQuantityCount": 2, "totalGrossAmount": "10.00",
+            "totalBreakdown": {"subtotal": "10.00", "productDiscounts": "0.00", "couponDiscount": "0.00",
+                               "surcharge": "0.00", "bottleDeposit": "0.00", "packaging": "0.00",
+                               "deliveryFee": "0.00", "total": "10.00"},
             "url": "https://oda.com/no/cart/",
         }}
 
@@ -210,9 +214,13 @@ class HostedOdaForegroundTests(unittest.TestCase):
         result, code = self.finish(reply)
         self.assertEqual(code, 0, result)
         self.assertEqual(result["status"], "cart_read")
+        self.assertEqual(result["evidence"], "host_supplied_oda_mcp")
         self.assertEqual(result["result"]["count"], 2)
         self.assertEqual(result["result"]["total"], 10)
         self.assertEqual(result["result"]["cart_url"], reply["cart"]["url"])
+        self.assertEqual(result["result"]["lines"]["items"][0]["price"], "10.00")
+        with self.assertRaisesRegex(ValueError, "already ended; use receipt"):
+            self.finish({**reply, "plugin_id": "plugin_other"})
         historical, code = self.begin()
         self.assertEqual((historical["status"], code), ("historical_cart_read", 0))
         self.assertNotIn("result", historical)
@@ -241,6 +249,36 @@ class HostedOdaForegroundTests(unittest.TestCase):
         unavailable, code = self.finish({**reply, "error": "unavailable"})
         self.assertEqual((unavailable["status"], code), ("hosted_oda_unavailable", 1))
         self.assertNotIn("result", unavailable)
+
+    def test_nested_cart_fields_and_inconsistent_amounts_do_not_record_a_read(self):
+        reply = self.example_reply()
+        cart = reply["cart"]
+        item = cart["groups"][0]["items"][0]
+        for patch in ({"totalGrossAmount": {"private": "marker"}}, {"totalGrossAmount": float("inf")},
+                      {"product": {"id": 42, "name": {"private": "marker"}}},
+                      {"quantity": float("inf")}, {"quantity": 3}):
+            with self.subTest(patch=patch), self.assertRaises((ValueError, HouseholdError)):
+                self.finish({**reply, "cart": {**cart, "groups": [{"items": [{**item, **patch}]}]}})
+        with self.assertRaisesRegex(ValueError, "incomplete hosted Oda cart breakdown"):
+            self.finish({**reply, "cart": {**cart, "totalBreakdown": {}}})
+        with self.assertRaisesRegex(ValueError, "cart totals could not be verified"):
+            self.finish({**reply, "cart": {**cart, "totalBreakdown": {**cart["totalBreakdown"], "subtotal": "9.00"}}})
+        self.assertEqual(self.begin()[0]["status"], "incomplete")
+
+    def test_bounded_cart_summary_reports_truncation_without_a_paging_token(self):
+        reply = self.example_reply()
+        cart = reply["cart"]
+        item = cart["groups"][0]["items"][0]
+        cart["groups"][0]["items"] = [item] * 21
+        cart["productQuantityCount"] = 42
+        result, code = self.finish(reply)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["result"]["count"], 42)
+        lines = result["result"]["lines"]
+        self.assertEqual(lines["total"], 21)
+        self.assertTrue(lines["truncated"])
+        self.assertGreater(len(lines["items"]), 0)
+        self.assertNotIn("next_offset", lines)
 
 
 if __name__ == "__main__":

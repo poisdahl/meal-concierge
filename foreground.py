@@ -218,8 +218,11 @@ def hosted_complete(directory, identifier, reply, plugin, build):
     if not record or frame.get("plugin_id") != plugin or record.get("runtime_sha256") != build["installed_runtime_sha256"]:
         raise ValueError("use the original hosted Oda request and its installed build")
     if "response" in record:
-        return receipt_view(record, identifier)
+        raise ValueError("the original hosted Oda read already ended; use receipt to inspect it")
     response = hosted_oda.complete(frame, reply)
+    ending = {**response, "request_id": identifier, "receipt_build": record["build"]}
+    if len(json.dumps(ending, ensure_ascii=False, allow_nan=False).encode()) > cli.MAX_INPUT:
+        raise ValueError("hosted Oda response exceeded the output limit")
     code = 0 if response["ok"] else 1
     if code == 0:
         receipt = {"ok": True, "status": "historical_cart_read", "observed_at": response["observed_at"],
@@ -228,7 +231,7 @@ def hosted_complete(directory, identifier, reply, plugin, build):
         receipt = response
     record.update(response=receipt, exit_code=code)
     install.write_json(directory / f"{identifier}.json", record)
-    return {**response, "request_id": identifier, "receipt_build": record["build"]}, code
+    return ending, code
 
 
 def execute(options):

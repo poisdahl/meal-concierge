@@ -941,9 +941,11 @@ def prepare_program(home, meta, uv_binary=None):
         if receipts.is_symlink():
             raise RuntimeError('program preparation directory must not be linked')
         write_json(receipts / (identifier + '.json'), receipt)
+    next_step = ('When idle, update --prepared-program this ID and reopen the original foreground tools.'
+                 if meta.get('hosted_oda_plugin') else
+                 'When idle, stop through the existing owner, update --prepared-program this ID, then start through that owner.')
     return {'status': 'prepared', 'prepared_program': identifier, 'build': identity,
-            'service_stop_required': False,
-            'next': 'When idle, stop through the existing owner, update --prepared-program this ID, then start through that owner.'}
+            'service_stop_required': False, 'next': next_step}
 
 
 def read_program_preparation(home, meta, identifier):
@@ -1017,6 +1019,9 @@ def doctor(home):
     except (OSError, RuntimeError, ValueError):
         checked = {}
         result['selected_runtime'] = 'unverified'
+    if meta.get('hosted_oda_plugin'):
+        result.update(transport='hosted_mcp', socket_health='not_applicable')
+        return result
     result.update(socket_health='unavailable', email_work_pending='unknown', serving_selected_runtime='unknown')
     try:
         health_result = health(meta, diagnostics=True)
@@ -1468,6 +1473,8 @@ def main():
             settings = meta.pop('initial_config', None)
             meta.pop('update_operation', None)
             if args.action == 'install' and path.exists():
+                if meta.get('hosted_oda_plugin'):
+                    raise RuntimeError('existing hosted Oda installation; reopen its current foreground tools or update the original home')
                 raise RuntimeError('existing installation; use attach or an explicit stopped-service update')
             if args.action == 'connect-store':
                 if not path.exists():
@@ -1610,6 +1617,8 @@ def main():
                 provider = configured_provider(settings)
                 if args.provider and args.provider != provider or args.household and args.household != settings.get('household'):
                     raise RuntimeError('existing config household/provider differs; no implicit conversion')
+                if args.oda_plugin is not None and args.oda_plugin != settings.get('hosted_oda_plugin'):
+                    raise RuntimeError('existing config uses a different Oda connection; no implicit conversion')
             else:
                 if args.adopt or not args.provider or not args.household:
                     raise RuntimeError('new install requires --provider and --household; adoption requires an existing config')
@@ -1777,6 +1786,10 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
         write_json(pending, prior_pending)
         maintenance.unlink()
         pending.unlink()
+    if meta.get('hosted_oda_plugin'):
+        current = Path(meta['code_root']) / 'current'
+        print(f'Installed hosted Oda. Use {current / "foreground.py"} with --home {home} and tools.')
+        return
     print('Installed, stopped. Start explicitly; attach prints agent configuration without changing it.')
     print('Recipe collection is optional. Use prepare-recipes while running, then import-recipes --prepared ID while stopped.')
 

@@ -10,7 +10,9 @@ from core import cart_contents
 CART_REQUEST = {"operation": "cart", "action": "get", "response_view": "agent"}
 CART_FIELDS = {"groups", "productQuantityCount", "totalGrossAmount", "totalBreakdown", "url"}
 CART_LINKS = {"https://oda.com/no/cart/", "https://oda.com/no/cart"}
-EVIDENCE = "host_attested_oda_mcp"
+BREAKDOWN_FIELDS = {"subtotal", "productDiscounts", "couponDiscount", "surcharge",
+                    "bottleDeposit", "packaging", "deliveryFee", "total"}
+EVIDENCE = "host_supplied_oda_mcp"
 
 
 def issue(plugin):
@@ -29,6 +31,51 @@ def response_time(value):
     return result
 
 
+def money(value, *, signed=False):
+    pattern = r"-?[0-9]{1,12}(?:[.,][0-9]{1,2})?" if signed else r"[0-9]{1,12}(?:[.,][0-9]{1,2})?"
+    if not isinstance(value, str) or not re.fullmatch(pattern, value):
+        raise ValueError("hosted Oda cart amount is invalid")
+    return value.replace(",", ".")
+
+
+def cart_line(item):
+    product = item.get("product") if isinstance(item, dict) else None
+    if not isinstance(product, dict):
+        raise ValueError("hosted Oda cart product identity is unavailable")
+    product_id, name = product.get("id"), product.get("name")
+    if (type(product_id) is not int or not 0 < product_id <= 2**53 - 1
+            or not isinstance(name, str) or not name.strip() or len(name) > 1_000):
+        raise ValueError("hosted Oda cart product identity is unavailable")
+    return {"product": {"id": product_id, "name": name}, "quantity": item.get("quantity"),
+            "totalGrossAmount": money(item.get("totalGrossAmount"))}
+
+
+def cart_view(cart):
+    if (not isinstance(cart, dict) or set(cart) != CART_FIELDS or not isinstance(cart["groups"], list)
+            or type(cart["productQuantityCount"]) is not int
+            or not isinstance(cart["url"], str) or cart["url"] not in CART_LINKS):
+        raise ValueError("incomplete hosted Oda cart result or unexpected Oda cart link")
+    breakdown = cart["totalBreakdown"]
+    if not isinstance(breakdown, dict) or not BREAKDOWN_FIELDS <= breakdown.keys():
+        raise ValueError("incomplete hosted Oda cart breakdown")
+    amounts = {key: money(breakdown[key], signed=key in {"productDiscounts", "couponDiscount"})
+               for key in sorted(BREAKDOWN_FIELDS)}
+    groups = []
+    for group in cart["groups"]:
+        if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+            raise ValueError("hosted Oda cart group is invalid")
+        groups.append({"items": [cart_line(item) for item in group["items"]]})
+    observed = {"groups": groups, "totalGrossAmount": money(cart["totalGrossAmount"]),
+                "totalBreakdown": amounts, "productQuantityCount": cart["productQuantityCount"]}
+    cart_contents(observed, require_quantities=True)
+    view = project_agent_result("cart", "get", observed, limit=20)
+    if view.get("cart_normalization") is not None or "amounts" not in view:
+        raise ValueError("hosted Oda cart totals could not be verified")
+    lines = view["lines"]
+    lines["truncated"] = lines.pop("next_offset", None) is not None
+    return {**view, "provider": "oda", "cart_url": cart["url"]}
+
+
 def complete(frame, reply):
     common = {"read_id", "plugin_id", "tool", "observed_at"}
     if not isinstance(reply, dict) or set(reply) not in (common | {"cart"}, common | {"error"}):
@@ -43,19 +90,5 @@ def complete(frame, reply):
             raise ValueError("report only the fixed hosted Oda unavailable status")
         return {"ok": False, "status": "hosted_oda_unavailable",
                 "next": "Check the original Oda plugin and authorization before asking for a new read."}
-    cart = reply["cart"]
-    if (not isinstance(cart, dict) or set(cart) != CART_FIELDS or not isinstance(cart["groups"], list)
-            or type(cart["productQuantityCount"]) is not int or not isinstance(cart["totalBreakdown"], dict)
-            or not isinstance(cart["totalGrossAmount"], str)
-            or not re.fullmatch(r"[0-9]{1,12}(?:[.,][0-9]{1,2})?", cart["totalGrossAmount"])
-            or not isinstance(cart["url"], str) or cart["url"] not in CART_LINKS):
-        raise ValueError("incomplete hosted Oda cart result or unexpected Oda cart link")
-    items = cart_contents(cart, require_quantities=True)["items"]
-    if any(not item["product_id"].isascii() or not item["product_id"].isdecimal()
-           or item["product_id"].startswith("0") or not item["name"].strip() for item in items):
-        raise ValueError("hosted Oda cart product identity is unavailable")
-    view = project_agent_result("cart", "get", cart)
-    if view.get("cart_normalization") is not None or "total" not in view:
-        raise ValueError("hosted Oda cart totals could not be verified")
     return {"ok": True, "status": "cart_read", "observed_at": observation.isoformat(),
-            "evidence": EVIDENCE, "result": {**view, "provider": "oda", "cart_url": cart["url"]}}
+            "evidence": EVIDENCE, "result": cart_view(reply["cart"])}

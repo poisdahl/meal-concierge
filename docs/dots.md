@@ -133,13 +133,15 @@ received. Keep account and delivery details out of the handoff. On an unavailabl
 tool or authorization failure, use `error:"unavailable"` instead of `cart`.
 Use the plugin result for every successful cart observation.
 
-The runtime checks the build, original request, plugin, expiry and result. The
-cart observation is supplied by the host. The foreground process can validate
-the response and its binding, and ChatGPT holds the OAuth authorization.
-`receipt REQUEST_UUID` recovers the historical outcome without saving cart
-contents. A fresh read uses a new request. Update the same program and home
-with the regular foreground update procedure. Checkout is completed by the
-owner using Oda’s returned cart link. The hosted installation exposes `cart.get`.
+The runtime checks the original request and build, the echoed plugin ID and
+expiry, and the cart structure, quantities and totals. `host_supplied_oda_mcp`
+identifies a result supplied by ChatGPT. The owner confirms the intended Oda
+account when connecting or reauthorizing the plugin. `receipt REQUEST_UUID`
+recovers the historical outcome without saving cart contents. A fresh read
+uses a new request. Large carts show `lines.truncated` and their full count.
+Open the returned cart link for the complete contents and to finish checkout
+in Oda. Update the same program and home with the foreground update procedure.
+The hosted installation exposes `cart.get`.
 
 ### Attachments and scheduled planning
 
