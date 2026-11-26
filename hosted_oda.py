@@ -161,18 +161,24 @@ def recipes(data, arguments):
     return {"provider": "oda", "query": arguments["query"], "recipes": rows, "has_more": data["hasMore"]}
 
 
-def catalog_view(tool, data, arguments, observed_at):
-    if tool == "product_search":
-        queries = arguments["queries"]
-        view = normalize_retail_product_search_batch(data, queries, size=arguments["size"],
-                                                    observed_at=observed_at)[queries[0]]
+def product_search_views(data, arguments, observed_at):
+    if not isinstance(data, dict) or data.get("isError", False) is not False or "error" in data:
+        raise ValueError("expected a successful structured Oda product search")
+    views = normalize_retail_product_search_batch(data, arguments["queries"], size=arguments["size"],
+                                                   observed_at=observed_at)
+    for view in views.values():
         view["scope"]["evidence"] = EVIDENCE
         # The hosted product search schema supplies no ingredient or allergen labels.
         for product in view["products"]:
             product.pop("dietary_evidence", None)
             if any(contains_line_controls(text) for text in product["display"].values()):
                 raise ValueError("hosted Oda product display contains control text")
-        return view
+    return views
+
+
+def catalog_view(tool, data, arguments, observed_at):
+    if tool == "product_search":
+        return product_search_views(data, arguments, observed_at)[arguments["queries"][0]]
     return recipes(data, arguments)
 
 

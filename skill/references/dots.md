@@ -41,6 +41,15 @@ for a fresh read after expiry. If the plugin is unavailable, use the private
 ChatGPT authorization for that original entry. The owner completes checkout
 with the Oda cart link.
 
+For saved-menu Oda shopping, use the discovered `menu_shopping_command`
+and the saved-menu workflow in the retained source’s `docs/dots.md`.
+Use `shopping_list.get` in the original planning home. Resolve or review
+its stock rows, select exact Oda matches for measured requirements, and
+show the computed counts and merchandise prices before approval. Continue
+in the separate Oda home on the same authorized empty cart. Revalidate with
+the emitted search and cart reads before changing the cart. Keep writes out
+of scheduled planning.
+
 When the owner explicitly designates the connected active cart for one
 reversible product test and discovery shows `cart_write_command`, use the
 same UUID and the one-item test workflow in the retained source’s `docs/dots.md`.

@@ -76,8 +76,8 @@ whether an exported file still matches its original bytes.
 The planning installation uses `provider=none`. A separate hosted Oda
 installation can search products and recipes and read the cart, delivery
 windows and orders when the official Oda plugin is callable in the Dot.
-The same installation has a [guarded one-item test](#oda-one-item-test-cart)
-for an owner-designated empty cart. Follow the [hosted Oda setup](#oda-cart-reads).
+It can also [shop a saved planning menu](#oda-saved-menu-shopping) into an
+owner-designated empty cart. Follow the [hosted Oda setup](#oda-cart-reads).
 The planning
 installation can also search the [public MENY catalog](#public-meny-catalog).
 Full MENY shopping uses the shared store runtime with a working dedicated browser.
@@ -202,6 +202,71 @@ Each call has a new request ID.
 in the owner’s chat. The receipt stores request fingerprints and metadata.
 These private fingerprints may be guessable for short order IDs or queries.
 Delivery reservations and order changes are outside this foreground workflow.
+
+#### Oda saved-menu shopping
+
+Keep your original store-free planning home and separate hosted Oda home.
+Use your original official Oda connection. Start with an empty new-order cart,
+with no delivery slot selected, that you control for the whole operation.
+This workflow covers up to eight measured menu ingredients, one distinct
+fixed-size product per ingredient, and up to 24 packages. The shopping list
+and its recorded pantry decisions determine the quantities. Personal extras
+and recurring groceries are separate.
+
+> Prepare my saved Meal Concierge menu for Oda. Use my existing planning
+> household and the Oda app attached to this chat. Show the ingredient
+> matches, quantities still needed, package sizes and counts, and merchandise
+> prices. Ask me to review the exact cart plan before adding anything. Use my
+> empty Oda cart and give me the cart link when the verified items are there.
+
+Use `shopping_list.get` in the planning home. Read the complete list and stock
+review. Resolve unknown quantities and explicitly review any unanswered pantry
+rows. The planner uses only the recorded stock and menu availability. Each
+stage below runs on the selected Oda program with private JSON on stdin:
+
+```sh
+"$program/venv/bin/python" -I -B "$program/foreground.py" --home "$household" hosted-cart "$operation_id"
+```
+
+1. Keep one new canonical operation UUID throughout. Read the owner-authorized
+   selected-address projection as for the one-item test below. Start with
+   `action:"begin_menu"`, the original absolute `planning_home`, current
+   `menu_ref`, `list_ref`, and `stock_ref`, `isolated_new_cart:true`,
+   `authorized_addresses`, and `mode:"keep"`. Use `mode:"restore"` only for an
+   authorized reversible cart test. The mode stays bound to this operation.
+2. Invoke the emitted address and product search tools in order using the
+   same attached Oda app. Submit `action:"observe_menu_search"`, the
+   `frame_id` and `plugin_id`, `address_observed_at`, `products_observed_at`,
+   projected `addresses`, the exact search arguments as `catalog_arguments`,
+   and the complete structured search result as `catalog`.
+3. Review the culinary match and choose one exact observed `product_id`
+   for each `requirement_id`. Send `action:"select_menu"` with a `choices`
+   object mapping those requirement IDs to numeric Oda product IDs. The
+   returned `quote` lists the coverage, package count, merchandise price in
+   øre and any dietary evidence gaps. Present the quote to the owner. Oda
+   search supplies merchandise prices. Deposits, discounts, fees and
+   delivery appear separately in the verified cart.
+4. After approval, send `action:"approve_menu"` with the exact
+   `review_digest`. Use the normal `observe`, `add` and `acknowledge`
+   handoff below. The read frame after `add` requires the fresh product
+   search between the address and cart reads. Include `products_observed_at`,
+   `catalog_arguments` and `catalog` on that `observe`. Changed menu, stock,
+   matches, availability, package sizes, prices or cart block dispatch. Start
+   a new review after aborting a changed pre-write plan.
+5. Use the original mutation result and the new independent cart read to
+   verify every product, package count and merchandise amount. A complete
+   matching keep-cart plan ends as `applied`. Share the Oda cart link.
+   In restore mode, use `remove` only after the successful original result
+   and exact cart readback. Invoke the resulting inverse once and verify
+   the original empty quantities and slot state. Check
+   `restoration_amounts_match` for the baseline and restored cart amounts.
+
+If the original successful add returned only an exact subset of the approved
+products and quantities, check `partial_add_quantities`. A fresh matching
+read can authorize cleanup of that subset. An unapproved addition,
+unverifiable result or lost reply keeps the original operation fenced. The
+same recovery and maintenance rules below apply. Keep the menu-capable
+program available for an active menu operation and its historical receipts.
 
 #### Oda one-item test cart
 
