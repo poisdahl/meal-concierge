@@ -158,6 +158,102 @@ class HostedCartTest(unittest.TestCase):
         self.assertFalse(ending["dispatch"])
         with self.assertRaisesRegex(ValueError, "does not allow"):
             self.run_step("abort")
+        checked = self.run_step("observe_recovery", **self.observation(self.run_step("recheck")))
+        self.assertEqual(checked["status"], "add_response_unverified")
+        self.assertEqual(checked["recovery_observation"]["cart"], "empty_unreserved")
+        self.assertFalse(checked["dispatch"])
+        self.assertTrue(self.run_step("defer")["maintenance_deferred"])
+        with patch.object(cart, "DOT_WORKSPACE", self.state.parent):
+            cart.require_idle(self.state)
+
+    def test_successful_divergent_ending_and_fresh_empty_cart_can_close(self):
+        issued = self.dispatch_add()
+        ending = self.run_step("acknowledge", **self.acknowledgement(issued, 0))
+        self.assertEqual(ending["status"], "add_response_unverified")
+        reading = self.run_step("recheck")
+        self.assertEqual(reading["status"], "add_response_unverified")
+        with self.assertRaisesRegex(ValueError, "account/address context changed"):
+            self.run_step("observe_recovery", **self.observation(reading, account=8))
+        closed = self.run_step("observe_recovery", **self.observation(reading))
+        self.assertEqual(closed["status"], "reconciled_empty")
+        self.assertTrue(closed["add_acknowledged"])
+        self.assertFalse(closed["dispatch"])
+
+    def test_unknown_reply_allows_read_recheck_and_maintenance_without_reissuing(self):
+        issued = self.dispatch_add()
+        expiry = hosted_oda.response_time(issued["hosted_request"]["expires_at"])
+        reading = self.run_step("recheck")
+        self.assertFalse(reading["dispatch"])
+        self.assertIn("tools", reading["hosted_request"])
+        observed = self.run_step("observe_recovery", **self.observation(reading))
+        self.assertEqual(observed["status"], "awaiting_add_response")
+        self.assertNotIn("hosted_request", observed)
+        with self.assertRaisesRegex(ValueError, "expire"):
+            self.run_step("defer")
+        ack = self.acknowledgement(issued, 0)
+        after = expiry + timedelta(seconds=5)
+        with patch.object(cart, "now", return_value=after):
+            deferred = self.run_step("defer")
+            self.assertTrue(deferred["maintenance_deferred"])
+            self.assertFalse(deferred["dispatch"])
+            self.assertNotIn("hosted_request", deferred)
+            self.build["source_sha256"] = "d" * 64
+            ended = self.run_step("acknowledge", **{**ack, "observed_at": after.isoformat()})
+            self.assertEqual(ended["status"], "add_response_unverified")
+            self.assertFalse(ended["dispatch"])
+            with self.assertRaisesRegex(ValueError, "original active"):
+                self.run_step("remove")
+            closed = self.run_step("observe_recovery", **self.observation(self.run_step("recheck")))
+            self.assertEqual(closed["status"], "reconciled_empty")
+
+    def test_recovery_cannot_close_from_an_older_empty_observation(self):
+        write = self.dispatch_add()
+        ordinary = self.run_step("acknowledge", **self.acknowledgement(write))
+        older = self.observation(self.run_step("recheck"))
+        with self.assertRaisesRegex(ValueError, "no original read frame"):
+            self.run_step("observe", **self.observation(ordinary, 1))
+        verified = self.run_step("observe", **self.observation(self.run_step("retry_read"), 1))
+        self.assertEqual(verified["status"], "added")
+        with self.assertRaisesRegex(ValueError, "request a read-only"):
+            self.run_step("observe_recovery", **older)
+        self.assertEqual(self.run_step("status")["status"], "added")
+
+    def test_original_cleanup_requires_its_own_maintenance_defer(self):
+        issued = self.dispatch_add()
+        expiry = hosted_oda.response_time(issued["hosted_request"]["expires_at"])
+        ack = self.acknowledgement(issued)
+        after = expiry + timedelta(seconds=5)
+        with patch.object(cart, "now", return_value=after), patch.object(cart, "DOT_WORKSPACE", self.state.parent):
+            self.run_step("defer")
+            cart.require_idle(self.state)
+            read = self.run_step("acknowledge", **{**ack, "observed_at": after.isoformat()})
+            self.run_step("observe", **self.observation(read, 1))
+            removing = self.run_step("remove")
+            self.assertNotIn("maintenance_deferred", removing)
+            cleanup = self.run_step("observe", **self.observation(removing, 1))
+            self.assertTrue(cleanup["dispatch"])
+            with self.assertRaisesRegex(ValueError, "before changing its program"):
+                cart.require_idle(self.state)
+            with self.assertRaisesRegex(ValueError, "expire"):
+                self.run_step("defer")
+
+    def test_divergent_remove_readback_retains_fence_during_update(self):
+        write = self.dispatch_add()
+        add_read = self.run_step("acknowledge", **self.acknowledgement(write))
+        self.run_step("observe", **self.observation(add_read, 1))
+        removing = self.run_step("observe", **self.observation(self.run_step("remove"), 1))
+        self.run_step("acknowledge", **self.acknowledgement(removing, 0))
+        with self.assertRaisesRegex(ValueError, "fresh divergent readback"):
+            self.run_step("defer")
+        observed = self.run_step("observe_recovery", **self.observation(self.run_step("recheck"), 1))
+        self.assertEqual(observed["status"], "verify_remove")
+        deferred = self.run_step("defer")
+        self.assertTrue(deferred["maintenance_deferred"])
+        self.assertFalse(deferred["dispatch"])
+        self.build["source_sha256"] = "d" * 64
+        result = self.run_step("observe", **self.observation(self.run_step("retry_read")))
+        self.assertEqual(result["status"], "restored")
+        self.assertFalse(result["dispatch"])
 
     def test_stale_pre_dispatch_address_cannot_open_a_new_write_window(self):
         self.run_step("observe", **self.observation(self.begin()))
@@ -221,10 +317,15 @@ class HostedCartTest(unittest.TestCase):
         self.run_step("observe", **self.observation(self.begin()))
         checking = self.run_step("add")
         ledger = self.registry / "ledger.json"
+        anchor = self.registry.parent / cart.ANCHOR_NAME
         previous = ledger.read_bytes()
+        old_anchor = anchor.read_bytes()
         self.assertTrue(self.run_step("observe", **self.observation(checking))["dispatch"])
         ledger.write_bytes(previous)
         with self.assertRaisesRegex(ValueError, "workspace write generation disagree"):
+            self.run_step("observe", **self.observation(checking))
+        anchor.write_bytes(old_anchor)
+        with self.assertRaisesRegex(ValueError, "predates this household's last write"):
             self.run_step("observe", **self.observation(checking))
 
     def test_prewrite_abort_and_archived_id_never_issue_again(self):

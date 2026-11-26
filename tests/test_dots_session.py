@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import subprocess
 import sys
 import termios
@@ -947,6 +948,10 @@ raise SystemExit(dots_session.main())
         code, original = self.call(self.ensure(), command_id, lose_reply_before_click)
         self.assertEqual(code, 1, original)
         pending = self.state()["pending_cart_change"]
+        # Older installations kept the pending cart but had no dispatch audit.
+        shutil.rmtree(self.root / "state/native-cart-dispatch")
+        self.assertEqual(self.inspect_cart(), {"pending": True, "writes_enabled": True,
+                                              "dispatch_evidence": "no_frame_record", "core_acknowledged": False})
         self.frames.clear()
         code, readback = self.call({"operation": "cart", "action": "get"})
         self.assertEqual(code, 0, readback)

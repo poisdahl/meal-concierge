@@ -255,18 +255,31 @@ the Dot with a private JSON object on stdin for each stage:
 
 `action:"status"` reads the original private journal. It never issues a
 mutation. `action:"retry_read"` replaces only an outstanding read frame.
-After a lost mutation reply, retain the original operation, its installed
-build, the retained workspace registry and its sibling identity file. Keep
-their latest versions together when restoring workspace files. A mismatched
-write generation blocks new mutations. Use the original attached tool
-result if it becomes available. Stop on a divergent response, changed
-connection, or unknown ending. Use a separate `cart.get` to inspect actual
-quantities while resolving the original operation without repeating a delta.
-An unresolved test blocks further tests in this workspace and program
-updates in its home. The plugin supplies the mutation results, account
-markers and observation times. It exposes neither a cart selector nor a
-provider idempotency key here. This check is limited to one ordinary item in
-an initially empty cart. Checkout stays on Oda’s site.
+After a lost or divergent reply, use `action:"recheck"` for a fresh address and
+cart frame and reply with `action:"observe_recovery"` using the observation
+fields above. It records whether the bound cart is empty and unreserved,
+contains just the test unit, or differs. After an original successful
+mutation response, a verified empty cart may close as `reconciled_empty`.
+This disposition records the observed cart without claiming that both test
+legs succeeded. An empty cart after an error or a missing original response
+leaves the operation pending.
+
+Use `action:"defer"` after an ambiguous terminal response, fresh divergent
+recovery readback, or expiry of an outstanding mutation frame. This permits
+program maintenance while retaining the original operation and workspace
+write fence. A compatible
+updated program can inspect, recheck and accept the actual original reply if
+it later becomes available. Continue an authorized cleanup only with the
+original, verified program and fresh bind and cart checks. Keep the original
+operation, version, workspace registry, sibling identity file and household
+generation marker. Restore these at their latest consistent versions. A
+generation mismatch stops the cart workflow, including its status command.
+If every retained record came from an earlier snapshot, use original dispatch
+evidence before resuming that operation.
+The attached plugin supplies the mutation results, account markers and times.
+It exposes neither a cart selector nor a provider idempotency key here. This
+check is limited to one ordinary item in an initially empty cart. Checkout stays
+on Oda’s site.
 
 ### Attachments and scheduled planning
 
@@ -296,7 +309,8 @@ and refresh the skill binding. In the planning home, verify `tools`, `status`,
 the saved menu and a prior receipt. In the hosted Oda home, verify `tools`,
 reopen a previous receipt and use the attached plugin for a fresh read.
 Reuse the original home for repeat setup.
-Finish any Oda test-cart operation before updating or rolling back its program.
+Finish any active Oda test-cart operation before updating or rolling back
+its program. Use the defer procedure for an uncertain ending.
 
 Use `install.sh doctor --home ABSOLUTE_HOME` to diagnose installation markers and
 version mismatches. A foreground household does not have a running RPC listener;
@@ -717,7 +731,9 @@ recovery. If the core saved that ending before its caller lost the command
 result, read-only reconciliation can still verify the cart. Use
 `python -I -B clients/dots_session.py inspect-cart --root ABSOLUTE_ORIGINAL_ROOT`
 from the selected source to see redacted evidence without opening a retailer
-tab. `frame_prepared` means the core saved a frame for emission.
+tab. `frame_prepared` means the core saved a frame for emission and its
+dispatch is still unknown. `writes_enabled` reports policy. A pending
+operation still fences writes.
 `host_acknowledged` means the reply to that exact frame was validated and
 saved before updating the core. In that case `reconcile_change` can pair the
 ending with fresh bound readback after a restart. `no_frame_record` also

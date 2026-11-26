@@ -18,13 +18,15 @@ REGISTRY_NAME = ".meal-concierge-oda-carts"
 ANCHOR_NAME = REGISTRY_NAME + "-identity.json"
 DOT_WORKSPACE = Path("/workspace/shared")
 BINDING_NAME = "hosted-oda-cart-binding.json"
-FINISHED = {"restored", "aborted"}
+GENERATION_NAME = "hosted-oda-cart-generation.json"
+FINISHED = {"restored", "aborted", "reconciled_empty"}
 BEFORE_WRITE = {"reading_baseline", "baseline_verified", "checking_add"}
 READBACK = {"verify_add", "verify_remove"}
 WRITE_PHASES = {"awaiting_add_response": 1, "awaiting_remove_response": -1}
+UNVERIFIED = {"add_response_unverified", "remove_response_unverified"}
+NEEDS_RECOVERY = UNVERIFIED | WRITE_PHASES.keys()
 READ_TOOLS = ("get_delivery_addresses", "get_cart")
-STATUSES = BEFORE_WRITE | READBACK | WRITE_PHASES.keys() | FINISHED | {
-    "added", "checking_remove", "add_response_unverified", "remove_response_unverified"}
+STATUSES = BEFORE_WRITE | READBACK | NEEDS_RECOVERY | FINISHED | {"added", "checking_remove"}
 
 
 def require_fields(value, fields):
@@ -64,7 +66,8 @@ def verify_record(record):
     if (not valid or not isinstance(record.get("status"), str) or record["status"] not in STATUSES
             or not provider_id(record.get("product_id"))
             or not isinstance(record.get("owner"), str) or not isinstance(record.get("plugin_id"), str)
-            or not isinstance(record.get("build"), dict)):
+            or not isinstance(record.get("build"), dict)
+            or "source_commit" not in record["build"] or not isinstance(record.get("account"), str)):
         raise ValueError("the original hosted Oda cart journal is invalid")
 
 
@@ -106,6 +109,13 @@ def registry(state, directory, *, initialize, allow_unbound=False):
                 or generation != anchor_value["write_generation"]):
             raise ValueError("the hosted Oda cart ledger and workspace write generation disagree")
         expected = {"registry": str(directory), "key": key}
+        witness_file = state / GENERATION_NAME
+        if os.path.lexists(witness_file):
+            witness = read_private(witness_file)
+            require_fields(witness, ("key", "write_generation"))
+            if (witness["key"] != key or type(witness["write_generation"]) is not int
+                    or not 0 <= witness["write_generation"] <= generation):
+                raise ValueError("the hosted Oda cart registry predates this household's last write")
         if binding is None and initialize:
             write_json(binding_file, expected)
         elif binding is not None and binding != expected:
@@ -115,7 +125,7 @@ def registry(state, directory, *, initialize, allow_unbound=False):
 
 def require_idle(state):
     """Keep the issuing program selectable until its original cart is settled."""
-    bound = os.path.lexists(state / BINDING_NAME)
+    bound = os.path.lexists(state / BINDING_NAME) or os.path.lexists(state / GENERATION_NAME)
     if not bound and not state.is_relative_to(DOT_WORKSPACE):
         return
     directory = workspace_registry(state)
@@ -123,7 +133,8 @@ def require_idle(state):
         return
     with registry(state, directory, initialize=False, allow_unbound=True) as (_, _, saved):
         current = saved["current"]
-        if current and current["owner"] == str(state) and current["status"] not in FINISHED:
+        if (current and current["owner"] == str(state) and current["status"] not in FINISHED
+                and current.get("maintenance_deferred") is not True):
             raise ValueError("finish the original hosted Oda cart operation before changing its program")
 
 
@@ -185,12 +196,9 @@ def cart_matches(cart, product_id, quantity):
     return True
 
 
-def observe(record, value, key):
+def bound_observation(record, pending, value, key):
     require_fields(value, ("action", "frame_id", "plugin_id", "address_observed_at",
                            "cart_observed_at", "addresses", "cart"))
-    status, pending = record["status"], record.get("frame")
-    if status not in {"reading_baseline", "checking_add", "checking_remove", *READBACK} or pending is None:
-        raise ValueError("no original read frame can accept this observation")
     match_frame(pending, value)
     address_time = hosted_oda.response_time(value["address_observed_at"])
     cart_time = hosted_oda.response_time(value["cart_observed_at"])
@@ -201,9 +209,18 @@ def observe(record, value, key):
     if not hmac.compare_digest(record["account"], account):
         raise ValueError("the selected Oda account/address context changed")
     validate_cart(value["cart"])
+    return address_time, cart_time
+
+
+def observe(record, value, key):
+    status, pending = record["status"], record.get("frame")
+    if status not in {"reading_baseline", "checking_add", "checking_remove", *READBACK} or pending is None:
+        raise ValueError("no original read frame can accept this observation")
+    address_time, _ = bound_observation(record, pending, value, key)
     if not cart_matches(value["cart"], record["product_id"], int(status in {"verify_add", "checking_remove"})):
         raise ValueError("the isolated Oda cart has unexpected products, grouped lines or a selected slot")
     record.pop("frame")
+    record.pop("recovery_read", None)
     if status == "reading_baseline":
         record["status"] = "baseline_verified"
     elif status in {"checking_add", "checking_remove"}:
@@ -211,6 +228,29 @@ def observe(record, value, key):
         record["frame"] = frame(record, observed=address_time)
     else:
         record["status"] = "added" if status == "verify_add" else "restored"
+
+
+def observe_recovery(record, value, key):
+    pending = record.get("recovery_read")
+    if record["status"] not in NEEDS_RECOVERY | READBACK | {"added"} or pending is None:
+        raise ValueError("request a read-only hosted Oda recovery observation first")
+    _, cart_time = bound_observation(record, pending, value, key)
+    cart = value["cart"]
+    observation = "other_cart"
+    if cart_matches(cart, record["product_id"], 0):
+        observation = "empty_unreserved"
+    elif cart_matches(cart, record["product_id"], 1):
+        observation = "single_test_unit_unreserved"
+    record["recovery_observation"] = {"observed_at": cart_time.isoformat(), "cart": observation}
+    record.pop("recovery_read")
+    # A successful original provider response establishes a completed request.
+    # A generic error or missing reply, even with an empty cart, cannot do so.
+    status = record["status"]
+    step = "remove" if status == "remove_response_unverified" else "add"
+    if (status in UNVERIFIED | {"added", "verify_add"} and observation == "empty_unreserved"
+            and record[step + "_response"]["is_error"] is False):
+        record["status"] = "reconciled_empty"
+        record.pop("frame", None)
 
 
 def acknowledge(record, value):
@@ -247,6 +287,8 @@ def acknowledge(record, value):
         "response_sha256": hosted_oda.arguments_digest(result),
         "invocation_sha256": hosted_oda.arguments_digest(invocation) if invocation is not None else None,
         "is_error": value["is_error"]}
+    record.pop("recovery_read", None)
+    record.pop("recovery_observation", None)
     if matches:
         record["status"] = "verify_" + step
         record["frame"] = frame(record)
@@ -262,6 +304,10 @@ def status_view(record):
               "evidence": hosted_oda.EVIDENCE, "backend_freshness": "unverified", "dispatch": False}
     if record["status"] in WRITE_PHASES:
         result["pending_response"] = {key: record["frame"][key] for key in ("frame_id", "issued_at", "expires_at")}
+    if "recovery_observation" in record:
+        result["recovery_observation"] = record["recovery_observation"]
+    if record.get("maintenance_deferred") is True:
+        result["maintenance_deferred"] = True
     return result
 
 
@@ -271,6 +317,7 @@ def advance(record, action):
         record["status"] = "checking_add"
     elif action == "remove" and status == "added":
         record["status"] = "checking_remove"
+        record.pop("maintenance_deferred", None)
     elif action == "retry_read" and status in {"reading_baseline", "checking_add", "checking_remove", *READBACK}:
         pass  # Only an observation can be reissued.
     elif action == "abort" and status in BEFORE_WRITE:
@@ -279,7 +326,31 @@ def advance(record, action):
         return
     else:
         raise ValueError("the hosted Oda cart stage does not allow this action; inspect the original operation")
+    record.pop("recovery_read", None)
     record["frame"] = frame(record)
+
+
+def continue_from_other_build(record, action):
+    if record.get("maintenance_deferred") is not True:
+        return False
+    if action in {"acknowledge", "recheck", "observe_recovery", "defer"}:
+        return True
+    return action in {"observe", "retry_read"} and record["status"] in READBACK
+
+
+def defer_maintenance(record):
+    status = record["status"]
+    if status in READBACK:
+        observation = record.get("recovery_observation")
+        expected = "single_test_unit_unreserved" if status == "verify_add" else "empty_unreserved"
+        if (not observation or observation["cart"] == expected
+                or now() >= hosted_oda.response_time(observation["observed_at"]) + timedelta(minutes=5)):
+            raise ValueError("first record fresh divergent readback for the original hosted Oda operation")
+    elif status not in NEEDS_RECOVERY:
+        raise ValueError("the hosted Oda cart stage does not allow deferring maintenance")
+    if status in WRITE_PHASES and now() < hosted_oda.response_time(record["frame"]["expires_at"]):
+        raise ValueError("wait for the original hosted Oda frame to expire before deferring")
+    record["maintenance_deferred"] = True
 
 
 def run(state, directory, operation_id, value, plugin, build):
@@ -288,7 +359,7 @@ def run(state, directory, operation_id, value, plugin, build):
         require_fields(value, ("action", "product_id", "isolated_new_cart", "authorized_addresses"))
         if not provider_id(value["product_id"]) or value["isolated_new_cart"] is not True:
             raise ValueError("the owner must designate an isolated new cart and one exact Oda product")
-    elif action not in ("observe", "acknowledge"):
+    elif action not in ("observe", "acknowledge", "observe_recovery"):
         require_fields(value, ("action",))
 
     build = {field: build[field] for field in ("source_commit", "source_sha256", "installed_runtime_sha256")}
@@ -327,23 +398,35 @@ def run(state, directory, operation_id, value, plugin, build):
             record = {"operation_id": operation_id, "owner": owner, "plugin_id": plugin, "build": build,
                       "product_id": value["product_id"], "account": account, "status": "reading_baseline"}
             record["frame"] = frame(record)
-        elif record is None or record is not current or record["build"] != build:
+        elif (record is None or record is not current
+                or (record["build"] != build and not continue_from_other_build(record, action))):
             raise ValueError("use the original active hosted Oda operation and installed build")
         elif action == "observe":
             observe(record, value, saved["key"])
         elif action == "acknowledge":
             acknowledge(record, value)
+        elif action == "recheck" and record["status"] in NEEDS_RECOVERY | READBACK | {"added"}:
+            if record["status"] in READBACK:
+                record.pop("frame", None)
+            record["recovery_read"] = frame(record)
+        elif action == "observe_recovery":
+            observe_recovery(record, value, saved["key"])
+        elif action == "defer":
+            defer_maintenance(record)
         else:
             advance(record, action)
 
-        dispatch = record["status"] in WRITE_PHASES
+        dispatch = action == "observe" and record["status"] in WRITE_PHASES
         generation = saved["write_generation"] + int(dispatch)
         authority = {"key": saved["key"], "write_generation": generation}
         write_json(ledger, {**authority, "current": record})
         if dispatch:
-            # Both files must agree before an external mutation can be issued.
+            # Persist the latest issued write in the workspace and owning home.
             write_json(anchor, authority)
+            write_json(state / GENERATION_NAME, authority)
         result = status_view(record)
-        if "frame" in record:
+        if action == "recheck":
+            result["hosted_request"] = record["recovery_read"]
+        elif action not in {"defer", "observe_recovery"} and "frame" in record:
             result.update(hosted_request=record["frame"], dispatch=dispatch)
         return result

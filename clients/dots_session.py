@@ -324,7 +324,8 @@ def cart_dispatch_status(state, config_digest, pending):
     fields = {"batch_sha256", "command_id", "call_id", "emitted_at", "expires_at"}
     dots.object_fields(frame, fields, fields)
     if (frame["batch_sha256"] != identity
-            or any(str(uuid.UUID(frame[key])) != frame[key] for key in ("command_id", "call_id"))
+            or any(not isinstance(frame[key], str) or str(uuid.UUID(frame[key])) != frame[key]
+                   for key in ("command_id", "call_id"))
             or not dots.timestamp(frame["emitted_at"]) < dots.timestamp(frame["expires_at"])):
         raise HouseholdError("original native cart frame record changed")
     ending = attempt / "ack.json"
