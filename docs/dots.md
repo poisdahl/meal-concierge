@@ -94,7 +94,8 @@ showed the original cart contents. The operation stayed pending. Parser
 fixtures cover the current history table and archived receipt layout. The
 pending cart guard blocks native catalog and order reads in that household.
 A read of the original bound cart can show current contents while the pending
-operation still requires its original dispatch ending.
+operation still requires its original dispatch ending. A later live check
+found that the original cloud browser tab was gone.
 Shopping-list matching and guarded cart changes have fixture coverage.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
@@ -276,10 +277,13 @@ stage below runs on the selected Oda program with private JSON on stdin:
 To undo a completed keep plan at the owner's request, use a new canonical
 operation UUID and `action:"restore_menu"` with the exact original UUID as
 `applied_operation_id`. The original verified application must be the latest
-cart write through any hosted Oda installation in this workspace. Continue
-with the emitted address and cart checks, followed by `observe`, `acknowledge` and independent
-readback. The cart must still match the applied receipt exactly. The inverse
-removes only the quantities that receipt added. Both receipts remain readable.
+cart write through any hosted Oda installation in this workspace. Keep exclusive
+use of the cart from applying the menu through finishing the undo. The cart
+must still match the applied receipt exactly. Continue with the emitted address
+and cart checks, followed by `observe`, `acknowledge` and independent readback.
+The inverse removes only the quantities that receipt added. Both receipts remain
+readable. Older receipts created before this feature may lack the evidence
+required to undo them.
 
 If the original successful add returned only an exact subset of the approved
 products and quantities, check `partial_add_quantities`. A fresh matching

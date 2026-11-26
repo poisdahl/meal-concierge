@@ -441,6 +441,20 @@ class HostedOdaMenuTests(unittest.TestCase):
         (target / "hosted_oda_cart.py").write_text("BASELINE_JOURNAL_VERSION = 1\n")
         cart.require_idle(self.state, target_program=target)
 
+    def test_deferred_empty_keep_preserves_the_undo_receipt_on_maintenance(self):
+        write = self.step("observe", **self.reads(self.pre_add("keep")))
+        self.ack(write, cart_data({TOMATO: 2, PASTA: 1}))
+        self.step("defer")
+        target = self.root / "program-rollback"
+        target.mkdir()
+        (target / "hosted_oda_menu.py").touch()
+        module = target / "hosted_oda_cart.py"
+        module.write_text("BASELINE_JOURNAL_VERSION = 1\n")
+        with self.assertRaisesRegex(ValueError, "undo receipt"):
+            cart.require_idle(self.state, target_program=target)
+        module.write_text("BASELINE_JOURNAL_VERSION = 1\nEMPTY_KEEP_JOURNAL_VERSION = 1\n")
+        cart.require_idle(self.state, target_program=target)
+
     def test_deferred_linked_undo_requires_its_own_acknowledged_inverse(self):
         original = self.identifier
         _, baseline, _ = self.apply_existing()
@@ -452,6 +466,20 @@ class HostedOdaMenuTests(unittest.TestCase):
         self.assertEqual(recovered["recovery_observation"]["cart"], "baseline_unreserved")
         self.assertFalse(recovered["remove_acknowledged"])
         self.assertEqual(self.step("abort")["status"], "aborted")
+
+    def test_linked_undo_lost_reply_stays_pending_after_restart_and_baseline_read(self):
+        original = self.identifier
+        _, baseline, filled = self.apply_existing()
+        self.identifier = str(uuid.uuid4())
+        checking = self.step("restore_menu", applied_operation_id=original)
+        inverse = self.step("observe", **self.reads(checking, data=filled))
+        self.assertTrue(inverse["dispatch"])
+        self.assertNotIn("hosted_request", self.step("restore_menu", applied_operation_id=original))
+        evidence = self.step("observe_recovery", **self.reads(self.step("recheck"), data=baseline))
+        self.assertEqual(evidence["status"], "awaiting_remove_response")
+        self.assertFalse(evidence["remove_acknowledged"])
+        with self.assertRaisesRegex(ValueError, "does not allow"):
+            self.step("remove")
 
     def test_newer_dispatched_operation_prevents_undo_of_old_keep_even_with_matched_cart(self):
         older = self.identifier

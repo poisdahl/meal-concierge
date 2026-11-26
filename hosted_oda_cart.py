@@ -32,8 +32,9 @@ STATUSES = BEFORE_WRITE | READBACK | NEEDS_RECOVERY | FINISHED | {"added", "chec
 JOURNAL_LIMIT = 512 * 1024
 JOURNAL_ENDING_RESERVE = 64 * 1024
 BASELINE_JOURNAL_VERSION = 1
-MENU_MODES = {"keep": "keep", "restore": "restore", "keep_existing": "keep", "restore_existing": "restore",
-              "restore_from_receipt": "restore"}
+EMPTY_KEEP_JOURNAL_VERSION = 1
+MENU_MODES = {"keep": "keep", "restore": "restore", "keep_empty": "keep", "keep_existing": "keep",
+              "restore_existing": "restore", "restore_from_receipt": "restore"}
 
 
 def require_fields(value, fields):
@@ -136,13 +137,14 @@ def registry(state, directory, *, initialize, allow_unbound=False):
         yield anchor, ledger, saved
 
 
-def supports_baseline_journal(target):
+def supports_menu_journal(target, mode):
     module = target / "hosted_oda_cart.py"
     if not module.is_file():
         return False
     with module.open("rb") as stream:
-        declaration = f"BASELINE_JOURNAL_VERSION = {BASELINE_JOURNAL_VERSION}".encode()
-        return declaration in stream.read(8192).splitlines()
+        lines = stream.read(8192).splitlines()
+    return (f"BASELINE_JOURNAL_VERSION = {BASELINE_JOURNAL_VERSION}".encode() in lines
+            and (mode != "keep_empty" or f"EMPTY_KEEP_JOURNAL_VERSION = {EMPTY_KEEP_JOURNAL_VERSION}".encode() in lines))
 
 
 def require_idle(state, *, target_program=None):
@@ -163,8 +165,9 @@ def require_idle(state, *, target_program=None):
             if target_program is not None and "menu" in current:
                 if not (target_program / "hosted_oda_menu.py").is_file():
                     raise ValueError("the target program cannot read the deferred Oda menu operation; retain a menu-capable release")
-                if current["menu"]["mode"] not in {"keep", "restore"} and not supports_baseline_journal(target_program):
-                    raise ValueError("the target program cannot preserve the original Oda cart baseline")
+                mode = current["menu"]["mode"]
+                if mode not in {"keep", "restore"} and not supports_menu_journal(target_program, mode):
+                    raise ValueError("the target program cannot preserve the original Oda cart baseline or undo receipt")
         elif "menu" in current:
             archive_record(directory, current)
             write_json(ledger, {**saved, "current": None})
@@ -607,7 +610,11 @@ def initial_record(action, value, account, locks):
     if not menu_request_matches(value, context["binding"]):
         raise ValueError("use current menu, shopping list and stock references from the original planning home")
     preserve = value.get("preserve_existing", False)
-    mode = value["mode"] + "_existing" if preserve else value["mode"]
+    mode = value["mode"]
+    if preserve:
+        mode += "_existing"
+    elif mode == "keep":
+        mode = "keep_empty"
     return {"account": account, "status": "menu_search",
             "menu": {"source": context["binding"], "mode": mode, "preserve_existing": preserve,
                      "search_arguments": hosted_oda_menu.search_arguments(context)}}
