@@ -2067,6 +2067,28 @@ raise SystemExit(client.main())
         self.assertEqual(code, 1, rejected)
         self.assertEqual(self.state()["native_tab_rebind"]["tab_id"], next_tab)
 
+    def test_legacy_rebind_retires_earlier_product_approval_before_any_write(self):
+        old_apply = {**self.managed_request(), "product_plan_ref": self.prepared_ref}
+        tab = "synthetic-observation-tab"
+        request = {"tab_id": tab, "previous_tab_id": self.binding["tab_id"], "original_tab_retired": True}
+        code, redone = self.run_session("rebind-tab", request, self.replacement_observation_host)
+        self.assertEqual(code, 0, redone)
+        legacy = self.state()
+        legacy["native_tab_rebind"].pop("request_sha256")
+        old_generation = legacy["product_selection_generation"] = "a" * 32
+        (self.root / "state/state.json").write_text(json.dumps(legacy))
+        self.binding = {**self.binding, "tab_id": tab}
+        code, enabled = self.call({"operation": "native_cart_policy", "action": "set", "enabled": True,
+                                   "browser_binding": self.binding})
+        self.assertEqual(code, 0, enabled)
+        frames = len(self.frames)
+        code, blocked = self.call(old_apply)
+        self.assertEqual(code, 1, blocked)
+        self.assertIn("new MENY product plan", blocked["error"])
+        self.assertEqual(len(self.frames), frames)
+        self.assertEqual(self.writes, 0)
+        self.assertNotEqual(self.state()["product_selection_generation"], old_generation)
+
     def protected_delivery_host(self, *, lose_reply=False, altered_address=False):
         from meny import MENY_MONTH_NAMES, MENY_WEEKDAY_NAMES
 
@@ -2083,6 +2105,10 @@ raise SystemExit(client.main())
                 result = {"authenticated": True, "ready": True, "source_url": "https://meny.no/varer",
                           "dialog_count": 1, "slots": [{"slot_id": price_label, "display": price_label,
                               "date": str(tomorrow), "start": "09:00", "end": "12:00", "selected": state["selected"]}]}
+                if state.get("empty_calendar"):
+                    result["slots"] = []
+                    if state.get("empty_calendar") == "verified":
+                        result["no_selectable_windows"] = True
             elif operation == "delivery_context":
                 result = {"source_url": "https://meny.no/varer", "authenticated": True, "ordinary_cart": True,
                           "home_delivery": True, "address_sha256": ("d" if state.get("changed") and altered_address else "c") * 64,
@@ -2103,12 +2129,15 @@ raise SystemExit(client.main())
                     return None
                 result = {"dispatched": True}
             elif operation == "review_checkout":
-                self.assertEqual(effect, "read")
+                self.assertEqual(effect, "checkout_review")
                 result = {"ordinary_cart": True, "url": "https://meny.no/kassen", "address_sha256": "c" * 64,
                           "items": {PRODUCT: 1}, "payment": {"ready": True, "authenticated": True, "vipps_checked": True,
                               "home_delivery": True, "submit_enabled": True, "submit_controls": 1, "total": 69.0,
                               "delivery": window, "price_rows": [False, [["product_subtotal", 2000],
                                   ["delivery_price", 4900], ["reserved_total", 6900]]]}}
+            elif operation == "verify_observation_context":
+                result = {**{key: self.binding[key] for key in ("account_sha256", "cart_context_sha256")},
+                          "authenticated": True, "new_cart": True}
             else:
                 return self.host(frame)
             return {"reply_to": frame["call_id"], "browser_binding": self.binding,
@@ -2205,6 +2234,40 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, settled)
         self.assertEqual(settled["result"]["delivery_recovery"]["original_dispatch_outcome"], "unknown")
         self.assertEqual(self.state()["native_tab_rebind"]["tab_id"], tab)
+        self.assertEqual(live["writes"], 1)
+        changed = self.state()
+        changed.pop("native_delivery_selection")
+        (self.root / "state/state.json").write_text(json.dumps(changed))
+        code, original = self.run_session("rebind-tab", rebind)
+        self.assertEqual(code, 0, original)
+        self.assertEqual(original["result"]["delivery_recovery"]["original_dispatch_outcome"], "unknown")
+        self.assertEqual(original["result"]["delivery_recovery"]["observation_scope"], "historical")
+        code, conflict = self.run_session("rebind-tab", {**rebind, "delivery_recovery": {**review_ref, "review_id": str(uuid.uuid4())}})
+        self.assertEqual(code, 1, conflict)
+
+    def test_owner_can_reconcile_an_expired_dispatch_on_an_explicitly_empty_picker(self):
+        reference, live, host = self.protected_delivery_host(lose_reply=True)
+        code, review = self.call({"operation": "delivery", "action": "prepare", "slot_ref": reference}, host=host)
+        self.assertEqual(code, 0, review)
+        review_ref = {key: review["result"][key] for key in ("review_id", "review_digest")}
+        code, lost = self.call({"operation": "delivery", "action": "select", "reservation_approved": True,
+                                **review_ref}, host=host)
+        self.assertEqual(code, 1, lost)
+        started = self.state()
+        started["native_delivery_selection"]["dispatch_expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        (self.root / "state/state.json").write_text(json.dumps(started))
+        accept = {"operation": "delivery", "action": "accept_current", "owner_accepted_unknown": True,
+                  "original_executor_stopped": True, **review_ref}
+        live.update(selected=False, empty_calendar="unverified")
+        code, blocked = self.call(accept, host=host)
+        self.assertEqual(code, 1, blocked)
+        self.assertEqual(self.state()["native_delivery_selection"]["status"], "dispatching")
+        live["empty_calendar"] = "verified"
+        code, ending = self.call(accept, host=host)
+        self.assertEqual(code, 0, ending)
+        self.assertEqual(ending["result"]["status"], "delivery_archived_unknown")
+        self.assertIsNone(ending["result"]["observed_current_slot_ref"])
+        self.assertEqual(ending["result"]["original_dispatch_outcome"], "unknown")
         self.assertEqual(live["writes"], 1)
 
     def test_meny_order_handoff_checks_the_exact_eligible_receipt(self):

@@ -85,11 +85,11 @@ class HostedOdaDeliveryTest(unittest.TestCase):
                          observed_at=self.clock.return_value.isoformat(), result_source="original_attached_mutation_response",
                          is_error=error, slot=None if error else (slot if slot is not None else selected_slot()))
 
-    def verify(self, read, selected=None, *, fee="29.00", total="49.00"):
+    def verify(self, read, selected=None, *, fee="29.00", total="49.00", full=False):
         if selected is None:
             selected = selected_slot()
         return self.step("observe_delivery", **self.observation(
-            read, cart=snapshot(selected, fee=fee, total=total), slot=provider_slot(isSelected=True)))
+            read, cart=snapshot(selected, fee=fee, total=total), slot=provider_slot(isSelected=True, isFull=full)))
 
     def test_one_exact_dispatch_then_cart_and_slot_reads(self):
         preflight = self.preflight()
@@ -109,7 +109,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertFalse(readback["dispatch"])
         with self.assertRaisesRegex(ValueError, "exact active reservation"):
             self.verify(readback, selected_slot(id=9))
-        finished = self.verify(readback)
+        finished = self.verify(readback, full=True)
         self.assertEqual(finished["status"], "delivery_reserved")
         self.assertEqual(finished["reservation"]["expires_at"], "2026-11-27T13:00:00+00:00")
         self.assertEqual(self.step("status"), finished)
@@ -203,6 +203,35 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         recovered = self.step("observe_delivery", **self.observation(read, cart=cart))
         self.assertEqual(recovered["status"], "delivery_inactive")
         self.assertFalse(recovered["original_cart_still_matches"])
+
+    def test_reservation_can_be_read_back_across_cutoff_without_checkout_authority(self):
+        self.clock.return_value = datetime.fromisoformat(CUTOFF) - timedelta(seconds=30)
+        write = self.step("observe_delivery", **self.observation(self.preflight()))
+        hold = selected_slot(expireAt="2026-11-27T19:40:00+00:00")
+        self.clock.return_value += timedelta(seconds=31)
+        read = self.acknowledge(write, slot=hold)
+        result = self.verify(read, hold, full=True)
+        self.assertEqual(result["status"], "delivery_reserved")
+        self.assertTrue(result["reservation"]["booking_cutoff_passed"])
+        self.assertFalse(result["dispatch"])
+
+    def test_owner_archive_after_address_switch_requires_original_account_and_reports_drift(self):
+        prepared = self.preflight()
+        write = self.step("observe_delivery", **self.observation(prepared))
+        self.assertTrue(write["dispatch"])
+        self.clock.return_value += timedelta(minutes=3)
+        frame = self.step("accept_delivery_current", review_digest=prepared["review_digest"],
+                          owner_accepted_unknown=True, original_executor_stopped=True)
+        other_cart = {**snapshot(), "deliveryAddress": "Different selected fixture address"}
+        same_account = [{"id": 7, "isSelected": False}, {"id": 9, "isSelected": True}]
+        observation = self.observation(frame, cart=other_cart, address_label=other_cart["deliveryAddress"],
+                                       addresses=same_account)
+        with self.assertRaisesRegex(ValueError, "original Oda account"):
+            self.step("observe_delivery", **{**observation, "addresses": [{"id": 9, "isSelected": True}]})
+        result = self.step("observe_delivery", **observation)
+        self.assertEqual(result["status"], "delivery_archived_unknown")
+        self.assertTrue(result["observed_address_changed"])
+        self.assertEqual(result["original_dispatch_outcome"], "unknown")
 
 
 if __name__ == "__main__":

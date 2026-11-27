@@ -192,7 +192,7 @@ def delivery_view(data, arguments):
     slots = data.get("slots")
     if not isinstance(slots, list) or len(slots) > 400:
         raise ValueError("hosted Oda delivery slot scope changed")
-    seen = set()
+    seen, selected = set(), []
     for raw in slots:
         slot = normalize_retail_delivery_slot(raw)
         reference = slot["slot_ref"]
@@ -200,7 +200,14 @@ def delivery_view(data, arguments):
                 or reference in seen):
             raise ValueError("hosted Oda delivery slot identity changed")
         seen.add(reference)
-    return normalize_retail_delivery_slots(data)
+        if slot["selected"]:
+            selected.append((slot, raw))
+    if len(selected) > 1:
+        raise ValueError("hosted Oda delivery selection is ambiguous")
+    result = normalize_retail_delivery_slots(data)
+    if selected and selected[0][1]["isFull"] and not selected[0][1]["isUnavailable"]:
+        result["current_selected"] = selected[0][0]
+    return result
 
 
 def order_row(order, *, include_products=False):

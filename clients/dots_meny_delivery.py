@@ -12,7 +12,8 @@ from meny import (meny_delivery_list_price_display, meny_delivery_window_identit
 
 STATE_KEY = "native_delivery_selection"
 PENDING = {"dispatching", "dispatched"}
-OBSERVATION_ENDINGS = {"delivery_selection_observed", "delivery_price_drift_observed", "delivery_inactive"}
+OBSERVATION_ENDINGS = {"delivery_selection_observed", "delivery_price_drift_observed", "delivery_inactive",
+                       "delivery_archived_unknown"}
 EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
 ORDINARY = {"pending_checkout", "pending_cart_change", "pending_cancellation", "order_change"}
 
@@ -58,7 +59,7 @@ def review_inputs(host, slot_ref, *, allow_inactive=False):
     window, _ = normalize_delivery_slot_ref(slot_ref)
     started = time.monotonic()
     # Read the entire picker so a different date's selection cannot be hidden.
-    slots = host.call("get_delivery_slots", {})
+    slots = host.call("get_delivery_slots", {"recovery_read": True} if allow_inactive else {})
     selected = meny_selected_delivery(slots["slots"])
     live = context(host)
     cart = host.call("get_cart", {})
@@ -95,27 +96,36 @@ def view(record):
     return {**{key: record[key] for key in ("status", "review_id", "review_digest", "review", "expires_at")},
             "dispatch": False, **EVIDENCE,
             **({"observed_at": record["observed_at"], "original_dispatch_outcome": record["dispatch_outcome"]}
-               if "observed_at" in record else {})}
+               if "observed_at" in record else {}),
+            **{key: record[key] for key in ("observed_current_slot_ref", "observed_address_changed", "original_goods_still_match")
+               if key in record}}
 
 
-def readback(host, store, record, *, accept_current=False):
+def ending_view(record):
+    return {**view(record), "observation_scope": "historical",
+            "readback_calendar_price_display": record["readback_calendar_price_display"]}
+
+
+def readback(host, store, record, *, accept_current=False, original_account_verified=False):
     window = record["review"]["window"]
     reviewed, current, _ = review_inputs(host, window["slot_ref"], allow_inactive=True)
     observed = datetime.now(timezone.utc)
     target_selected = current["selected"] == window["slot_ref"]
     same_cart = all(current[field] == record["binding"][field] for field in ("goods_sha256", "product_subtotal"))
+    address_changed = current["address_sha256"] != record["binding"]["address_sha256"]
     inactive = not target_selected and (accept_current or observed >= dots.timestamp(window["end_at"]))
-    if (current["address_sha256"] != record["binding"]["address_sha256"]
+    if ((address_changed and not (inactive and accept_current and original_account_verified))
             or (not inactive and (not target_selected or reviewed is None or not same_cart))):
         raise HouseholdError("the selected MENY window, address or original cart is unverified; reconcile without resend")
     observed_price = reviewed["calendar_price_display"] if reviewed else None
     price_matches = (current.get("calendar_label") == record["binding"]["calendar_label"]
                      and observed_price == record["review"]["calendar_price_display"])
-    status = ("delivery_inactive" if inactive else
+    status = ("delivery_archived_unknown" if inactive and accept_current else "delivery_inactive" if inactive else
               "delivery_selection_observed" if price_matches else "delivery_price_drift_observed")
     record = {**record, "status": status, "observed_at": observed.isoformat(),
               "dispatch_outcome": "host_acknowledged" if record["status"] == "dispatched" else "unknown",
-              "readback_calendar_price_display": observed_price, "original_goods_still_match": same_cart}
+              "readback_calendar_price_display": observed_price, "original_goods_still_match": same_cart,
+              "observed_current_slot_ref": current["selected"], "observed_address_changed": address_changed}
     with store.locked() as state:
         state[STATE_KEY] = record
     return {**view(record), "readback_calendar_price_display": record["readback_calendar_price_display"]}
@@ -148,8 +158,7 @@ def handle(host, store, request, command_id):
     if not record or any(record[field] != request[field] for field in ("review_id", "review_digest")):
         raise HouseholdError("use the exact original MENY delivery review and approval")
     if action in {"reconcile", "accept_current"} and record["status"] in OBSERVATION_ENDINGS:
-        return {**view(record), "observation_scope": "historical",
-                "readback_calendar_price_display": record["readback_calendar_price_display"]}
+        return ending_view(record)
     if record["browser_binding_sha256"] != digest(host.config["browser_binding"]):
         raise HouseholdError("the original MENY delivery review belongs to the retired tab; prepare again")
     if action in {"reconcile", "accept_current"}:
@@ -157,7 +166,10 @@ def handle(host, store, request, command_id):
             raise HouseholdError("no dispatch to reconcile for this MENY delivery review")
         if datetime.now(timezone.utc) < dots.timestamp(record["dispatch_expires_at"]):
             raise HouseholdError("wait for the original MENY delivery dispatch frame to expire")
-        return readback(host, store, record, accept_current=action == "accept_current")
+        accepting = action == "accept_current"
+        if accepting:
+            host.verify_original_account()
+        return readback(host, store, record, accept_current=accepting, original_account_verified=accepting)
     if record["status"] != "delivery_review" or datetime.now(timezone.utc) >= dots.timestamp(record["expires_at"]):
         raise HouseholdError("the approval expired or the original MENY delivery attempt needs reconciliation")
     slot_ref = record["review"]["window"]["slot_ref"]

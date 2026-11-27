@@ -261,6 +261,17 @@ Reuse the original UUID throughout.
    pending while the evidence remains uncertain. `status` returns historical
    evidence without a new dispatch. Re-read the current cart before checkout.
 
+If the original frame has expired and its executor has stopped, the owner can
+accept archiving that specific inactive attempt with its outcome unknown. Use
+`accept_delivery_current` with the exact `review_digest` and both
+`owner_accepted_unknown: true` and `original_executor_stopped: true`. Verify the
+owner’s original account using its original opaque address reference in both
+the attached app and the dedicated browser. If the current selected address has
+changed, the original address must still be visible on that account. The
+fresh cart and dated slot reads must show that the target is absent from the
+observed selection. A different visible window is reported separately. This
+archive grants no new reservation and does not attest what happened earlier.
+
 Oda’s app supplies account and cart observations through the host. Use the
 shop for checkout and payment. [Official Oda MCP specification](https://oda.com/mcp/manifest/)
 
@@ -270,13 +281,19 @@ For a checkout handoff, run `hosted-cart` with a new UUID and `begin_checkout`.
 Pass the current selected `slot_ref`, fresh `authorized_addresses` and
 `payment_method: "saved_card"` or `"vipps"`. Complete the same independent
 read frame as a delivery review. `checkout_handoff` returns the app cart,
-selected window and merchant cart link. `checkout_cart_empty` or
+selected window and merchant cart link. If a held window has sold out to other
+shoppers, `delivery.list` can return its reference as `current_selected`.
+`checkout_cart_empty` or
 `checkout_delivery_required` tells you what to resolve first. Reopen the link
 in the dedicated signed-in browser and compare the complete cart, delivery,
 prices, payment choice and payable total in the shop. Use the Dot’s private
 browser handoff for the owner to complete checkout and any bank or Vipps
 approval. The payment method is the requested choice and the total is the
 app’s cart total. Check the actual payable total and method in the shop.
+In the verified ordinary cart, Oda’s `Fortsett` opens the review flow.
+Stop before `Bekreft og betal` or any control that initiates payment. If the
+shop does not show the requested method, tell the owner what is available
+and let them choose. [Oda order and payment controls](https://hjelp.oda.com/no/article/100639)
 
 For an existing order, start `orders.change_handoff` with its exact `order_id`
 through `call`. Use the emitted `order_tracking` request and, for a
@@ -975,7 +992,14 @@ with the exact `review_id` and `review_digest`. The new tab only reads the
 original account, picker and cart until the original attempt is reconciled.
 Supply `owner_accepted_unknown: true` inside `delivery_recovery` only when the
 owner specifically accepts archiving an inactive original attempt with its
-historical outcome unknown.
+historical outcome unknown. Include `original_executor_stopped: true` after
+verifying the old executor cannot click.
+
+A picker frame with `recovery_read: true` accepts an empty `slots` list with
+`no_selectable_windows: true` only when the authenticated, fully loaded picker
+explicitly reports no available windows. A blank or loading picker remains
+unverified. The separate cart and header reads must also confirm the original
+window is absent before an inactive ending.
 
 1. Call `delivery.prepare` with the exact `slot_ref` from the calendar.
    For `get_delivery_slots` follow the existing rendered picker protocol,
@@ -1017,8 +1041,10 @@ historical outcome unknown.
    checking that no old browser click can still run. Keep the original receipts.
 
 For checkout, `checkout.prepare` checks the current cart and selected home
-delivery. The `review_checkout` read can open the verified same-tab shop checkout
-and proceed through earlier non-binding screens. Stop before `Til betaling`.
+delivery. The `review_checkout` frame has `effect: "checkout_review"`. It can
+open the verified same-tab shop checkout and follow documented non-binding
+navigation with the original window and address. Stop before `Til betaling` or
+any payment control. Do not save a new address, payment method or terms.
 Verify the same address, ordinary cart quantities, window and a single enabled
 payment control with Vipps selected. Return `url`, `ordinary_cart`,
 `address_sha256`, an `items` object mapping exact product paths to integer

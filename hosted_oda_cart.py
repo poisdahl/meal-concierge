@@ -295,7 +295,7 @@ def cart_matches(cart, record, filled):
     return cart_quantities(cart, one_group="menu" not in record) == expected
 
 
-def bound_times(record, pending, value, key, time_field):
+def bound_times(record, pending, value, key, time_field, *, check_account=True):
     match_frame(pending, value)
     address_time = hosted_oda.response_time(value["address_observed_at"])
     observation_time = hosted_oda.response_time(value[time_field])
@@ -303,7 +303,7 @@ def bound_times(record, pending, value, key, time_field):
             <= now() < hosted_oda.response_time(pending["expires_at"])):
         raise ValueError("the original hosted Oda observation times or read frame changed")
     account = account_fingerprint(value["addresses"], key)
-    if not hmac.compare_digest(record["account"], account):
+    if check_account and not hmac.compare_digest(record["account"], account):
         raise ValueError("the selected Oda account/address context changed")
     return address_time, observation_time
 
@@ -557,7 +557,8 @@ def status_view(record):
     if "delivery" in record:
         delivery = record["delivery"]
         for field in ("slot_ref", "review", "review_digest", "reservation", "reconciled_at", "handoff",
-                      "original_cart_still_matches", "review_expires_at"):
+                      "original_cart_still_matches", "review_expires_at", "observed_current_delivery",
+                      "observed_address_changed", "owner_accepted_unknown_at"):
             if field in delivery:
                 result[field] = delivery[field]
         if record["status"] == "delivery_dispatched":
@@ -777,6 +778,8 @@ def run(state, directory, operation_id, value, plugin, build):
             raise ValueError("Oda checkout handoff supports saved_card or vipps")
     elif action == "approve_delivery":
         require_fields(value, ("action", "review_digest"))
+    elif action == "accept_delivery_current":
+        require_fields(value, ("action", "review_digest", "owner_accepted_unknown", "original_executor_stopped"))
     elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery"):
         require_fields(value, ("action",))
 

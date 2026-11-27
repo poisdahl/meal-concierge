@@ -36,6 +36,7 @@ OWNER_FILES = (".service-owner.lock", "recipes.sqlite3.owner.lock", "state.json.
 LEGACY_RESET_INTENT = "native-cart-legacy-reset-intent.json"
 TAB_REBIND = "native_tab_rebind"
 TAB_HISTORY = "native_tab_rebind_history"
+TAB_PLANS_RETIRED = "native_tab_product_plans_retired"
 MAX_LINE = 65536
 PRODUCTS_APPLY_BUDGET_SECONDS = 600
 MENY_PRODUCT_PATH = re.compile(r"/varer/[A-Za-z0-9._~%/-]+-[0-9]{4,14}")
@@ -253,12 +254,15 @@ def native_reply(reader, frame, deadline):
     return reply["result"], observed
 
 
-def delivery_picker(result, requested_date=None):
-    if (set(result) != {"authenticated", "ready", "source_url", "dialog_count", "slots"}
+def delivery_picker(result, requested_date=None, *, recovery_read=False):
+    fields = {"authenticated", "ready", "source_url", "dialog_count", "slots"}
+    if recovery_read and result.get("no_selectable_windows") is True and result.get("slots") == []:
+        fields.add("no_selectable_windows")
+    if (set(result) != fields
             or result["authenticated"] is not True or result["ready"] is not True
             or result["source_url"] != "https://meny.no/varer"
             or type(result["dialog_count"]) is not int or result["dialog_count"] != 1
-            or not isinstance(result["slots"], list) or not result["slots"]):
+            or not isinstance(result["slots"], list) or not result["slots"] and "no_selectable_windows" not in fields):
         raise HouseholdError("native delivery picker scope or rendered slots changed")
     slots, display = [], {}
     for raw in result["slots"]:
@@ -434,6 +438,14 @@ class NativeHost:
             raise HouseholdError("original native household/browser configuration changed")
         return state.get("pending_cart_change")
 
+    def verify_original_account(self):
+        proof = self.exchange("verify_observation_context", {})
+        binding = self.config["browser_binding"]
+        identity = {key: binding[key] for key in ("account_sha256", "cart_context_sha256")}
+        if (proof != {**identity, "authenticated": True, "new_cart": True}
+                or proof["authenticated"] is not True or proof["new_cart"] is not True):
+            raise HouseholdError("the original MENY account and ordinary cart context could not be verified")
+
     def select_delivery(self, record, started):
         review, monotonic_now = record["review"], time.monotonic()
         expiry = min(dots.timestamp(record["expires_at"]), dots.timestamp(review["window"]["start_at"]))
@@ -481,6 +493,8 @@ class NativeHost:
         if deadline <= time.monotonic():
             raise HouseholdError("native host operation deadline reached")
         frame = native_frame(self.command_id, operation, arguments, binding, deadline, write=write)
+        if operation == "review_checkout":
+            frame["effect"] = "checkout_review"
         ordinary_write = (write and self.request.get("operation") == "cart"
                           and self.request.get("action") in {"ensure", "clear"})
         if ordinary_write:
@@ -556,13 +570,14 @@ class NativeHost:
                 raise HouseholdError("native order requires an exact decimal identity")
             return normalize_order_ui(self.exchange(tool, arguments, deadline=deadline), order_id=order_id)
         if tool == "get_delivery_slots":
-            dots.object_fields(arguments, {"delivery_date"}, set())
+            dots.object_fields(arguments, {"delivery_date", "recovery_read"}, set())
             requested_date = arguments.get("delivery_date")
             if requested_date is not None and (
                     not isinstance(requested_date, str)
                     or date.fromisoformat(requested_date).isoformat() != requested_date):
                 raise HouseholdError("native delivery date must be a canonical ISO date")
-            return delivery_picker(self.exchange(tool, arguments, deadline=deadline), requested_date)
+            return delivery_picker(self.exchange(tool, arguments, deadline=deadline), requested_date,
+                                   recovery_read=arguments.get("recovery_read") is True)
         if tool == "product_search":
             queries, size = arguments.get("queries"), arguments.get("size")
             if (set(arguments) != {"queries", "page", "size"} or arguments["page"] != 1
@@ -829,12 +844,21 @@ def load_bound_state(root, config_data, config, *, allow_reset_recovery=False):
     seen = {entry["browser_binding"]["tab_id"] for entry in (config, active) if entry.get("browser_binding")}
     for rebind in (*past, *([saved[TAB_REBIND]] if TAB_REBIND in saved else [])):
         fields = {"base_config_sha256", "previous_tab", "tab_id", "observed_at"}
-        dots.object_fields(rebind, fields, fields)
+        dots.object_fields(rebind, fields | {"request_sha256", "delivery_recovery"}, fields)
         tab_id = observation_tab_id(rebind["tab_id"])
         if (active.get("browser_binding") is None or rebind["base_config_sha256"] != dots.digest(config_data)
                 or observation_tab_id(rebind["previous_tab"]) != active["browser_binding"]["tab_id"] or tab_id in seen):
             raise ValueError("original native browser rebind receipt changed")
         dots.timestamp(rebind["observed_at"])
+        if ("request_sha256" in rebind and (not isinstance(rebind["request_sha256"], str)
+                or re.fullmatch(r"[a-f0-9]{64}", rebind["request_sha256"]) is None)):
+            raise ValueError("the original native browser rebind request changed")
+        if "delivery_recovery" in rebind:
+            ending = rebind["delivery_recovery"]
+            if ("request_sha256" not in rebind or not isinstance(ending, dict)
+                    or ending.get("status") not in dots_meny_delivery.OBSERVATION_ENDINGS
+                    or ending.get("dispatch") is not False):
+                raise ValueError("the original native delivery recovery receipt changed")
         seen.add(tab_id)
         active = with_tab(config, tab_id)
         expected = dots.digest(dots.encoded(active))
@@ -1004,7 +1028,7 @@ class DeliveryObservation:
         if operation == "get_cart":
             return read_observation_cart(self.read)[0]
         if operation == "get_delivery_slots":
-            return delivery_picker(self.read(operation, arguments)[0])
+            return delivery_picker(self.read(operation, arguments)[0], recovery_read=True)
         raise HouseholdError("replacement-tab delivery reconciliation only reads the original cart and picker")
 
 
@@ -1064,6 +1088,7 @@ def rebind_tab(root, value, reader):
     previous_tab = observation_tab_id(value["previous_tab_id"])
     if value["original_tab_retired"] is not True:
         raise ValueError("verify that the original browser tab is retired before replacing it")
+    request_digest = dots.digest(dots.encoded(value))
     root = dots.existing_root(root)
     on_demand._read_file(root / "command.lock", 0)
     with ExitStack() as stack:
@@ -1075,8 +1100,13 @@ def rebind_tab(root, value, reader):
         history = [*saved.get(TAB_HISTORY, []), *([saved[TAB_REBIND]] if TAB_REBIND in saved else [])]
         original = next((item for item in history if item["tab_id"] == tab_id and item["previous_tab"] == previous_tab), None)
         if original is not None:
+            if (original.get("request_sha256", request_digest if "delivery_recovery" not in value else None)
+                    != request_digest):
+                raise HouseholdError("the replacement tab belongs to a different original recovery request")
             return {"status": "browser_rebound", "observed_at": original["observed_at"],
-                    "observation_scope": "historical", "writes_enabled": False, **RENDERED_UI_EVIDENCE}
+                    "observation_scope": "historical", "writes_enabled": False, **RENDERED_UI_EVIDENCE,
+                    **({"delivery_recovery": {**original["delivery_recovery"], "observation_scope": "historical"}}
+                       if "delivery_recovery" in original else {})}
         retired = {item["previous_tab"] for item in history}
         if config.get("browser_binding") is not None:
             retired.add(config["browser_binding"]["tab_id"])
@@ -1090,9 +1120,10 @@ def rebind_tab(root, value, reader):
             if recovery is None:
                 raise HouseholdError("include the original MENY delivery review to reconcile it on the replacement tab")
             keys = {"review_id", "review_digest"}
-            dots.object_fields(recovery, keys | {"owner_accepted_unknown"}, keys)
+            dots.object_fields(recovery, keys | {"owner_accepted_unknown", "original_executor_stopped"}, keys)
             if (any(pending[field] != recovery[field] for field in keys)
                     or type(recovery.get("owner_accepted_unknown", False)) is not bool
+                    or recovery.get("owner_accepted_unknown") is True and recovery.get("original_executor_stopped") is not True
                     or datetime.now(timezone.utc) < dots.timestamp(pending["dispatch_expires_at"])):
                 raise HouseholdError("use the exact original expired MENY delivery dispatch for read-only recovery")
         elif recovery is not None:
@@ -1109,7 +1140,10 @@ def rebind_tab(root, value, reader):
         settled = None
         if pending.get("status") in dots_meny_delivery.PENDING:
             settled = dots_meny_delivery.readback(DeliveryObservation(read), store, pending,
-                                                  accept_current=recovery.get("owner_accepted_unknown", False))
+                                                  accept_current=recovery.get("owner_accepted_unknown", False),
+                                                  original_account_verified=True)
+        elif recovery is not None:
+            settled = dots_meny_delivery.ending_view(pending)
         publish_native_record(registry / (tab_target(binding, tab_id) + ".json"), target_owner(root, config))
         with store.locked() as state:
             if (state.get("native_config_sha256") != saved["native_config_sha256"]
@@ -1119,7 +1153,8 @@ def rebind_tab(root, value, reader):
             if history:
                 state[TAB_HISTORY] = history
             state[TAB_REBIND] = {"base_config_sha256": dots.digest(data), "previous_tab": binding["tab_id"],
-                                 "tab_id": tab_id, "observed_at": observed}
+                                 "tab_id": tab_id, "observed_at": observed, "request_sha256": request_digest,
+                                 **({"delivery_recovery": settled} if settled is not None else {})}
             state["native_config_sha256"] = dots.digest(dots.encoded(with_tab(config, tab_id)))
             state["native_cart_writes_enabled"] = False
             state["product_selection_generation"] = uuid.uuid4().hex
@@ -1410,6 +1445,16 @@ def command(root, value, reader):
             stack, app = application(root, config, reader, command_id, time.monotonic() + budget,
                                      request=request, active_config=active)
             with stack:
+                rebind = saved.get(TAB_REBIND)
+                if (apply and rebind and "request_sha256" not in rebind
+                        and saved.get(TAB_PLANS_RETIRED) != saved["native_config_sha256"]):
+                    with app.store.locked() as state:
+                        if (any(state.get(key) for key in dots_meny_delivery.ORDINARY)
+                                or (state.get(dots_meny_delivery.STATE_KEY) or {}).get("status") in dots_meny_delivery.PENDING):
+                            raise HouseholdError("reconcile the original MENY operation before retiring stale approvals")
+                        state["product_selection_generation"] = uuid.uuid4().hex
+                        state[TAB_PLANS_RETIRED] = saved["native_config_sha256"]
+                    raise HouseholdError("prepare and review a new MENY product plan after rebinding the browser")
                 if write:
                     with app.store.locked() as state:
                         if not state.get("pending_cart_change"):

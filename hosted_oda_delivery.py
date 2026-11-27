@@ -8,12 +8,12 @@ from zoneinfo import ZoneInfo
 from core import contains_line_controls
 import hosted_oda
 from hosted_oda_menu import cart_amounts
-from retail_mcp import retail_cart_delivery_matches_slot, retail_delivery_slot_date
+from retail_mcp import normalize_retail_delivery_slot, retail_cart_delivery_matches_slot, retail_delivery_slot_date
 
 
 BEFORE_WRITE = {"delivery_read", "delivery_review", "delivery_preflight"}
 FINISHED = {"delivery_reserved", "delivery_observed", "delivery_already_selected", "delivery_inactive",
-            "checkout_handoff", "checkout_cart_empty", "checkout_delivery_required"}
+            "delivery_archived_unknown", "checkout_handoff", "checkout_cart_empty", "checkout_delivery_required"}
 PENDING = {"delivery_dispatched", "delivery_readback"}
 OBSERVATION_FIELDS = ("action", "frame_id", "plugin_id", "addresses", "address_observed_at",
                       "cart", "cart_observed_at", "slots", "slots_observed_at", "slot_arguments", "browser", "address_label")
@@ -102,7 +102,7 @@ def browser_context(value, key, address_id):
     browser = value["browser"]
     require_fields(browser, ("browser_id", "tab_id", "address_id", "new_cart", "cart_url"))
     if (browser["new_cart"] is not True or type(browser["address_id"]) is not int or browser["address_id"] != address_id
-            or browser["cart_url"] not in hosted_oda.CART_LINKS
+            or not isinstance(browser["cart_url"], str) or browser["cart_url"] not in hosted_oda.CART_LINKS
             or any(not isinstance(browser[field], str) or not 1 <= len(browser[field]) <= 150
                    or not browser[field].isprintable() for field in ("browser_id", "tab_id"))):
         raise ValueError("verify the original dedicated Oda browser, account and ordinary cart")
@@ -116,20 +116,24 @@ def browser_context(value, key, address_id):
     return hosted_oda.arguments_digest(browser), address
 
 
-def inactive_readback(record, baseline, current, selected, observed, cart_date):
+def inactive_readback(record, baseline, current, selected, observed, cart_date, *, address_changed):
     delivery = record["delivery"]
     boundary = hosted_oda.response_time(delivery["dispatch_expires_at"])
     offered = delivery["review"]["window"]
     expiry = delivery.get("ack_expiry") or offered["cutoff_at"]
-    ended = delivery.get("acknowledged") is False or observed >= hosted_oda.response_time(expiry)
+    ended = (delivery.get("acknowledged") is False or observed >= hosted_oda.response_time(expiry)
+             or "owner_accepted_unknown_at" in delivery)
     same_slot = current is not None and current["slot_id"] == delivery["slot_id"]
     if same_slot and current["display"] is not None:
         exact = {key: val for key, val in offered.items() if key != "cutoff_at"}
         same_slot = retail_cart_delivery_matches_slot(current, {**exact, "selected": True}, today=cart_date)
     if not same_slot and delivery["slot_id"] not in selected and observed >= boundary and ended:
-        record["status"] = "delivery_inactive"
+        record["status"] = "delivery_archived_unknown" if "owner_accepted_unknown_at" in delivery else "delivery_inactive"
         delivery["reconciled_at"] = observed.isoformat()
         delivery["original_cart_still_matches"] = current is None and baseline == delivery["baseline"]
+        delivery["observed_current_delivery"] = ({key: current[key] for key in ("slot_id", "display")}
+                                                 if current is not None else None)
+        delivery["observed_address_changed"] = address_changed
         record.pop("frame")
         return True
     return False
@@ -140,17 +144,22 @@ def observe(record, value, key):
 
     journal.require_fields(value, OBSERVATION_FIELDS)
     status, pending = record["status"], record["frame"]
-    address_time, cart_time = journal.bound_times(record, pending, value, key, "cart_observed_at")
+    delivery = record["delivery"]
+    accepting = status == "delivery_readback" and "owner_accepted_unknown_at" in delivery
+    address_time, cart_time = journal.bound_times(record, pending, value, key, "cart_observed_at", check_account=not accepting)
     slot_time = hosted_oda.response_time(value["slots_observed_at"])
     if not (cart_time <= slot_time <= journal.now() < hosted_oda.response_time(pending["expires_at"])
             and hosted_oda.arguments_digest(value["slot_arguments"]) == hosted_oda.arguments_digest(pending["tools"][-1]["arguments"])):
         raise ValueError("the original dated Oda address and delivery observation changed")
     slots = value["slots"]
     normalized = hosted_oda.delivery_view(slots, value["slot_arguments"])
-    delivery = record["delivery"]
     view, baseline, current = inspect_cart(value["cart"], allow_grouped=status == "delivery_readback")
     context, address = browser_context(value, key, delivery["address_id"])
-    if "physical_address" in delivery and not hmac.compare_digest(delivery["physical_address"], address):
+    physical_changed = "physical_address" in delivery and not hmac.compare_digest(delivery["physical_address"], address)
+    address_set = journal.address_selection(value["addresses"])
+    if accepting and delivery["address_id"] not in address_set["ids"]:
+        raise ValueError("verify the original Oda account through its original address reference before archiving")
+    if physical_changed and not accepting:
         raise ValueError("the reviewed Oda physical delivery address changed")
     selected = [raw["id"] for raw in slots["slots"] if raw["isSelected"]]
     cart_date = cart_time.astimezone(OSLO).date()
@@ -159,18 +168,29 @@ def observe(record, value, key):
         record["status"] = "checkout_cart_empty" if value["cart"]["productQuantityCount"] == 0 else "checkout_delivery_required"
         record.pop("frame")
         return False
-    if status == "delivery_readback" and inactive_readback(record, baseline, current, selected, address_time, cart_date):
+    address_changed = physical_changed or address_set["selected"] != delivery["address_id"]
+    if status == "delivery_readback" and inactive_readback(record, baseline, current, selected, address_time, cart_date,
+                                                           address_changed=address_changed):
         return False
+    if accepting and (address_changed or not hmac.compare_digest(record["account"], journal.account_fingerprint(value["addresses"], key))):
+        raise ValueError("the original Oda selection remains unresolved on the changed address or account")
     if not baseline["ordinary_quantities"]:
         raise ValueError("the Oda delivery readback no longer contains the reviewed ordinary cart")
     if "browser_context" in delivery and not hmac.compare_digest(delivery["browser_context"], context):
         raise ValueError("the Oda checkout browser changed")
     slot = next((row for row in normalized["slots"] if row["slot_ref"] == delivery["slot_ref"]), None)
+    raw = next((row for row in slots["slots"] if row["id"] == delivery["slot_id"]), None)
+    if (slot is None and raw is not None and raw["isSelected"] and raw["isFull"] and not raw["isUnavailable"]
+            and status in {"delivery_read", "delivery_readback"}):
+        # The window can be sold out to other shoppers while this cart holds it.
+        slot = normalize_retail_delivery_slot(raw)
     if slot is None or slot["price_kind"] != "exact":
         raise ValueError("the exact Oda delivery slot or price is unavailable")
-    raw = next(row for row in slots["slots"] if row["id"] == delivery["slot_id"])
     cutoff = hosted_oda.response_time(raw.get("cutoffTime"))
-    if not slot_time <= journal.now() < min(cutoff, hosted_oda.response_time(slot["start_at"])):
+    checked = journal.now()
+    before_cutoff = checked < cutoff
+    checking_existing = status in {"delivery_readback", "delivery_read"} and slot["selected"] and payment is None
+    if not slot_time <= checked < hosted_oda.response_time(slot["start_at"]) or (not before_cutoff and not checking_existing):
         raise ValueError("the Oda delivery window or cutoff expired")
     offer = {key: val for key, val in slot.items() if key != "selected"}
     offer["cutoff_at"] = cutoff.isoformat()
@@ -181,6 +201,7 @@ def observe(record, value, key):
         expiry = min(expiry_times, default=None)
         if (selected != [delivery["slot_id"]] or current is None or current["cutoff_at"] != cutoff
                 or current["display"] is None or (expiry is not None and expiry <= journal.now())
+                or (not before_cutoff and expiry is None)
                 or not retail_cart_delivery_matches_slot(current, slot, today=cart_date)
                 or baseline["amounts_ore"]["deliveryFee"] > slot["price_ore"]):
             raise ValueError("fresh Oda reads do not establish the exact active reservation")
@@ -201,6 +222,7 @@ def observe(record, value, key):
         else:
             record["status"] = "delivery_already_selected"
         delivery["reservation"] = {"window": offer, "expires_at": expiry.isoformat() if expiry is not None else None,
+                                   "booking_cutoff_passed": not before_cutoff,
                                    "cart": view, "observed_at": slot_time.isoformat()}
         record.pop("frame")
         return False
@@ -276,6 +298,13 @@ def advance(record, value, key):
     elif action == "recheck" and status in PENDING:
         if status == "delivery_dispatched" and now() < hosted_oda.response_time(record["frame"]["expires_at"]):
             raise ValueError("wait for the original Oda dispatch frame to expire before reconciling")
+        record["status"] = "delivery_readback"
+    elif action == "accept_delivery_current" and status in PENDING:
+        delivery = record["delivery"]
+        if (value["review_digest"] != delivery["review_digest"] or value["owner_accepted_unknown"] is not True
+                or value["original_executor_stopped"] is not True or now() < hosted_oda.response_time(delivery["dispatch_expires_at"])):
+            raise ValueError("retire the original expired Oda dispatch and obtain owner approval to archive its unknown outcome")
+        delivery["owner_accepted_unknown_at"] = now().isoformat()
         record["status"] = "delivery_readback"
     elif action == "retry_read" and status in {"delivery_read", "delivery_preflight"}:
         pass
