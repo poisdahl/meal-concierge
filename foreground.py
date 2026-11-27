@@ -325,6 +325,7 @@ def execute(options):
                             "delivery_reservation_command": "hosted-cart",
                             "delivery_reservation_start": "begin_delivery",
                             "checkout_handoff_start": "begin_checkout",
+                            "checkout_saved_card_start": "begin_saved_card_checkout",
                             "menu_shopping_command": "hosted-cart",
                             "menu_shopping_start": "begin_menu",
                             "menu_shopping_restore": "restore_menu",
@@ -384,7 +385,7 @@ def main():
     cli.output_options(command)
     subparsers.add_parser("receipt").add_argument("request_id", type=request_id)
     subparsers.add_parser("complete-hosted").add_argument("request_id", type=request_id)
-    cart = subparsers.add_parser("hosted-cart", help="prepare and apply an approved hosted Oda cart or delivery operation")
+    cart = subparsers.add_parser("hosted-cart", help="prepare and apply an approved hosted Oda cart, delivery or checkout operation")
     cart.add_argument("request_id", type=request_id)
     options = parser.parse_args()
     try:

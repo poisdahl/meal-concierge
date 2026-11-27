@@ -280,23 +280,100 @@ shop for checkout and payment. [Official Oda MCP specification](https://oda.com/
 
 ##### Oda checkout and order handoff
 
-For a checkout handoff, run `hosted-cart` with a new UUID and `begin_checkout`.
+On a Dot with native merchant checkout, you can ask:
+
+> Review my Oda basket and delivery and show me the exact saved-card total.
+> After I approve that purchase, submit it once in your cloud browser. Hand
+> me the browser privately if my bank needs approval.
+
+For a saved-card purchase on the Dot, start `begin_saved_card_checkout` with
+a new `hosted-cart` UUID, the selected `slot_ref` and fresh
+`authorized_addresses`. Use the original authenticated account and its sole
+active checkout in the dedicated cloud browser. Reconcile any earlier attempt
+or retire any earlier handoff before starting. Complete the attached-app
+delivery observations in `observe_delivery` together with `checkout` from
+the actual rendered payable page:
+
+- `url`, `browser_id`, `tab_id`, `new_order`, `exclusive_checkout`,
+  `address_label`, `delivery` and `observed_at`. Verify the same ordinary
+  cart, address and exact dated delivery window. Only report exclusivity
+  after checking for another active checkout or owner takeover.
+- `rows` with each `product_id` (observed string or null), `title`, `subtitle`
+  and integer `quantity`, and `amount_rows` with each observed `label` and
+  `value`. Read the complete sections and all merchant `warnings`.
+- `payment` with `method: "saved_card"`, `selected` and `masked_card` (the
+  visible masked suffix). `submit_control` contains the exact payable
+  `label`, `enabled` and `count`. Keep payment details private.
+
+Present the merchant, complete basket, saved-card choice, delivery and full
+payable total. Use `approve_saved_card_checkout` with the exact `review_digest`
+and `approved_total_ore` only after that purchase has the owner's approval.
+Complete the new observations. Include the raw result of the emitted
+`get_orders` as `existing_orders` and `orders_observed_at`. Use the Dot's
+documented checkout reporting. The operation UUID identifies the local
+attempt before a host report ID exists.
+
+Only the new `dispatch: true` frame with `submit_saved_card_checkout` allows
+one click on the original tab. Immediately compare the entire fresh review
+to the approved review before clicking. Honor any native approvals, expiry
+and payment warnings. Use private takeover for bank approval. Do not click
+again after a lost reply or pending payment. When the permit expires, use
+`recheck_checkout` with `confirmation` containing the original observed
+`url`, `order_number`, `order_link` (if present), `browser_id`, `tab_id`,
+`attempt_id`, `observed_at` and `native_report_id` if available, or `null`.
+Capture the exact order identity from the original merchant confirmation.
+Complete `observe_checkout_order` with the fresh app detail, tracking and
+address list, plus the exact browser receipt on the same account. Once the
+original confirmation is recorded, a same-account replacement in the same
+cloud browser can read the receipt if the original tab retired.
+Its `browser` fields are `url`, `browser_id`, `tab_id`, `attempt_id`,
+`order_number`, `delivery`, `payment_label` (or null), `address_id`,
+`address_label`, `total_ore` and `original_tab_retired`. Supply the emitted frame identity, `order`,
+`tracking`, `addresses`, `address_observed_at` and `observed_at`.
+Reissue that read with `recheck_checkout` if needed. Use only the already
+recorded order. Attach a late `native_report_id` to that same readback when
+available. Where the merchant does not identify the original order,
+preserve the unresolved operation. Merchant confirmation and card
+authorization are separate observations.
+
+For a review or owner handoff, run `hosted-cart` with a new UUID and
+`begin_checkout`.
 Pass the current selected `slot_ref`, fresh `authorized_addresses` and
-`payment_method: "saved_card"` or `"vipps"`. Complete the same independent
+`payment_method: "saved_card"` or `"vipps"`. Use `owner_handoff: true` when
+the owner is actually taking over. Complete the same independent
 read frame as a delivery review. `checkout_handoff` returns the app cart,
-selected window and merchant cart link. If a held window has sold out to other
-shoppers, `delivery.list` can return its reference as `current_selected`.
+selected window and merchant cart link for review. `checkout_owner_pending`
+keeps a real owner handoff exclusive. Offer takeover only when the fresh
+`observe_delivery` reply includes `owner_handoff_ready: true`. Include
+`existing_orders` and `orders_observed_at` from its emitted order-list read.
+If a held window has sold out to other shoppers, `delivery.list` can return
+its reference as `current_selected`.
 `checkout_cart_empty` or
 `checkout_delivery_required` tells you what to resolve first. Reopen the link
 in the dedicated signed-in browser and compare the complete cart, delivery,
 prices, payment choice and payable total in the shop. Use the Dot’s private
 browser handoff for the owner to complete checkout and any bank or Vipps
-approval. The payment method is the requested choice and the total is the
-app’s cart total. Check the actual payable total and method in the shop.
+approval after the exact payable review agrees with the recorded cart and
+the owner's approval. The app's receipt contains its cart amount. Confirm
+the actual payable amount in the shop. Retain and reconcile the original
+attempt before switching between owner and Dot submission. A historical
+receipt does not reopen a handoff.
 In the verified ordinary cart, Oda’s `Fortsett` opens the review flow.
-Stop before `Bekreft og betal` or any control that initiates payment. If the
+For an owner handoff, leave `Bekreft og betal` and payment controls to the owner. If the
 shop does not show the requested method, tell the owner what is available
 and let them choose. [Oda order and payment controls](https://hjelp.oda.com/no/article/100639)
+
+An attempt that definitively stopped before a click can be closed with
+`recheck_checkout_unsubmitted` and then `observe_checkout_unsubmitted`.
+Wait for any permit to expire. Supply the exact `attempt_id`,
+`original_executor_retired: true`, the report ID if available and the
+reason observed on that original attempt. Use `host_blocked_before_click` or `checkout_click_never_called`
+for native submission. Use `owner_returned_without_submitting` or
+`owner_handoff_never_opened` for an owner handoff. Complete fresh original
+account, cart and order-list reads. A timeout, missing reply or absent order
+alone leaves the original operation pending.
+
+[OpenAI guidance on saved cards and private sign-in](https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs)
 
 For an existing order, start `orders.change_handoff` with its exact `order_id`
 through `call`. Use the emitted `order_tracking` request and, for a

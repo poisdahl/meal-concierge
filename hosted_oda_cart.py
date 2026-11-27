@@ -188,7 +188,7 @@ def require_no_pending_write(state):
         return
     with registry(state, directory, initialize=False, allow_unbound=True) as (_, _, saved):
         if (saved["current"] or {}).get("status") in STATUSES - FINISHED:
-            raise ValueError("reconcile the original Oda cart or delivery operation before handing off an order change")
+            raise ValueError("reconcile the original Oda cart, delivery or checkout operation before handing off an order change")
 
 
 def now():
@@ -561,12 +561,28 @@ def status_view(record):
                       "observed_address_changed", "owner_accepted_unknown_at"):
             if field in delivery:
                 result[field] = delivery[field]
-        if record["status"] == "delivery_dispatched":
+        if "handoff" in result:
+            result["handoff"] = {**result["handoff"], "owner_completion_current": record["status"] == "checkout_owner_pending"}
+        if "checkout" in delivery:
+            checkout = delivery["checkout"]
+            review = checkout["review"]
+            result["native_report_recorded"] = "native_report_id" in checkout
+            result["checkout_review"] = {field: review[field] for field in (
+                "url", "delivery", "products", "amounts", "payable_ore", "payment_method", "masked_card", "control") if field in review}
+            if "result" in checkout:
+                result["checkout_order"] = checkout["result"]
+            if record["status"] == "checkout_not_submitted":
+                result["checkout_unsubmitted_reason"] = checkout["unsubmitted_reason"]
+        if record["status"] in {"delivery_dispatched", "checkout_dispatched"}:
             result["pending_response"] = {key: record["frame"][key] for key in ("frame_id", "issued_at", "expires_at")}
         if record["status"] in hosted_oda_delivery.FINISHED:
             result["delivery_evidence_scope"] = "historical_observation"
             result["original_dispatch_outcome"] = (
                 "acknowledged" if delivery.get("acknowledged") else "unknown" if "dispatch_expires_at" in delivery else "none")
+            if record["status"] in {"checkout_confirmed", "checkout_order_inactive"}:
+                result["original_dispatch_outcome"] = "merchant_order_observed"
+            elif record["status"] == "checkout_not_submitted":
+                result["original_dispatch_outcome"] = "reported_not_submitted"
     elif "menu" in record:
         menu = record["menu"]
         result["menu_ref"] = menu["source"]["menu_ref"]
@@ -746,7 +762,7 @@ def write_record(ledger, authority, record):
 def run(state, directory, operation_id, value, plugin, build):
     action = value.get("action") if isinstance(value, dict) else None
     new_cart = action in ("begin", "begin_menu")
-    new_delivery = action in ("begin_delivery", "begin_checkout")
+    new_delivery = action in ("begin_delivery", "begin_checkout", "begin_saved_card_checkout")
     authorizing = new_cart or new_delivery
     beginning = authorizing or action == "restore_menu"
     if action == "begin":
@@ -773,14 +789,23 @@ def run(state, directory, operation_id, value, plugin, build):
         require_fields(value, ("action", "review_digest"))
     elif new_delivery:
         fields = ("action", "slot_ref", "authorized_addresses")
-        require_fields(value, fields + ("payment_method",) if action == "begin_checkout" else fields)
+        if action == "begin_checkout":
+            fields += ("payment_method",)
+            if "owner_handoff" in value:
+                fields += ("owner_handoff",)
+                if value["owner_handoff"] is not True:
+                    raise ValueError("omit owner_handoff for a checkout review without takeover")
+        require_fields(value, fields)
         if action == "begin_checkout" and value["payment_method"] not in ("saved_card", "vipps"):
             raise ValueError("Oda checkout handoff supports saved_card or vipps")
     elif action == "approve_delivery":
         require_fields(value, ("action", "review_digest"))
+    elif action == "approve_saved_card_checkout":
+        require_fields(value, ("action", "review_digest", "approved_total_ore"))
     elif action == "accept_delivery_current":
         require_fields(value, ("action", "review_digest", "owner_accepted_unknown", "original_executor_stopped"))
-    elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery"):
+    elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery",
+                       "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted", "observe_checkout_unsubmitted"):
         require_fields(value, ("action",))
 
     build = {field: build[field] for field in ("source_commit", "source_sha256", "installed_runtime_sha256")}
@@ -814,7 +839,9 @@ def run(state, directory, operation_id, value, plugin, build):
             if action == "restore_menu" and record.get("restores_operation_id") != original_id:
                 raise ValueError("the operation ID belongs to a different original menu restoration")
             if new_delivery and (record.get("delivery", {}).get("slot_ref") != value["slot_ref"]
-                                 or record["delivery"].get("payment_method") != value.get("payment_method")
+                                 or record["delivery"].get("payment_method") != ("saved_card" if action == "begin_saved_card_checkout" else value.get("payment_method"))
+                                 or record["delivery"].get("native_saved_card", False) != (action == "begin_saved_card_checkout")
+                                 or record["delivery"].get("owner_handoff", False) != value.get("owner_handoff", False)
                                  or not hmac.compare_digest(record["account"], account)):
                 raise ValueError("the operation ID belongs to a different delivery window or account")
             return status_view(record)
@@ -859,12 +886,14 @@ def run(state, directory, operation_id, value, plugin, build):
             advance(record, action)
 
         dispatch = delivery_dispatch or (action == "observe" and record["status"] in WRITE_PHASES)
-        generation = saved["write_generation"] + int(dispatch)
+        owner_handoff_ready = action == "observe_delivery" and record["status"] == "checkout_owner_pending"
+        grants_action = dispatch or owner_handoff_ready
+        generation = saved["write_generation"] + int(grants_action)
         if dispatch and record["status"] == "awaiting_add_response" and "menu" in record:
             record["add_write_generation"] = generation
         authority = {"key": saved["key"], "write_generation": generation}
         write_record(ledger, authority, record)
-        if dispatch:
+        if grants_action:
             # Persist the latest issued write in the workspace and owning home.
             write_json(anchor, authority)
             write_json(state / GENERATION_NAME, authority)
@@ -872,6 +901,8 @@ def run(state, directory, operation_id, value, plugin, build):
             archive_record(directory, record)
             write_json(ledger, {**authority, "current": None})
         result = status_view(record)
+        if owner_handoff_ready:
+            result["owner_handoff_ready"] = True
         if action == "recheck" and "delivery" not in record:
             result["hosted_request"] = record["recovery_read"]
         elif action not in {"defer", "observe_recovery"} and "frame" in record:

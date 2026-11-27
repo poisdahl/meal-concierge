@@ -62,8 +62,8 @@ observation time as host-reported. The runtime checks the plugin entry and the
 request binding. The owner confirms the underlying Oda account when authorizing
 it. Backend freshness remains unverified. A receipt is historical. Use a new ID
 for a fresh read after expiry. If the plugin is unavailable, use the private
-ChatGPT authorization for that original entry. The owner completes checkout
-with the Oda cart link.
+ChatGPT authorization for that original entry. Checkout uses the Dot's
+signed-in Oda cloud browser.
 
 For delivery selection, follow the Oda reservation workflow in the retained
 source’s `docs/dots.md`. Review one exact date, window and listed fee. Wait
@@ -72,8 +72,12 @@ Only a fresh one-shot `dispatch: true` grants the actual reservation. Finish
 the independent readback in the original account. A historical or uncertain
 receipt grants no new store action.
 
-Use the original Oda cart and selected window for `begin_checkout`. Guide
-the owner through the shop’s saved-card or Vipps payment choice. Use
+Use `begin_saved_card_checkout` when the owner wants the Dot to submit a new
+Oda saved-card order. Follow the guide's exact payable review, owner approval,
+fresh checks and one-time dispatch. Hand off bank approval privately. Use
+`begin_checkout` with `owner_handoff: true` when the owner will complete a
+saved-card or Vipps purchase. Resolve the original attempt before another
+checkout. A historical receipt grants no action. Use
 `orders.change_handoff` for an exact eligible order and let the owner
 complete the change using its verified receipt. Check a fresh merchant
 receipt before reporting any completed action.
