@@ -113,7 +113,8 @@ def browser_context(value, key, address_id):
             or (value["cart"]["deliverySlot"] is not None and actual is None)):
         raise ValueError("the cart delivery address does not match the selected Oda address")
     address = hmac.new(bytes.fromhex(key), " ".join(label.split()).encode(), hashlib.sha256).hexdigest()
-    return hosted_oda.arguments_digest(browser), address
+    # The two allowlisted official cart links identify the same browser surface.
+    return hosted_oda.arguments_digest({**browser, "cart_url": "https://oda.com/no/cart/"}), address
 
 
 def inactive_readback(record, baseline, current, selected, observed, cart_date, *, address_changed):
@@ -303,6 +304,7 @@ def advance(record, value, key):
     elif action == "recheck" and status in PENDING:
         if status == "delivery_dispatched" and now() < hosted_oda.response_time(record["frame"]["expires_at"]):
             raise ValueError("wait for the original Oda dispatch frame to expire before reconciling")
+        record["delivery"].pop("owner_accepted_unknown_at", None)
         record["status"] = "delivery_readback"
     elif action == "accept_delivery_current" and status in PENDING:
         delivery = record["delivery"]

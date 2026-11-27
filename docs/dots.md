@@ -271,6 +271,9 @@ changed, the original saved address set and dedicated tab must still match. The
 fresh cart and dated slot reads must show that the target is absent from the
 observed selection. A different visible window is reported separately. This
 archive grants no new reservation and does not attest what happened earlier.
+If the original tab cannot be verified, `recheck` returns to ordinary recovery
+and can record the inactive window after the cutoff from fresh original-account
+evidence. If the original account is unverified, keep the original operation.
 
 Oda’s app supplies account and cart observations through the host. Use the
 shop for checkout and payment. [Official Oda MCP specification](https://oda.com/mcp/manifest/)

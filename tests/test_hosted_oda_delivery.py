@@ -238,6 +238,29 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertFalse(result["original_cart_still_matches"])
         self.assertEqual(result["original_dispatch_outcome"], "unknown")
 
+    def test_regular_recheck_can_settle_after_archive_stops_on_a_retired_tab(self):
+        prepared = self.preflight()
+        observation = self.observation(prepared)
+        observation["browser"]["cart_url"] = "https://oda.com/no/cart"
+        write = self.step("observe_delivery", **observation)
+        self.assertTrue(write["dispatch"])
+        self.clock.return_value += timedelta(minutes=3)
+        archive = self.step("accept_delivery_current", review_digest=prepared["review_digest"],
+                            owner_accepted_unknown=True, original_executor_stopped=True)
+        moved = self.observation(archive)
+        moved["browser"]["tab_id"] = "replacement-tab"
+        with self.assertRaisesRegex(ValueError, "original Oda account"):
+            self.step("observe_delivery", **moved)
+        self.clock.return_value = datetime.fromisoformat(CUTOFF) + timedelta(seconds=1)
+        read = self.step("recheck")
+        observation = self.observation(read)
+        observation["browser"]["tab_id"] = "replacement-tab"
+        settled = self.step("observe_delivery", **observation)
+        self.assertEqual(settled["status"], "delivery_inactive")
+        self.assertEqual(settled["original_dispatch_outcome"], "unknown")
+        self.assertNotIn("owner_accepted_unknown_at", settled)
+        self.assertFalse(settled["dispatch"])
+
 
 if __name__ == "__main__":
     unittest.main()
