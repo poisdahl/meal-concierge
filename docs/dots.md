@@ -274,7 +274,8 @@ and can record the inactive window after the cutoff from fresh original-account
 evidence. If the original account is unverified, keep the original operation.
 
 Oda’s app supplies account and cart observations through the host. Use the
-shop for checkout and payment. [Official Oda MCP specification](https://oda.com/mcp/manifest/)
+shop for checkout and payment. The compatibility check used Oda’s published
+server contract for version `2.4.0`. [Official Oda MCP specification](https://oda.com/mcp/manifest/)
 
 ##### Oda checkout and order handoff
 
@@ -368,6 +369,9 @@ In the verified ordinary cart, Oda’s `Fortsett` opens the review flow.
 For an owner handoff, leave `Bekreft og betal` and payment controls to the owner. If the
 shop does not show the requested method, tell the owner what is available
 and let them choose. [Oda order and payment controls](https://hjelp.oda.com/no/article/100639)
+Oda lists Vipps for its mobile app. When using the app, open the same signed-in
+account and review the original cart before continuing the private handoff.
+[Oda payment methods](https://hjelp.oda.com/no/article/b5fbd3-betalingsmetoder-hos-oss)
 
 An attempt that definitively stopped before a click can be closed with
 `recheck_checkout_unsubmitted` and then `observe_checkout_unsubmitted`.
@@ -626,6 +630,10 @@ and refresh the skill binding. In the planning home, verify `tools`, `status`,
 the saved menu and a prior receipt. In the hosted Oda home, verify `tools`,
 reopen a previous receipt and use the attached plugin for a fresh read.
 Reuse the original home for repeat setup.
+If Oda reports an older server version or the required tool or its arguments
+are missing, refresh the original ChatGPT plugin connection, attach the same
+entry again and verify a fresh read on the approved account. Compare the
+connection with [Oda’s current specification](https://oda.com/mcp/manifest/).
 Finish any active Oda test-cart operation before updating or rolling back
 its program. Use the defer procedure for an uncertain ending.
 

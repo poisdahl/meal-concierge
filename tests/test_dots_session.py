@@ -1970,6 +1970,25 @@ raise SystemExit(client.main())
         self.assertFalse(view["order_items"]["available"])
         self.assertIsNone(view["order_items"]["total"])
 
+    def test_rendered_orders_require_a_positive_status_in_older_layouts(self):
+        for host in (self.rendered_orders_host, self.current_order_layout_host):
+            for marker, expected in (("Ikke kansellert", "unknown"), ("Kansellert bestilling", "cancelled")):
+                with self.subTest(layout=host.__name__, marker=marker):
+                    def status(frame):
+                        reply = host(frame)
+                        if frame["operation"] == "get_orders":
+                            reply["result"]["orders"][0]["status_marker"] = marker
+                        else:
+                            reply["result"]["status_markers"] = [marker]
+                        return reply
+
+                    code, history = self.call({"operation": "orders"}, host=status)
+                    self.assertEqual(code, 0, history)
+                    self.assertEqual(history["result"]["orders"][0]["status"], expected)
+                    code, detail = self.call({"operation": "orders", "action": "get", "order_id": "123456"}, host=status)
+                    self.assertEqual(code, 0, detail)
+                    self.assertEqual(detail["result"]["tracking"]["status"], expected)
+
     def test_current_receipt_layout_rejects_a_different_link_or_closed_disclosure(self):
         cases = (("list", "row", {"same_archived_url": False}), ("list", "row", {"receipt_label": "Endre"}),
                  ("list", "row", {"cell_count": 7}), ("list", "result", {"table_class": "other"}),

@@ -127,7 +127,7 @@ def normalize_order_ui(result, *, limit=None, order_id=None, expected_account=No
                 order_ui_location(link["origin"], link["path"], link["query_keys"], link["hash"], identity)
             seen.add(identity)
             orders.append({**evidence, "history_scope": "rendered_last_six_months", "order_number": identity,
-                           "status": meny_order_card_status(order_ui_text(row["status_marker"], optional=True)),
+                           "status": rendered_order_status(order_ui_text(row["status_marker"], optional=True)),
                            **{key: order_ui_text(row[key], optional=True)
                               for key in ("delivery_display", "time_display", "sum_display")}})
         return {"provider": "meny", **evidence, "history_scope": "rendered_last_six_months",
@@ -147,7 +147,7 @@ def normalize_order_ui(result, *, limit=None, order_id=None, expected_account=No
                                for key, value in ARCHIVED_DETAIL_LAYOUT.items()):
         raise HouseholdError("native archived receipt fields or item disclosure changed")
     return {**detail, "receipt_layout": "archived" if archived_layout else "unclassified",
-            "status": meny_order_card_status(marker),
+            "status": rendered_order_status(marker),
             "amount_displays": rendered_order_amounts(result["amounts"], {"Betalt beløp (kort)"}),
             **rendered_order_items(result)}
 
@@ -155,16 +155,7 @@ def normalize_order_ui(result, *, limit=None, order_id=None, expected_account=No
 def normalize_current_order_ui(result, detail, marker, expected_account):
     if result["account_sha256"] != expected_account or result["order_number_label"] != "Ordrenummer":
         raise HouseholdError("the current MENY receipt account or labeled order identity changed")
-    label = " ".join((marker or "").split()).casefold().removesuffix(".")
-    if label == "bestillingen er kansellert":
-        status = "cancelled"
-    elif re.fullmatch(r"bestillingen kan oppdateres frem til (?:i dag|i morgen|mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)"
-                      r" kl\. (?:[01]\d|2[0-3]):[0-5]\d", label):
-        status = "confirmed"
-    elif label in {"kansellert", "kansellert bestilling", "levert", "kan endres", "bekreftet", "mottatt"}:
-        status = meny_order_card_status(label)
-    else:
-        status = "unknown"
+    status = rendered_order_status(marker)
     item_fields = ORDER_ITEM_FIELDS | {"item_disclosure_expanded"}
     reported = result.keys() & item_fields
     if reported == item_fields and result["item_disclosure_expanded"] is True:
@@ -176,6 +167,18 @@ def normalize_current_order_ui(result, detail, marker, expected_account):
     return {**detail, "receipt_layout": "current", "status": status,
             "delivery_display": order_ui_text(result["delivery_display"], optional=True),
             "amount_displays": rendered_order_amounts(result["amounts"], CURRENT_AMOUNT_LABELS), **items}
+
+
+def rendered_order_status(marker):
+    label = " ".join((marker or "").split()).casefold().removesuffix(".")
+    if label == "bestillingen er kansellert":
+        return "cancelled"
+    if re.fullmatch(r"bestillingen kan oppdateres frem til (?:i dag|i morgen|mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)"
+                    r" kl\. (?:[01]\d|2[0-3]):[0-5]\d", label):
+        return "confirmed"
+    if label in {"kansellert", "kansellert bestilling", "levert", "kan endres", "bekreftet", "mottatt"}:
+        return meny_order_card_status(label)
+    return "unknown"
 
 
 def rendered_order_items(result):
