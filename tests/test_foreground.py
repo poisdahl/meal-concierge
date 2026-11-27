@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -564,6 +565,17 @@ class HostedOdaForegroundTests(unittest.TestCase):
             stopped, code = execute("hosted-cart", b'{"action":"abort"}')
             self.assertEqual((code, stopped["status"], stopped["dispatch"]), (0, "aborted", False))
         self.assertEqual(recipes.read_bytes(), b"retained fixture database")
+
+    def test_staged_hosted_oda_import_works_without_client_packages(self):
+        root = self.state.resolve()
+        staged = root / "staged"
+        staged.mkdir()
+        for module in foreground.SOURCE.glob("*.py"):
+            shutil.copyfile(module, staged / module.name)
+        result = subprocess.run([sys.executable, "-I", "-B", "-c",
+                                 "import sys; sys.path.insert(0, sys.argv[1]); import hosted_oda_cart",
+                                 str(staged)], cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

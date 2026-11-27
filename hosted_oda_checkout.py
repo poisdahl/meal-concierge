@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 from checkout_identity import checkout_lines_match
 from core import DELIVERY_SLOT_KEYS, money_cents
 import hosted_oda
-from muse_browser import checkout_amounts, native_amount_minor, native_receipt_delivery_matches, text
 from oda_browser import CHECKOUT_URL, OdaBrowser, _oda_checkout_amounts_minor
+from oda_checkout_observation import checkout_amounts, native_amount_minor, receipt_delivery_matches, text
 from service_common import safe_order_id
 
 
@@ -32,7 +32,7 @@ def review_request(record):
 
 def delivery_matches(window, display, observed_at):
     slot = {field: window[field] for field in DELIVERY_SLOT_KEYS - {"selected"}}
-    return native_receipt_delivery_matches({**slot, "selected": True}, display, observed_at)
+    return receipt_delivery_matches({**slot, "selected": True}, display, hosted_oda.response_time(observed_at))
 
 
 def order_slot_matches(window, display, observed):

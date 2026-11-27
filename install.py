@@ -796,6 +796,9 @@ def stage_release(code_root, uv_binary=None):
     configure_installed_bytecode(release)
     # Check both versions AND the actual loaded modules inside this private venv.
     run(release / 'venv/bin/python', '-I', '-B', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.2.0'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
+    # Hosted cart commands are discovered before their dependencies are loaded.
+    run(release / 'venv/bin/python', '-I', '-B', '-c',
+        "import sys; sys.path.insert(0, sys.argv[1]); import hosted_oda_cart", release)
     from build_identity import create, MANIFEST
     write_json(release / MANIFEST, create(SOURCE, release, PYTHON))
     marker.unlink()
