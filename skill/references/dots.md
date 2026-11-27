@@ -72,6 +72,12 @@ Only a fresh one-shot `dispatch: true` grants the actual reservation. Finish
 the independent readback in the original account. A historical or uncertain
 receipt grants no new store action.
 
+Use the original Oda cart and selected window for `begin_checkout`. Guide
+the owner through the shop’s saved-card or Vipps payment choice. Use
+`orders.change_handoff` for an exact eligible order and let the owner
+complete the change using its verified receipt. Check a fresh merchant
+receipt before reporting any completed action.
+
 For saved-menu Oda shopping, use the discovered `menu_shopping_command`
 and the saved-menu workflow in the retained source’s `docs/dots.md`.
 Use `shopping_list.get` in the original planning home. Resolve or review
@@ -116,4 +122,7 @@ For a plan-only native schedule, name the planning household, task and chat in
 the schedule. Reuse the same installed paths on its later turn. Check the
 destination for the actual result. For the separate native MENY interface, follow its
 account binding and original receipt recovery in the Dots guide for this
-commit.
+commit. Review an exact calendar window and obtain reservation approval before
+`delivery.select`. Use the verified MENY tab for `checkout.prepare` with Vipps
+and `orders.change_handoff`. The owner completes payment or an eligible order
+change in the shop.

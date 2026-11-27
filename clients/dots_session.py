@@ -19,7 +19,7 @@ from urllib.parse import parse_qsl, urlsplit
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from clients import dots
+from clients import dots, dots_meny_delivery, dots_meny_handoff
 from core import HouseholdError, STATE_VERSION, StateStore, _flush_drive_cache, cart_summary
 from menu_planning import digest as planning_digest
 from meny import (MenyCartStoppedError, meny_order_card_status, normalize_cart_snapshot,
@@ -34,6 +34,7 @@ CORE_OPERATIONS = {"health", "setup", "profile", "recipes", "menu", "feedback",
                    "pantry", "recurring", "product_favorites", "shopping_list"}
 OWNER_FILES = (".service-owner.lock", "recipes.sqlite3.owner.lock", "state.json.owner.lock")
 LEGACY_RESET_INTENT = "native-cart-legacy-reset-intent.json"
+TAB_REBIND = "native_tab_rebind"
 MAX_LINE = 65536
 PRODUCTS_APPLY_BUDGET_SECONDS = 600
 MENY_PRODUCT_PATH = re.compile(r"/varer/[A-Za-z0-9._~%/-]+-[0-9]{4,14}")
@@ -410,6 +411,40 @@ class NativeHost:
             raise HouseholdError("original native household/browser configuration changed")
         return state.get("pending_cart_change")
 
+    def select_delivery(self, record, started):
+        review, monotonic_now = record["review"], time.monotonic()
+        expiry = min(dots.timestamp(record["expires_at"]), dots.timestamp(review["window"]["start_at"]))
+        deadline = min(self.deadline, monotonic_now + 60, started + 150,
+                       monotonic_now + (expiry - datetime.now(timezone.utc)).total_seconds())
+        if deadline <= monotonic_now:
+            raise HouseholdError("MENY delivery preflight expired before dispatch")
+        binding = record["binding"]
+        arguments = {"window": record["review"]["window"], "calendar_label": binding["calendar_label"],
+                     "address_sha256": binding["address_sha256"], "goods_sha256": binding["goods_sha256"],
+                     "original_selected": binding["selected"]}
+        frame = native_frame(self.command_id, "select_delivery_window", arguments,
+                             self.config["browser_binding"], deadline)
+        frame.update(effect="delivery_selection", review_id=record["review_id"], review_digest=record["review_digest"],
+                     stop_before_first_click_result=PRE_CLICK_STOP)
+        pending = {**record, "status": "dispatching", "dispatch_command_id": self.command_id,
+                   "call_id": frame["call_id"], "dispatch_expires_at": frame["expires_at"]}
+        with self.store.locked() as state:
+            if (state.get(dots_meny_delivery.STATE_KEY) != record
+                    or any(state.get(key) for key in dots_meny_delivery.ORDINARY)):
+                raise HouseholdError("the original MENY delivery review or cart context changed")
+            state[dots_meny_delivery.STATE_KEY] = pending
+        result, seen = native_reply(self.reader, frame, deadline)
+        if set(result) == PRE_CLICK_STOP.keys() and all(result[key] is expected for key, expected in PRE_CLICK_STOP.items()):
+            pending = {**pending, "status": "delivery_selection_not_dispatched", "observed_at": seen.isoformat(),
+                       "dispatch_outcome": "host_stopped_before_first_click"}
+        elif set(result) == {"dispatched"} and result["dispatched"] is True:
+            pending = {**pending, "status": "dispatched", "acknowledged_at": seen.isoformat()}
+        else:
+            raise HouseholdError("MENY delivery dispatch ending is unknown; reconcile without resend")
+        with self.store.locked() as state:
+            state[dots_meny_delivery.STATE_KEY] = pending
+        return pending
+
     def exchange(self, operation, arguments, *, deadline=None, write=False, observation_time=False):
         binding = self.config.get("browser_binding")
         if binding is None:
@@ -784,6 +819,17 @@ def load_bound_state(root, config_data, config, *, allow_reset_recovery=False):
         intent = legacy_reset_intent(tab_id, reset["original_pending_sha256"])
         if on_demand._read_file(intent_path, MAX_LINE) != dots.encoded(intent):
             raise ValueError("original native cart reset intent changed")
+    if TAB_REBIND in saved:
+        rebind = saved[TAB_REBIND]
+        fields = {"base_config_sha256", "previous_tab", "tab_id", "observed_at"}
+        dots.object_fields(rebind, fields, fields)
+        tab_id = observation_tab_id(rebind["tab_id"])
+        if (config.get("browser_binding") is None or rebind["base_config_sha256"] != dots.digest(config_data)
+                or observation_tab_id(rebind["previous_tab"]) == tab_id):
+            raise ValueError("original native browser rebind receipt changed")
+        dots.timestamp(rebind["observed_at"])
+        active = with_tab(config, tab_id)
+        expected = dots.digest(dots.encoded(active))
     if saved.get("native_config_sha256") != expected:
         raise ValueError("original native configuration binding changed; no replacement account/context")
     if active == config and os.path.lexists(intent_path):
@@ -986,6 +1032,41 @@ def current_account_observation(root, value, reader):
         return result
 
 
+def rebind_tab(root, value, reader):
+    fields = {"tab_id", "original_tab_retired"}
+    dots.object_fields(value, fields, fields)
+    tab_id = observation_tab_id(value["tab_id"])
+    if value["original_tab_retired"] is not True:
+        raise ValueError("verify that the original browser tab is retired before replacing it")
+    root = dots.existing_root(root)
+    on_demand._read_file(root / "command.lock", 0)
+    with ExitStack() as stack:
+        stack.enter_context(file_lock(root / "command.lock"))
+        data = on_demand._read_file(root / "config.json", MAX_LINE)
+        config = configuration(on_demand._json(data))
+        directory, saved, active = load_bound_state(root, data, config)
+        binding = active.get("browser_binding")
+        if binding is None or tab_id == binding["tab_id"]:
+            raise ValueError("use a new tab in the original MENY cloud browser")
+        if (any(saved.get(key) for key in dots_meny_delivery.ORDINARY)
+                or (saved.get(dots_meny_delivery.STATE_KEY) or {}).get("status") in dots_meny_delivery.PENDING):
+            raise HouseholdError("resolve the original MENY operation before replacing its browser tab")
+        registry = native_ownership(stack, root, config, new=False, active_tab=binding["tab_id"],
+                                    observation_tab=tab_id, reserving=True)
+        lock_core_files(stack, directory)
+        store = StateStore(directory, {"household": config["household"], "provider": "meny"})
+        _, observed = read_observation_cart(verify_observation(reader, binding, tab_id))
+        publish_native_record(registry / (tab_target(binding, tab_id) + ".json"), target_owner(root, config))
+        with store.locked() as state:
+            if state.get("native_config_sha256") != saved["native_config_sha256"]:
+                raise HouseholdError("the original MENY browser configuration changed")
+            state[TAB_REBIND] = {"base_config_sha256": dots.digest(data), "previous_tab": binding["tab_id"],
+                                 "tab_id": tab_id, "observed_at": observed}
+            state["native_config_sha256"] = dots.digest(dots.encoded(with_tab(config, tab_id)))
+            state["native_cart_writes_enabled"] = False
+        return {"status": "browser_rebound", "observed_at": observed, "writes_enabled": False, **RENDERED_UI_EVIDENCE}
+
+
 def reset_legacy_cart(root, value, reader):
     fields = {"tab_id", "legacy_reset_digest", "accept_unknown_dispatch", "original_executor_retired"}
     dots.object_fields(value, fields, fields)
@@ -1171,20 +1252,29 @@ def command(root, value, reader):
     if not isinstance(command_id, str) or str(uuid.UUID(command_id)) != command_id:
         raise ValueError("request_id must be a canonical UUID")
     request = value["request"]
+    handoff = isinstance(request, dict) and (request.get("operation"), request.get("action")) in (
+        ("checkout", "prepare"), ("orders", "change_handoff"))
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
+            and not handoff
             and not (request.get("operation") == "catalog" and request.get("action") in {"products", "recipes"})
             and not (request.get("operation") == "products" and request.get("action", "prepare") in {"prepare", "get", "apply"})
-            and not (request.get("operation") == "delivery" and request.get("action", "list") == "list")
+            and not (request.get("operation") == "delivery" and request.get("action", "list") in {
+                "list", "prepare", "select", "reconcile", "accept_current"})
             and not (request.get("operation") == "orders" and request.get("action", "list") in {"list", "get"})
             and not (request.get("operation") == "cart" and request.get("action", "get") in {
                 "get", "ensure", "clear", "reconcile_change", "reconcile", "accept_current"})):
-        raise ValueError("unsupported foreground core operation; no checkout, delivery selection or order edits")
+        raise ValueError("unsupported foreground core operation")
     if "_restore_missing_cart_digest" in request:
         raise ValueError("_restore_missing_cart_digest is internal-only")
-    if request.get("operation") == "delivery":
+    native_delivery = request.get("operation") == "delivery" and request.get("action", "list") != "list"
+    if handoff:
+        dots_meny_handoff.validate(request)
+    if native_delivery:
+        dots_meny_delivery.validate(request)
+    elif request.get("operation") == "delivery":
         dots.object_fields(request, {"operation", "action", "dates", "response_view", "view_offset",
                                     "view_limit", "view_section"}, {"operation"})
-    if request.get("operation") == "orders":
+    if request.get("operation") == "orders" and not handoff:
         action = request.get("action", "list")
         fields = {"operation", "action", "response_view", "view_offset", "view_limit", "view_section"}
         dots.object_fields(request, fields | ({"limit"} if action == "list" else {"order_id"}),
@@ -1228,7 +1318,10 @@ def command(root, value, reader):
                     raise ValueError("original command input/configuration conflicts; no replay")
             if not os.path.lexists(target / "result.json"):
                 return {"ok": False, "status": "incomplete", "message": "Original command has no ending; no replay."}
-            return on_demand._json(on_demand._read_file(target / "result.json", on_demand.MAX_MENU))
+            result = on_demand._json(on_demand._read_file(target / "result.json", on_demand.MAX_MENU))
+            if result["ok"] and (native_delivery or handoff):
+                result["result"].update(observation_scope="historical", dispatch=False)
+            return result
         # Fail missing originals BEFORE publishing a new command intent.
         _, saved, active = load_bound_state(root, config_data, config)
         if request["operation"] == "native_cart_policy":
@@ -1237,6 +1330,9 @@ def command(root, value, reader):
         if active != config and apply and not request.get("product_plan_ref"):
             raise ValueError("prepare and review a new saved product plan after resetting the legacy cart")
         write = apply or (request.get("operation") == "cart" and request.get("action") in {"ensure", "clear"})
+        if ((saved.get(dots_meny_delivery.STATE_KEY) or {}).get("status") in dots_meny_delivery.PENDING
+                and (write or request.get("operation") == "native_cart_policy" and request.get("enabled") is True)):
+            raise ValueError("reconcile the original MENY delivery selection before changing the cart")
         if write and not cart_writes_enabled(active, saved):
             raise ValueError("native cart writes are disabled; no intent or browser operation started")
         target.mkdir(mode=0o700)
@@ -1259,6 +1355,10 @@ def command(root, value, reader):
                     result = accept_native_current(root, app, active, reader, request)
                 elif request["operation"] == "native_cart_policy":
                     result = cart_policy(app.store, active, request)
+                elif native_delivery:
+                    result = dots_meny_delivery.handle(app.provider_client, app.store, request, command_id)
+                elif handoff:
+                    result = dots_meny_handoff.handle(app.provider_client, app.store, request)
                 else:
                     result = app.handle(request)
                 if write and request["operation"] == "cart" and result.get("status") == "not_dispatched":
@@ -1284,7 +1384,7 @@ def command(root, value, reader):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("init", "call", "inspect-cart", "observe", "reset-legacy-cart"))
+    parser.add_argument("action", choices=("init", "call", "inspect-cart", "observe", "reset-legacy-cart", "rebind-tab"))
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
     if args.action == "inspect-cart":
@@ -1306,6 +1406,8 @@ def execute(args, reader):
                 result = {"ok": True, "result": current_account_observation(args.root, value, reader)}
             elif args.action == "reset-legacy-cart":
                 result = {"ok": True, "result": reset_legacy_cart(args.root, value, reader)}
+            elif args.action == "rebind-tab":
+                result = {"ok": True, "result": rebind_tab(args.root, value, reader)}
             else:
                 result = command(args.root, value, reader)
         emit({"kind": "core_result", **result})

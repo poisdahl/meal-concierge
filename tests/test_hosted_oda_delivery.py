@@ -105,7 +105,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             self.step("observe_delivery", **self.observation(preflight))
         with self.assertRaisesRegex(ValueError, "approved window"):
             self.acknowledge(write, slot=selected_slot(id=516))
-        readback = self.acknowledge(write, slot={"id": 515, "cutoffTime": CUTOFF})
+        readback = self.acknowledge(write, slot=selected_slot())
         self.assertFalse(readback["dispatch"])
         with self.assertRaisesRegex(ValueError, "exact active reservation"):
             self.verify(readback, selected_slot(id=9))
@@ -175,6 +175,17 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertEqual(finished["status"], "delivery_inactive")
         self.assertEqual(finished["original_dispatch_outcome"], "unknown")
         self.assertEqual(finished["delivery_evidence_scope"], "historical_observation")
+
+    def test_checkout_handoff_preserves_owner_payment_step(self):
+        started = self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS, payment_method="vipps")
+        result = self.verify(started)
+        self.assertEqual(result["status"], "checkout_handoff")
+        self.assertEqual(result["handoff"]["requested_payment_method"], "vipps")
+        self.assertEqual(result["handoff"]["payment_status"], "unverified")
+        self.assertEqual(result["handoff"]["amount_scope"], "attached_app_cart_only")
+        self.assertFalse(result["dispatch"])
+        with self.assertRaisesRegex(ValueError, "different delivery window or account"):
+            self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS, payment_method="saved_card")
 
 
 if __name__ == "__main__":

@@ -181,6 +181,16 @@ def require_idle(state, *, target_program=None):
             write_json(ledger, {**saved, "current": None})
 
 
+def require_no_pending_write(state):
+    directory = workspace_registry(state)
+    if not (os.path.lexists(directory) or os.path.lexists(directory.parent / ANCHOR_NAME)
+            or os.path.lexists(state / BINDING_NAME)):
+        return
+    with registry(state, directory, initialize=False, allow_unbound=True) as (_, _, saved):
+        if (saved["current"] or {}).get("status") in STATUSES - FINISHED:
+            raise ValueError("reconcile the original Oda cart or delivery operation before handing off an order change")
+
+
 def now():
     return datetime.now(timezone.utc)
 
@@ -542,7 +552,8 @@ def status_view(record):
               "evidence": hosted_oda.EVIDENCE, "backend_freshness": "unverified", "dispatch": False}
     if "delivery" in record:
         delivery = record["delivery"]
-        for field in ("slot_ref", "review", "review_digest", "reservation", "reconciled_at"):
+        for field in ("slot_ref", "review", "review_digest", "reservation", "reconciled_at", "handoff",
+                      "original_cart_still_matches"):
             if field in delivery:
                 result[field] = delivery[field]
         if record["status"] == "delivery_dispatched":
@@ -730,7 +741,7 @@ def write_record(ledger, authority, record):
 def run(state, directory, operation_id, value, plugin, build):
     action = value.get("action") if isinstance(value, dict) else None
     new_cart = action in ("begin", "begin_menu")
-    new_delivery = action == "begin_delivery"
+    new_delivery = action in ("begin_delivery", "begin_checkout")
     authorizing = new_cart or new_delivery
     beginning = authorizing or action == "restore_menu"
     if action == "begin":
@@ -756,7 +767,10 @@ def run(state, directory, operation_id, value, plugin, build):
     elif action == "approve_menu":
         require_fields(value, ("action", "review_digest"))
     elif new_delivery:
-        require_fields(value, ("action", "slot_ref", "authorized_addresses"))
+        fields = ("action", "slot_ref", "authorized_addresses")
+        require_fields(value, fields + ("payment_method",) if action == "begin_checkout" else fields)
+        if action == "begin_checkout" and value["payment_method"] not in ("saved_card", "vipps"):
+            raise ValueError("Oda checkout handoff supports saved_card or vipps")
     elif action == "approve_delivery":
         require_fields(value, ("action", "review_digest"))
     elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery"):
@@ -793,6 +807,7 @@ def run(state, directory, operation_id, value, plugin, build):
             if action == "restore_menu" and record.get("restores_operation_id") != original_id:
                 raise ValueError("the operation ID belongs to a different original menu restoration")
             if new_delivery and (record.get("delivery", {}).get("slot_ref") != value["slot_ref"]
+                                 or record["delivery"].get("payment_method") != value.get("payment_method")
                                  or not hmac.compare_digest(record["account"], account)):
                 raise ValueError("the operation ID belongs to a different delivery window or account")
             return status_view(record)

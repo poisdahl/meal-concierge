@@ -43,7 +43,7 @@ or a ChatGPT Dot's cloud computer**.
 | [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
-| [ChatGPT Dots](docs/dots.md) | Cloud meal planning, recipe bank, shopping lists, and public MENY search. A signed-in MENY browser can show the cart and order history. The native household can archive an eligible legacy cart attempt and reconnect. A separate Oda household uses the attached Oda plugin for reviewed saved-menu shopping that preserves existing items, catalog search, delivery-window reads, and order tracking. |
+| [ChatGPT Dots](docs/dots.md) | Cloud meal planning, recipes and shopping lists. Separate Oda and MENY households support catalog, cart and order workflows, reviewed delivery selection, and owner handoffs in the shop for checkout and eligible order changes. See the Dots guide for the connection and verification details. |
 
 ### Requirements
 
@@ -73,6 +73,9 @@ own store connection. Delivery also needs an address in its delivery area.
 Vipps checkout needs your Norwegian mobile number in the installation's private
 configuration. Set it locally during store setup, never in chat. Approve payment
 requests in the Vipps app when prompted.
+
+On Dots, the owner completes the retailer’s checkout in the signed-in cloud
+browser or shop. Follow the [Dots store guide](docs/dots.md#store-availability).
 
 Enter passwords, payment details and required approvals in the trusted store
 or payment interface, never in chat.

@@ -77,7 +77,8 @@ The planning installation uses `provider=none`. A separate hosted Oda
 installation can search products and recipes and read the cart, delivery
 windows and orders when the official Oda plugin is callable in the Dot.
 It can also [shop a saved planning menu](#oda-saved-menu-shopping) into an
-owner-designated cart and preserve existing items. Follow the
+owner-designated cart, preserve existing items and reserve a reviewed delivery
+window in a new cart. Checkout and eligible order changes continue in the shop. Follow the
 [hosted Oda setup](#oda-cart-reads).
 The planning
 installation can also search the [public MENY catalog](#public-meny-catalog).
@@ -98,9 +99,9 @@ The pending cart guard still applies to native catalog and order `call` commands
 If the original cloud browser tab is gone, use a [read-only observation](#current-meny-reads-while-a-write-is-pending)
 to see the current cart and orders on the approved account. An older attempt
 without a dispatch record may qualify for an [owner-approved local reset](#reset-a-legacy-meny-cart-guard).
-Shopping-list matching and guarded cart changes have fixture coverage.
-Delivery reservations, checkout and existing-order changes require the full
-store runtime. Keep each store in its original private household.
+Shopping-list matching and guarded cart changes have fixture coverage. The
+native client has [reviewed home delivery selection and owner handoffs](#meny-delivery-and-owner-handoffs).
+Keep each store in its original private household.
 
 ### Public MENY catalog
 
@@ -245,8 +246,8 @@ Reuse the original UUID throughout.
 3. Only a newly emitted `dispatch: true` grants one `select_delivery_slot`
    call. Invoke its exact arguments before expiry. Send `acknowledge_delivery`
    with the original `frame_id`, `plugin_id`, `tool`, `arguments`,
-   `dispatched_at`, `observed_at`, `result_source:
-   "original_attached_mutation_response"`, `is_error` and the original
+   `dispatched_at`, `observed_at`, `result_source: "original_attached_mutation_response"`,
+   `is_error` and the original
    structured `slot` (or `null` for an actual provider error). Complete the
    returned read frame independently. Check the selection and actual cart fee
    before reporting the result. Payment, a purchase and order changes need
@@ -254,13 +255,43 @@ Reuse the original UUID throughout.
 4. After a lost reply, retain the operation and wait for the original dispatch
    frame to expire before using `recheck`. Complete only the new read frame.
    Report the observed selection separately from the original outcome. A
-   provider error or an expired original window can be reconciled by a fresh
-   unchanged cart and no selected slot. Keep an unresolved operation fenced
-   when the reads disagree. `status` returns historical evidence without a
-   new dispatch. Re-read the current cart before checkout.
+   provider error or an expired window can be reconciled by fresh same-account
+   evidence that the original slot is no longer selected. The receipt records
+   whether the cart also matches its baseline. Keep an unresolved operation
+   pending while the evidence remains uncertain. `status` returns historical
+   evidence without a new dispatch. Re-read the current cart before checkout.
 
 Oda’s app supplies account and cart observations through the host. Use the
 shop for checkout and payment. [Official Oda MCP specification](https://oda.com/mcp/manifest/)
+
+##### Oda checkout and order handoff
+
+For a checkout handoff, run `hosted-cart` with a new UUID and `begin_checkout`.
+Pass the current selected `slot_ref`, fresh `authorized_addresses` and
+`payment_method: "saved_card"` or `"vipps"`. Complete the same independent
+read frame as a delivery review. `checkout_handoff` returns the app cart,
+selected window and merchant cart link. `checkout_cart_empty` or
+`checkout_delivery_required` tells you what to resolve first. Reopen the link
+in the dedicated signed-in browser and compare the complete cart, delivery,
+prices, payment choice and payable total in the shop. Use the Dot’s private
+browser handoff for the owner to complete checkout and any bank or Vipps
+approval. The payment method is the requested choice and the total is the
+app’s cart total. Check the actual payable total and method in the shop.
+
+For an existing order, start `orders.change_handoff` with its exact `order_id`
+through `call`. Use the emitted `order_tracking` request and, for a
+`paid_and_modifiable` result, the additional `get_order` and
+`get_delivery_addresses` reads. In the dedicated browser find the exact order
+receipt and the current account’s unique visible delivery address edit
+reference. In `complete-hosted` pass the original tracking payload in
+`orders`, structured detail in `order`, projected `{ "id", "isSelected" }`
+rows in `addresses`, and `browser` with `url`, `browser_id`, `tab_id`,
+`address_edit_path`, `order_number`, integer `total_ore`, `delivery_date` and
+the visible, enabled `available_changes` among `items`, `delivery` and
+`cancel`. For an ineligible status, supply `null` for the three additional
+fields. Open the original order through the validated link for the owner to
+review and complete the change in the shop. Check that exact receipt afterward.
+If a cart or delivery operation is pending, reconcile it first.
 
 #### Oda saved-menu shopping
 
@@ -689,8 +720,8 @@ unconfirmed units remain protected baseline, and only new verified additions
 are managed. Reconcile an uncertain effect before any new restoration; never
 resend the earlier click or adopt its attribution. Read-only `delivery.list`
 uses the original account's delivery picker; it does not select a slot or
-change the address. Existing-order edits, checkout, delivery selection and
-sending are not exposed. Browser support is host-attested and requires a
+change the address. [Reviewed delivery selection and owner handoffs](#meny-delivery-and-owner-handoffs)
+use the original verified tab. Browser support is host-attested and requires a
 reviewed native operator; this CLI does not independently inspect the browser.
 
 `cart.clear` removes the whole observed cart. Use it only for an explicit
@@ -923,6 +954,84 @@ product preparation.
 If the native interface cannot preserve these guards, leave writes disabled.
 Synthetic protocol/recovery tests do not establish authenticated browser
 execution, payment support or dependable long-running availability.
+
+### MENY delivery and owner handoffs
+
+Use the original native core and its bound, signed-in cloud browser tab. Open
+the rendered picker with `delivery.list`. Select a calendar day tab only if
+it just displays its windows. Leave slot and confirmation controls untouched
+until the owner approves a specific reservation.
+
+If the original tab was retired and the original operations are settled, run
+`clients/dots_session.py rebind-tab --root ORIGINAL_CORE_ROOT`. Supply the new
+`tab_id` in the same cloud browser and `original_tab_retired: true`. Answer
+the fresh original-account and ordinary-cart observation frames as in
+[current MENY reads](#current-meny-reads-while-a-write-is-pending). A matching
+read keeps the original household and receipts and leaves item writes disabled.
+Review delivery again on the newly bound tab. If an old dispatch is unresolved,
+reconcile it before replacing the tab.
+
+1. Call `delivery.prepare` with the exact `slot_ref` from the calendar.
+   For `get_delivery_slots` follow the existing rendered picker protocol,
+   including its current selection across dates. The new `delivery_context`
+   read asks for `source_url: "https://meny.no/varer"`, `authenticated: true`,
+   `ordinary_cart: true`, `home_delivery: true`, `address_sha256` and
+   `delivery` (the current rendered window or an explicit `null`). Hash the
+   normalized visible home address locally. Preserve the same address
+   normalization on later reads. Confirm the address privately with the owner
+   if the intended saved address is unclear. The core checks the exact cart,
+   address hash, calendar label and any existing selection.
+2. Tell the owner which exact window, current address and calendar fee the
+   review covers. Explain that MENY shows a calendar estimate and checkout
+   determines the final fee. Call `delivery.select` with the original
+   `review_id`, `review_digest` and `reservation_approved: true` only after
+   the owner approves that offer. This separate approval is for one delivery
+   reservation. It does not enable item writes or checkout. Any changed
+   address, cart, window, estimate or existing selection requires a new review.
+3. Only the original `select_delivery_window` frame with
+   `effect: "delivery_selection"` grants browser interaction. Before the
+   first click recheck the original cloud browser, address hash, goods hash,
+   ordinary-cart mode and `original_selected` state. In the unique authenticated
+   picker click the exact enabled dated window with the original `calendar_label`.
+   Then verify the confirmation offers only that window, with its price and
+   home address unchanged, and click the unique enabled `Bekreft levering`
+   control before frame expiry. Stop if an extra decision or different offer
+   appears. Return `{"dispatched": true}` only after the confirmation was
+   actually issued. Use the frame’s pre-click-stop result only if no click
+   was issued and none is pending. Never use `Behold levering` for this path.
+4. Complete the new picker, header and cart reads. An observed selection is
+   a rendered browser result. A changed price is reported separately.
+   If the reply is lost, wait for the original frame to expire and call
+   `delivery.reconcile` with the original review ID and digest. It only reads.
+   When the old window is absent and the owner explicitly accepts the original
+   outcome staying unknown, use `delivery.accept_current` with the same review
+   and `owner_accepted_unknown: true`, `original_executor_stopped: true` after
+   checking that no old browser click can still run. Keep the original receipts.
+
+For checkout, `checkout.prepare` checks the current cart and selected home
+delivery. The `review_checkout` read can open the verified same-tab shop checkout
+and proceed through earlier non-binding screens. Stop before `Til betaling`.
+Verify the same address, ordinary cart quantities, window and a single enabled
+payment control with Vipps selected. Return `url`, `ordinary_cart`,
+`address_sha256`, an `items` object mapping exact product paths to integer
+quantities, and `payment` with the fields validated by
+`normalize_checkout_payment_snapshot` in `meny.py`. Supply observed fee rows
+where available. The result distinguishes the cart total from the checkout
+total and reports incomplete itemization. The owner reviews the actual
+merchant page and completes payment through private browser handoff and Vipps.
+The handoff does not establish payment or order completion.
+
+For orders, `orders.change_handoff` takes the exact `order_id` and issues
+`review_order_change` on the signed-in tab. Open the original receipt from the
+rendered order list. Supply only `source_origin`, `source_path`,
+`source_query_keys`, `source_hash`, `authenticated`, `exact_order`,
+`order_number`, `archived` and `available_changes`. Derive `exact_order` from
+the receipt’s displayed order number. For an archived receipt or a receipt
+without enabled edit controls, send an empty `available_changes` list.
+Keep any query values in the browser. The owner chooses an available change
+in the shop. Leave any edit or cancellation untouched until the owner takes
+over. Reopen the exact order receipt to verify the result. Replayed command
+receipts are historical and grant no current merchant action.
 
 ## Current MENY reads while a write is pending
 

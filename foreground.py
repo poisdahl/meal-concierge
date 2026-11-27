@@ -223,6 +223,9 @@ def hosted_call(directory, identifier, request, plugin, build, *, selection=None
             raise ValueError("request ID belongs to a different input")
         return receipt_view(record, identifier)
     frame = hosted_oda.issue(plugin, tool, arguments)
+    if request["operation"] == "orders" and request["action"] == "change_handoff":
+        frame.update(purpose="change_handoff", additional_reads=[{"tool": "get_order", "arguments": arguments},
+                     {"tool": "get_delivery_addresses", "arguments": {}}], browser_evidence_required=True)
     binding = {key: value for key, value in frame.items() if key != "arguments"}
     binding["arguments_sha256"] = hosted_oda.arguments_digest(arguments)
     record = {"format": 1, "request_id": identifier, "operation": request["operation"], "action": request["action"],
@@ -321,6 +324,7 @@ def execute(options):
                             "cart_write_command": "hosted-cart",
                             "delivery_reservation_command": "hosted-cart",
                             "delivery_reservation_start": "begin_delivery",
+                            "checkout_handoff_start": "begin_checkout",
                             "menu_shopping_command": "hosted-cart",
                             "menu_shopping_start": "begin_menu",
                             "menu_shopping_restore": "restore_menu",
@@ -333,6 +337,11 @@ def execute(options):
                         "skill": str(SOURCE / "skill/SKILL.md")}, 0
 
             if options.action == "complete-hosted":
+                receipt = read_receipt(directory, options.request_id)
+                if (receipt or {}).get("action") == "change_handoff":
+                    from hosted_oda_cart import require_no_pending_write
+
+                    require_no_pending_write(state)
                 return hosted_complete(directory, options.request_id, reply, plugin, build)
             if options.action == "hosted-cart":
                 import hosted_oda_cart
@@ -344,6 +353,10 @@ def execute(options):
 
                 if options.image_output or options.delivery_output:
                     raise ValueError("hosted Oda foreground reads have no file outputs")
+                if request["operation"] == "orders" and request["action"] == "change_handoff":
+                    from hosted_oda_cart import require_no_pending_write
+
+                    require_no_pending_write(state)
                 selection = hosted_oda.tool_request(request)
                 directory = receipt_directory(state, create=True)
                 return hosted_call(directory, options.request_id, request, plugin, build, selection=selection)

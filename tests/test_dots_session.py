@@ -12,8 +12,10 @@ import termios
 import tempfile
 import unittest
 import uuid
+from zoneinfo import ZoneInfo
 
 SOURCE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE))
 PRODUCT = "/varer/frokost/havregryn-1234567890123"
 
 
@@ -2024,6 +2026,156 @@ raise SystemExit(client.main())
             self.assertEqual(code, 1, result)
             self.assertEqual(self.files(), before)
             self.assertEqual(len(self.frames), frame_count)
+
+    def test_rebind_retired_browser_preserves_household_and_blocks_old_target(self):
+        tab = "synthetic-observation-tab"
+        before = self.state()
+        request = {"tab_id": tab, "original_tab_retired": True}
+
+        def wrong_account(frame):
+            reply = self.replacement_observation_host(frame)
+            reply["result"]["account_sha256"] = "f" * 64
+            return reply
+
+        code, rejected = self.run_session("rebind-tab", request, wrong_account)
+        self.assertEqual(code, 1, rejected)
+        self.assertEqual(self.state(), before)
+        code, rebound = self.run_session("rebind-tab", request, self.replacement_observation_host)
+        self.assertEqual(code, 0, rebound)
+        self.assertEqual(rebound["result"]["status"], "browser_rebound")
+        self.assertFalse(rebound["result"]["writes_enabled"])
+        after = self.state()
+        self.assertEqual(after["native_tab_rebind"]["previous_tab"], self.binding["tab_id"])
+        self.assertEqual(after["profile"], before["profile"])
+        self.assertNotEqual(after["native_config_sha256"], before["native_config_sha256"])
+        self.binding = {**self.binding, "tab_id": tab}
+        code, result = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, result)
+        self.assertEqual(self.frames[-1]["browser_binding"]["tab_id"], tab)
+
+    def protected_delivery_host(self, *, lose_reply=False, altered_address=False):
+        from meny import MENY_MONTH_NAMES, MENY_WEEKDAY_NAMES
+
+        tomorrow = datetime.now(ZoneInfo("Europe/Oslo")).date() + timedelta(days=1)
+        slot_ref = f"meny:{tomorrow}T09:00/12:00"
+        day = f"{tomorrow.day}. {MENY_MONTH_NAMES[tomorrow.month - 1]}"
+        window = f"{MENY_WEEKDAY_NAMES[tomorrow.weekday()]} {day} kl. 09:00-12:00"
+        price_label = f"fra 49,00 kr fra 49,00 kroner, {day} klokka 09:00 til 12:00"
+        state = {"selected": False, "writes": 0}
+
+        def host(frame):
+            operation, effect = frame["operation"], frame["effect"]
+            if operation == "get_delivery_slots":
+                result = {"authenticated": True, "ready": True, "source_url": "https://meny.no/varer",
+                          "dialog_count": 1, "slots": [{"slot_id": price_label, "display": price_label,
+                              "date": str(tomorrow), "start": "09:00", "end": "12:00", "selected": state["selected"]}]}
+            elif operation == "delivery_context":
+                result = {"source_url": "https://meny.no/varer", "authenticated": True, "ordinary_cart": True,
+                          "home_delivery": True, "address_sha256": ("d" if state.get("changed") and altered_address else "c") * 64,
+                          "delivery": window if state["selected"] else None}
+            elif operation == "get_cart":
+                result = self.snapshot()
+                if state["selected"] and self.quantity:
+                    result.update(delivery_count=1, delivery={"display": window})
+            elif operation == "select_delivery_window":
+                self.assertEqual(effect, "delivery_selection")
+                pending = self.state()["native_delivery_selection"]
+                self.assertEqual(pending["status"], "dispatching")
+                self.assertEqual(pending["call_id"], frame["call_id"])
+                self.assertEqual(pending["review_digest"], frame["review_digest"])
+                self.assertEqual(frame["arguments"]["calendar_label"], price_label)
+                state.update(selected=True, writes=state["writes"] + 1)
+                if lose_reply:
+                    return None
+                result = {"dispatched": True}
+            elif operation == "review_checkout":
+                self.assertEqual(effect, "read")
+                result = {"ordinary_cart": True, "url": "https://meny.no/kassen", "address_sha256": "c" * 64,
+                          "items": {PRODUCT: 1}, "payment": {"ready": True, "authenticated": True, "vipps_checked": True,
+                              "home_delivery": True, "submit_enabled": True, "submit_controls": 1, "total": 69.0,
+                              "delivery": window, "price_rows": [False, [["product_subtotal", 2000],
+                                  ["delivery_price", 4900], ["reserved_total", 6900]]]}}
+            else:
+                return self.host(frame)
+            return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                    "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
+
+        return slot_ref, state, host
+
+    def test_reviewed_delivery_selection_and_vipps_handoff(self):
+        self.quantity = 1
+        reference, live, host = self.protected_delivery_host()
+        code, prepared = self.call({"operation": "delivery", "action": "prepare", "slot_ref": reference}, host=host)
+        self.assertEqual(code, 0, prepared)
+        review = prepared["result"]
+        self.assertEqual(review["status"], "delivery_review")
+        self.assertFalse(review["dispatch"])
+        self.assertEqual(live["writes"], 0)
+        select_review = {"operation": "delivery", "action": "select",
+                         "reservation_approved": True,
+                         **{key: review[key] for key in ("review_id", "review_digest")}}
+        code, selected = self.call(select_review, host=host)
+        self.assertEqual(code, 0, selected)
+        self.assertEqual(selected["result"]["status"], "delivery_selection_observed")
+        self.assertEqual(selected["result"]["backend_freshness"], "unverified")
+        self.assertEqual(live["writes"], 1)
+        code, repeated = self.call(select_review, host=host)
+        self.assertEqual(code, 1, repeated)
+        code, ready = self.call({"operation": "checkout", "action": "prepare"}, host=host)
+        self.assertEqual(code, 0, ready)
+        self.assertEqual(ready["result"]["status"], "owner_checkout_ready")
+        self.assertEqual(ready["result"]["checkout_total_ore"], 6900)
+        self.assertFalse(ready["result"]["dispatch"])
+        self.assertEqual(live["writes"], 1)
+
+    def test_delivery_lost_reply_reconciles_same_selection_after_restart(self):
+        reference, live, host = self.protected_delivery_host(lose_reply=True, altered_address=True)
+        code, prepared = self.call({"operation": "delivery", "action": "prepare", "slot_ref": reference}, host=host)
+        self.assertEqual(code, 0, prepared)
+        review = prepared["result"]
+        review_ref = {key: review[key] for key in ("review_id", "review_digest")}
+        command = {"operation": "delivery", "action": "select", "reservation_approved": True, **review_ref}
+        live["changed"] = True
+        code, drifted = self.call(command, host=host)
+        self.assertEqual(code, 1, drifted)
+        self.assertIn("address, cart or calendar offer changed", drifted["error"])
+        self.assertEqual(live["writes"], 0)
+        live["changed"] = False
+        code, lost = self.call(command, host=host)
+        self.assertEqual(code, 1, lost)
+        self.assertEqual(live["writes"], 1)
+        before = len(self.frames)
+        for request in (command, self.ensure(), {"operation": "checkout", "action": "prepare"}):
+            code, refused = self.call(request, host=host)
+            self.assertEqual(code, 1, refused)
+        self.assertEqual(len(self.frames), before)
+        pending = self.state()
+        pending["native_delivery_selection"]["dispatch_expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        (self.root / "state/state.json").write_text(json.dumps(pending))
+        code, ending = self.call({"operation": "delivery", "action": "reconcile", **review_ref}, host=host)
+        self.assertEqual(code, 0, ending)
+        self.assertEqual(ending["result"]["original_dispatch_outcome"], "unknown")
+        self.assertEqual(live["writes"], 1)
+
+    def test_meny_order_handoff_checks_the_exact_eligible_receipt(self):
+        expected = "123456"
+
+        def host(frame):
+            self.assertEqual(frame["effect"], "read")
+            self.assertEqual(frame["operation"], "review_order_change")
+            return {"reply_to": frame["call_id"], "browser_binding": self.binding, "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "result": {"source_origin": "https://meny.no", "source_path": f"/trumf-profil/nettbutikk/bestilling/{expected}",
+                               "source_query_keys": [], "source_hash": "",
+                               "order_number": expected, "exact_order": True, "authenticated": True,
+                               "archived": False, "available_changes": ["items"]}}
+
+        check = {"operation": "orders", "action": "change_handoff", "order_id": expected}
+        code, good = self.call(check, host=host)
+        self.assertEqual(code, 0, good)
+        self.assertEqual(good["result"]["status"], "owner_order_change_ready")
+        self.assertFalse(good["result"]["dispatch"])
+        code, wrong = self.call({**check, "order_id": "123459"}, host=host)
+        self.assertEqual(code, 1, wrong)
 
     def test_native_target_cannot_be_adopted_by_a_second_household(self):
         def lose_write(frame):

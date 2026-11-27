@@ -8,7 +8,7 @@ import re
 import uuid
 
 from agent_views import project_agent_result
-from core import cart_contents, contains_line_controls
+from core import cart_contents, contains_line_controls, money_cents
 from product_observations import normalize_retail_product_search_batch
 from service_common import require_provider_identity, safe_order_id
 
@@ -16,7 +16,8 @@ from service_common import require_provider_identity, safe_order_id
 CART_REQUEST = {"operation": "cart", "action": "get", "response_view": "agent"}
 TOOLS = {"cart": {"get": "get_cart"}, "catalog": {"products": "product_search", "recipes": "recipe_search"},
          "delivery": {"list": "get_delivery_slots"},
-         "orders": {"list": "get_orders", "get": "get_order", "track": "order_tracking"}}
+         "orders": {"list": "get_orders", "get": "get_order", "track": "order_tracking",
+                    "change_handoff": "order_tracking"}}
 PAYLOAD_FIELDS = {tool: operation for operation, actions in TOOLS.items() for tool in actions.values()}
 CART_FIELDS = {"groups", "productQuantityCount", "totalGrossAmount", "totalBreakdown", "url"}
 CART_LINKS = {"https://oda.com/no/cart/", "https://oda.com/no/cart"}
@@ -248,12 +249,48 @@ def orders_view(tool, data, arguments):
     return {"provider": "oda", "order_id": arguments["order_number"], "status": status}
 
 
+def order_change_handoff(tracking, order, browser, addresses):
+    order_id = tracking["order_id"]
+    if tracking["status"] != "paid_and_modifiable":
+        return {**tracking, "handoff_ready": False}
+    from oda_browser import OdaBrowser
+    from hosted_oda_cart import account_fingerprint
+
+    url = OdaBrowser._order_url(order_id)
+    # Validate the address projection without storing it in a foreground receipt.
+    account_fingerprint(addresses, "0" * 32)
+    address = next(row["id"] for row in addresses if row["isSelected"])
+    fields = {"url", "browser_id", "tab_id", "address_edit_path", "order_number", "total_ore",
+              "delivery_date", "available_changes"}
+    if (not isinstance(browser, dict) or browser.keys() != fields or browser["url"] != url
+            or browser["order_number"] != order_id or browser["address_edit_path"] != f"/no/account/delivery/edit/{address}/"
+            or any(not isinstance(browser[field], str) or not 1 <= len(browser[field]) <= 150
+                   or not browser[field].isprintable() for field in ("browser_id", "tab_id"))):
+        raise ValueError("verify the exact order in the dedicated Oda browser on the same account")
+    available = browser["available_changes"]
+    if (not isinstance(available, list) or not available
+            or any(change not in ("items", "delivery", "cancel") for change in available)
+            or len(set(available)) != len(available)):
+        raise ValueError("no supported change control was verified on the original Oda order")
+    if not isinstance(order, dict) or "error" in order or order.get("isError", False) is not False:
+        raise ValueError("the original Oda order detail is unavailable")
+    detail = orders_view("get_order", order, {"order_number": order_id})
+    if (type(browser["total_ore"]) is not int or browser["total_ore"] != money_cents(order["grossAmount"])
+            or browser["delivery_date"] != order["deliveryDate"]):
+        raise ValueError("the signed-in Oda order amount or delivery date differs from the merchant order")
+    return {**tracking, "handoff_ready": True, "available_changes": available, "order": detail,
+            "order_url": url, "dispatch": False, "completion": "in_shop_with_owner"}
+
+
 def complete(frame, reply):
     common = {"read_id", "plugin_id", "tool", "observed_at"}
     tool = frame["tool"]
     field = PAYLOAD_FIELDS[tool]
     result_shapes = [common | {field, "arguments"}, common | {"error"}]
-    if field == "cart":
+    change_handoff = frame.get("purpose") == "change_handoff"
+    if change_handoff:
+        result_shapes = [common | {field, "arguments", "order", "browser", "addresses"}, common | {"error"}]
+    elif field == "cart":
         result_shapes.append(common | {field})
     if not isinstance(reply, dict) or set(reply) not in result_shapes:
         raise ValueError("expected one structured Oda read result or a hosted-unavailable ending")
@@ -283,5 +320,7 @@ def complete(frame, reply):
         result = delivery_view(data, arguments)
     else:
         result = orders_view(tool, data, arguments)
-    return {"ok": True, "status": f"{field}_read", "observed_at": observation.isoformat(),
+    if change_handoff:
+        result = order_change_handoff(result, reply["order"], reply["browser"], reply["addresses"])
+    return {"ok": True, "status": "order_change_review" if change_handoff else f"{field}_read", "observed_at": observation.isoformat(),
             "evidence": EVIDENCE, "result": result}
