@@ -47,6 +47,11 @@ ORDER_COLUMNS = ["BESTILLINGSKODE", "STATUS", "UTLEVERING", "TID", "SUM"]
 ARCHIVED_DETAIL_LAYOUT = {"source_archived": True, "order_number_label": "Ordrenummer",
                           "heading_matches_pickup_code": True, "item_table_class": "ws-order-details-cart",
                           "item_disclosure_expanded": True}
+ORDER_ITEM_FIELDS = {"item_heading", "item_count", "item_table_count", "item_columns", "item_rows_complete", "products"}
+ORDER_DETAIL_FIELDS = {"order_number", "status_markers", "amounts"}
+CURRENT_RECEIPT_FIELDS = {"account_sha256", "order_number_label", "delivery_display"}
+CURRENT_AMOUNT_LABELS = {"Sum varer", "Hjemleveringsgebyr", "Reservert beløp (kort)", "Reservert beløp",
+                         "Reservert beløp for vekt/erstatningsvarer", "Betalt beløp (kort)", "Totalsum"}
 
 
 def order_ui_text(value, *, optional=False):
@@ -57,11 +62,12 @@ def order_ui_text(value, *, optional=False):
     return value.strip()
 
 
-def order_ui_location(origin, path, query_keys, fragment, order_id=None):
-    expected = (f"/trumf-profil/nettbutikk/bestilling/{order_id}" if order_id
-                else "/trumf-profil/nettbutikk")
-    keys = ["archived", "mworderid"] if order_id else []
-    if (origin != "https://meny.no" or path != expected
+def order_ui_location(origin, path, query_keys, fragment, order_id=None, *, current=False):
+    expected = [f"/trumf-profil/nettbutikk/bestilling/{order_id}" if order_id else "/trumf-profil/nettbutikk"]
+    if current:
+        expected.append(f"/profil/nettbutikk/bestilling/{order_id}")
+    keys = ["archived", "mworderid"] if order_id and not current else []
+    if (origin != "https://meny.no" or path not in expected
             or fragment != ("" if order_id else "#/bestillinger")
             or not isinstance(query_keys, list) or any(not isinstance(key, str) for key in query_keys)
             or sorted(query_keys) != keys):
@@ -69,20 +75,27 @@ def order_ui_location(origin, path, query_keys, fragment, order_id=None):
     return {"source_origin": origin, "source_path": path, "source_query_keys": keys}
 
 
-def normalize_order_ui(result, *, limit=None, order_id=None):
+def normalize_order_ui(result, *, limit=None, order_id=None, expected_account=None):
     common = {"authenticated", "authenticated_count", "ready", "main_count", "heading_count",
               "source_origin", "source_path", "source_query_keys", "source_hash", "heading"}
-    fields = ({"table_count", "columns", "rendered_row_count", "rows_complete", "pagination_count", "orders"}
-              if order_id is None else {"order_number", "status_markers", "item_heading", "item_count",
-                                      "item_table_count", "item_columns", "item_rows_complete", "products", "amounts"})
-    layout_fields = {"table_class"} if order_id is None else ARCHIVED_DETAIL_LAYOUT.keys()
-    dots.object_fields(result, common | fields | layout_fields, common | fields)
+    current = (order_id is not None and expected_account is not None and isinstance(result, dict)
+               and result.get("source_query_keys") == [])
+    if order_id is None:
+        fields = {"table_count", "columns", "rendered_row_count", "rows_complete", "pagination_count", "orders"}
+        optional = {"table_class"}
+    elif current:
+        fields = ORDER_DETAIL_FIELDS | CURRENT_RECEIPT_FIELDS
+        optional = ORDER_ITEM_FIELDS | {"item_disclosure_expanded"}
+    else:
+        fields = ORDER_DETAIL_FIELDS | ORDER_ITEM_FIELDS
+        optional = ARCHIVED_DETAIL_LAYOUT.keys()
+    dots.object_fields(result, common | fields | optional, common | fields)
     if (result["authenticated"] is not True or result["ready"] is not True
             or any(type(result[key]) is not int or result[key] != 1
                    for key in ("authenticated_count", "main_count", "heading_count"))):
         raise HouseholdError("native rendered order scope is unavailable")
     evidence = {**RENDERED_UI_EVIDENCE, **order_ui_location(result["source_origin"], result["source_path"],
-                result["source_query_keys"], result["source_hash"], order_id)}
+                result["source_query_keys"], result["source_hash"], order_id, current=current)}
     if order_id is None:
         count, rows = result["rendered_row_count"], result["orders"]
         columns = result["columns"]
@@ -119,15 +132,55 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
                               for key in ("delivery_display", "time_display", "sum_display")}})
         return {"provider": "meny", **evidence, "history_scope": "rendered_last_six_months",
                 "rendered_row_count": count, "orders": orders}
+    markers = result["status_markers"]
+    if (result["order_number"] != order_id
+            or re.fullmatch(r"BESTILLING\s+\S+", order_ui_text(result["heading"]), re.IGNORECASE) is None
+            or not isinstance(markers, list) or len(markers) > 1):
+        raise HouseholdError("native rendered order detail is incomplete or changed")
+    marker = order_ui_text(markers[0]) if markers else None
+    detail = {"provider": "meny", **evidence, "order_number": order_id, "order_total": None, "payment_status": "unknown"}
+    if current:
+        return normalize_current_order_ui(result, detail, marker, expected_account)
+
     archived_layout = bool(result.keys() & ARCHIVED_DETAIL_LAYOUT.keys())
     if archived_layout and any(type(result.get(key)) is not type(value) or result.get(key) != value
                                for key, value in ARCHIVED_DETAIL_LAYOUT.items()):
         raise HouseholdError("native archived receipt fields or item disclosure changed")
-    products, count, markers = result["products"], result["item_count"], result["status_markers"]
-    if (result["order_number"] != order_id
-            or re.fullmatch(r"BESTILLING\s+\S+", order_ui_text(result["heading"]), re.IGNORECASE) is None
-            or not isinstance(markers, list) or len(markers) > 1
-            or type(count) is not int or not 1 <= count <= 10000
+    return {**detail, "receipt_layout": "archived" if archived_layout else "unclassified",
+            "status": meny_order_card_status(marker),
+            "amount_displays": rendered_order_amounts(result["amounts"], {"Betalt beløp (kort)"}),
+            **rendered_order_items(result)}
+
+
+def normalize_current_order_ui(result, detail, marker, expected_account):
+    if result["account_sha256"] != expected_account or result["order_number_label"] != "Ordrenummer":
+        raise HouseholdError("the current MENY receipt account or labeled order identity changed")
+    label = " ".join((marker or "").split()).casefold().removesuffix(".")
+    if label == "bestillingen er kansellert":
+        status = "cancelled"
+    elif re.fullmatch(r"bestillingen kan oppdateres frem til (?:i dag|i morgen|mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)"
+                      r" kl\. (?:[01]\d|2[0-3]):[0-5]\d", label):
+        status = "confirmed"
+    elif label in {"kansellert", "kansellert bestilling", "levert", "kan endres", "bekreftet", "mottatt"}:
+        status = meny_order_card_status(label)
+    else:
+        status = "unknown"
+    item_fields = ORDER_ITEM_FIELDS | {"item_disclosure_expanded"}
+    reported = result.keys() & item_fields
+    if reported == item_fields and result["item_disclosure_expanded"] is True:
+        items = rendered_order_items(result)
+    elif not reported and status == "cancelled":
+        items = {}
+    else:
+        raise HouseholdError("the current MENY order item disclosure is incomplete")
+    return {**detail, "receipt_layout": "current", "status": status,
+            "delivery_display": order_ui_text(result["delivery_display"], optional=True),
+            "amount_displays": rendered_order_amounts(result["amounts"], CURRENT_AMOUNT_LABELS), **items}
+
+
+def rendered_order_items(result):
+    products, count = result["products"], result["item_count"]
+    if (type(count) is not int or not 1 <= count <= 10000
             or result["item_heading"] != f"Bestilte varer ({count})"
             or type(result["item_table_count"]) is not int or result["item_table_count"] != 1
             or result["item_columns"] != ["VARE", "MENGDE"] or result["item_rows_complete"] is not True
@@ -141,14 +194,13 @@ def normalize_order_ui(result, *, limit=None, order_id=None):
         items.append({"name": order_ui_text(item["name"]), "quantity": item["quantity"]})
     if sum(item["quantity"] for item in items) != count:
         raise HouseholdError("native rendered order item count changed")
-    amounts = result["amounts"]
-    if not isinstance(amounts, dict) or set(amounts) - {"Betalt beløp (kort)"}:
+    return {"productQuantityCount": count, "products": items}
+
+
+def rendered_order_amounts(amounts, labels):
+    if not isinstance(amounts, dict) or set(amounts) - labels:
         raise HouseholdError("native rendered order amount labels changed")
-    return {"provider": "meny", **evidence, "order_number": order_id,
-            "receipt_layout": "archived" if archived_layout else "unclassified",
-            "status": meny_order_card_status(order_ui_text(markers[0])) if markers else "unknown",
-            "amount_displays": {key: order_ui_text(value) for key, value in amounts.items()},
-            "order_total": None, "payment_status": "unknown", "productQuantityCount": count, "products": items}
+    return {key: order_ui_text(value) for key, value in amounts.items()}
 
 
 def normalize_recipe_search_ui(result, query, limit, observed_at):
@@ -573,7 +625,12 @@ class NativeHost:
             order_id = arguments["order_number"]
             if not isinstance(order_id, str) or re.fullmatch(r"[0-9]{1,20}", order_id) is None:
                 raise HouseholdError("native order requires an exact decimal identity")
-            return normalize_order_ui(self.exchange(tool, arguments, deadline=deadline), order_id=order_id)
+            result, observed = self.exchange(tool, arguments, deadline=deadline, observation_time=True)
+            order = normalize_order_ui(result, order_id=order_id,
+                                       expected_account=self.config["browser_binding"]["account_sha256"])
+            if order["receipt_layout"] == "current":
+                order["observed_at"] = observed.isoformat()
+            return order
         if tool == "get_delivery_slots":
             dots.object_fields(arguments, {"delivery_date", "recovery_read"}, set())
             requested_date = arguments.get("delivery_date")
@@ -1366,6 +1423,7 @@ def command(root, value, reader):
         ("checkout", "prepare"), ("orders", "change_handoff"))
     native_edit = (isinstance(request, dict) and request.get("operation") == "orders"
                    and isinstance(request.get("action"), str) and request["action"] in dots_meny_edit.ACTIONS)
+    order_read = isinstance(request, dict) and (request.get("operation"), request.get("action")) == ("orders", "get")
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
             and not handoff
             and not native_edit
@@ -1446,6 +1504,8 @@ def command(root, value, reader):
                     result["result"].update(owner_handoff_ready=False)
                     result["result"].pop("next_control", None)
                     result["result"].pop("owner_handoff_admit_by", None)
+            if result["ok"] and order_read and result["result"]["order"].get("receipt_layout") == "current":
+                result["result"]["observation_scope"] = "historical"
             return result
         # Fail missing originals BEFORE publishing a new command intent.
         _, saved, active = load_bound_state(root, config_data, config)
@@ -1518,6 +1578,8 @@ def command(root, value, reader):
                                                  "product_plan_digest": result["apply_arguments"]["product_plan_digest"]}
                 if apply:
                     app._finalize_native_managed_apply(command_id)
+                if order_read and result["order"].get("receipt_layout") == "current":
+                    result["observation_scope"] = "fresh"
                 output = {"ok": True, "result": result}
         except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
             output = {"ok": False, "error": str(exc)}

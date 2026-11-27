@@ -87,14 +87,12 @@ Full MENY shopping uses the shared store runtime with a working dedicated browse
 The separate [MENY native-browser interface](#native-browser-requests-over-stdinstdout)
 supports native-browser reads and guarded cart changes where an operator can
 verify the owner-approved account and tab. It covers catalog search, cart,
-saved-menu product planning, delivery-window reads and rendered order reads.
-On the test Dot, signed-in recipe and product searches, ordinary cart and
-order reads, and delivery-window reads passed. A one-package add passed an
-independent cart read. During the installed removal, the operator's scoped
-trace showed a pre-click stop at the cart readiness check. The original
-command retained a generic error and its dispatch outcome stayed unknown.
-The operator then removed the test unit once in the signed-in browser. A
-fresh installed read confirmed the empty baseline.
+saved-menu product planning, delivery-window reads and selection, and rendered
+current and archived order reads. On the test Dot, independent reads verified
+a single-package add and removal and a reviewed saved-menu cart update and
+restoration. The test Dot also verified an [owner-submitted order amendment](#review-and-verify-an-item-addition-to-a-meny-order)
+against the same receipt after a tab replacement. An earlier interrupted cart
+operation kept its original journal through recovery.
 The pending cart guard still applies to native catalog and order `call` commands.
 If the original cloud browser tab is gone, use a [read-only observation](#current-meny-reads-while-a-write-is-pending)
 to see the current cart and orders on the approved account. An older attempt
@@ -1465,10 +1463,9 @@ The host requests are `get_orders` with `page:1` and `size`, or `get_order` with
 
 These are **rendered UI observations**, qualified everywhere as
 `evidence_kind:"host_attested_rendered_ui"` and `backend_freshness:"unverified"`.
-They do not replace MENY's network-backed getters or establish current backend
-status, payment completion, checkout or cancellation authority. Derived tracking
-reports the displayed status with the same qualification. No protected order
-action is admitted by the native facade.
+Derived tracking reports the displayed status with the same qualification.
+Use these commands to observe the merchant receipt. Use the separately
+documented handoffs for protected actions and payment.
 
 Each host result requires `authenticated:true`, `authenticated_count:1`,
 `ready:true`, `main_count:1`, `heading_count:1`, the observed `heading`, and
@@ -1476,10 +1473,9 @@ Each host result requires `authenticated:true`, `authenticated_count:1`,
 actual URL's origin/path and query **key inventory**; keep opaque query values
 private. Never reconstruct a navigation or write URL from returned evidence.
 History requires origin `https://meny.no`, path `/trumf-profil/nettbutikk`, hash
-`#/bestillinger` and no query. Detail and row links require the exact
-`/trumf-profil/nettbutikk/bestilling/<order_number>` pathname, no hash, and the
-observed `archived` and `mworderid` query keys. This contract covers the archived
-receipt shape actually observed; other route shapes remain unsupported.
+`#/bestillinger` and no query. History row links and archived detail require
+the exact `/trumf-profil/nettbutikk/bestilling/<order_number>` pathname, no
+hash, and the observed `archived` and `mworderid` query keys.
 
 History requires one visible table (`table_count:1`), `pagination_count:0`,
 positive `rendered_row_count`, `rows_complete:true`, and the first
@@ -1502,7 +1498,7 @@ Each row includes the `order_number` from the detail path, `links` with
 The result describes the displayed window for the last six months. Empty
 history remains blocked until a verified visible empty-state contract exists.
 
-Detail requires the requested `order_number` independently observed under the
+Archived detail requires the requested `order_number` independently observed under the
 `Ordrenummer` label. Read the archived receipt via the verified read-only link.
 Expand the unique visible `Bestilte varer` disclosure once if collapsed, then
 reread the same bound view. Report `source_archived:true`,
@@ -1527,6 +1523,32 @@ derived tracking, agent sections and paged item envelopes.
 Order detail reports `receipt_layout:"archived"` when the host supplied all
 current archived-layout observations. Legacy-shaped detail returns
 `receipt_layout:"unclassified"` with the same unverified backend status.
+
+For a current receipt, open the exact signed-in order on its canonical
+`/trumf-profil/nettbutikk/bestilling/<order_number>` or
+`/profil/nettbutikk/bestilling/<order_number>` path with no query or fragment.
+Verify the original signed-in account and include its locally observed
+`account_sha256`. Check the `BESTILLING <code>` heading and independently
+match `order_number` from `order_number_label:"Ordrenummer"`. Supply the
+same complete item fields as above with `item_disclosure_expanded:true`,
+and the raw `delivery_display` or `null` if unavailable. Preserve a visible
+date or time range as displayed. Report only the recognized, unique `amounts`
+labels from the exact receipt, including `Sum varer`, `Hjemleveringsgebyr`,
+`Reservert beløp (kort)`, `Reservert beløp`,
+`Reservert beløp for vekt/erstatningsvarer`, `Betalt beløp (kort)` and
+`Totalsum`. These displays report separate merchant observations and leave
+the payment status and normalized order total unknown.
+
+Use the dedicated visible status line, or an empty `status_markers` list
+when absent. `Bestillingen er kansellert` is affirmative cancellation.
+An order page revisited later can omit that message even if it appeared
+immediately after cancellation. Missing or unfamiliar status remains unknown.
+If an explicit cancelled receipt has no item disclosure at all, omit the
+entire item field group and report the items as unavailable. A fresh current
+detail reports `receipt_layout:"current"`, the host-observed timestamp and
+`observation_scope:"fresh"`. Reusing that command UUID returns the original
+timestamp with `observation_scope:"historical"`. Use a new UUID and read
+the exact receipt again for a fresh result.
 
 ## Capability limits
 

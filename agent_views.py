@@ -854,7 +854,7 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
 
 
 ORDER_EVIDENCE_FIELDS = ("evidence_kind", "backend_freshness", "source_origin", "source_path", "source_query_keys", "receipt_layout",
-                         "history_scope", "rendered_row_count")
+                         "history_scope", "rendered_row_count", "observed_at")
 
 
 def _order_row(order: Any, *, exact: bool, tracking: Any = None) -> dict[str, Any]:

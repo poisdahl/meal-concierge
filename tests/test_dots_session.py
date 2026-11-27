@@ -1886,6 +1886,90 @@ raise SystemExit(client.main())
         self.assertEqual(detail["result"]["order"]["payment_status"], "unknown")
         self.assertEqual(self.writes, 0)
 
+    def canonical_order_layout_host(self, frame):
+        reply = self.rendered_orders_host(frame)
+        reply["result"].update(source_query_keys=[], account_sha256=self.binding["account_sha256"],
+                               order_number_label="Ordrenummer", item_disclosure_expanded=True,
+                               status_markers=["Bestillingen kan oppdateres frem til mandag kl. 20:00"],
+                               delivery_display="tirsdag 8. des. kl. 08:00 - 12:00",
+                               amounts={"Sum varer": "80,00 kr", "Reservert beløp": "125,00 kr"})
+        return reply
+
+    def test_canonical_meny_order_is_current_read_only_and_replays_as_historical(self):
+        request = {"operation": "orders", "action": "get", "order_id": "123456", "response_view": "agent"}
+        command_id = str(uuid.uuid4())
+        before = self.state()
+        code, result = self.call(request, command_id, self.canonical_order_layout_host)
+        self.assertEqual(code, 0, result)
+        view = result["result"]
+        self.assertEqual(view["observation_scope"], "fresh")
+        self.assertEqual(view["order"]["receipt_layout"], "current")
+        self.assertEqual(view["order"]["tracking"]["status"], "confirmed")
+        self.assertEqual(view["order"]["tracking"]["backend_freshness"], "unverified")
+        self.assertEqual(view["order"]["amount_displays"]["Reservert beløp"], "125,00 kr")
+        self.assertEqual(view["order"]["payment_status"], "unknown")
+        self.assertIsNone(view["order"]["order_total"])
+        self.assertEqual(view["order"]["delivery_display"], "tirsdag 8. des. kl. 08:00 - 12:00")
+        self.assertEqual(view["order"]["observed_at"], view["order_items"]["observed_at"])
+        self.assertNotIn("account_sha256", view["order"])
+        code, cached = self.call(request, command_id, self.canonical_order_layout_host)
+        self.assertEqual(code, 0, cached)
+        self.assertEqual(cached["result"], {**view, "observation_scope": "historical"})
+        self.assertEqual([frame["operation"] for frame in self.frames], ["get_order"])
+        self.assertEqual(self.state(), before)
+
+    def test_canonical_meny_order_rejects_wrong_account_route_label_or_incomplete_items(self):
+        request = {"operation": "orders", "action": "get", "order_id": "123456"}
+        cases = ({"account_sha256": "f" * 64}, {"order_number": "987654"},
+                 {"source_path": "/profil/nettbutikk/bestilling/987654"},
+                 {"source_query_keys": ["archived"]}, {"order_number_label": "Bestillingskode"},
+                 {"item_rows_complete": False}, {"item_disclosure_expanded": False},
+                 {"status_markers": ["Bekreftet", "Bestillingen er kansellert"]})
+        for changes in cases:
+            with self.subTest(changes=changes):
+                def changed(frame):
+                    reply = self.canonical_order_layout_host(frame)
+                    reply["result"].update(changes)
+                    return reply
+
+                code, refused = self.call(request, host=changed)
+                self.assertEqual(code, 1, refused)
+        self.assertEqual(self.writes, 0)
+
+    def test_canonical_meny_cancellation_needs_a_positive_status_and_preserves_unknown_items(self):
+        request = {"operation": "orders", "action": "get", "order_id": "123456", "response_view": "agent"}
+
+        def receipt(frame):
+            reply = self.canonical_order_layout_host(frame)
+            reply["result"].update(status_markers=markers, source_path="/profil/nettbutikk/bestilling/123456")
+            return reply
+
+        for markers in ([], ["Ikke kansellert"], ["Kanseller bestilling"]):
+            code, result = self.call(request, host=receipt)
+            self.assertEqual(code, 0, result)
+            self.assertEqual(result["result"]["order"]["observed_status"], "unknown")
+            self.assertIsNone(result["result"]["order"]["cancelled"])
+
+        def confirmation(frame):
+            reply = receipt(frame)
+            fields = ("item_heading", "item_count", "item_table_count", "item_columns", "item_rows_complete",
+                      "products", "item_disclosure_expanded")
+            for key in fields:
+                del reply["result"][key]
+            return reply
+
+        code, missing = self.call(request, host=confirmation)
+        self.assertEqual(code, 1, missing)
+        markers = ["Bestillingen er kansellert."]
+        code, cancelled = self.call(request, host=confirmation)
+        self.assertEqual(code, 0, cancelled)
+        view = cancelled["result"]
+        self.assertTrue(view["order"]["cancelled"])
+        self.assertEqual(view["order"]["tracking"]["status"], "cancelled")
+        self.assertEqual(view["order"]["payment_status"], "unknown")
+        self.assertFalse(view["order_items"]["available"])
+        self.assertIsNone(view["order_items"]["total"])
+
     def test_current_receipt_layout_rejects_a_different_link_or_closed_disclosure(self):
         cases = (("list", "row", {"same_archived_url": False}), ("list", "row", {"receipt_label": "Endre"}),
                  ("list", "row", {"cell_count": 7}), ("list", "result", {"table_class": "other"}),

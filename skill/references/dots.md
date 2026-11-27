@@ -28,6 +28,12 @@ When discovery lists the public MENY catalog, use `catalog.products` or
 public catalog figures. Use a separately verified signed-in store connection
 for stock, cart actions and checkout.
 
+Use native MENY `orders.get` with the exact order number for a current or
+archived receipt. For a current receipt, use the signed-in canonical path and
+the displayed `Ordrenummer`. Read the dedicated status and the expanded
+goods. An affirmative cancellation can verify the displayed status. An absent
+marker leaves it unknown. A fresh observation uses a new command UUID.
+
 For current MENY cart or order reads while an original write is pending, use
 `clients/dots_session.py observe` as documented in `docs/dots.md`. Work in a
 separate tab on the same verified cloud browser and account. Follow the emitted
