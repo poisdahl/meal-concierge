@@ -94,8 +94,8 @@ showed the original cart contents. The operation stayed pending. Parser
 fixtures cover the current history table and archived receipt layout. The
 pending cart guard still applies to native catalog and order `call` commands.
 If the original cloud browser tab is gone, use a [read-only observation](#current-meny-reads-while-a-write-is-pending)
-to see the current cart and orders on the approved account. Reconciliation
-still requires the original dispatch ending and a fresh bound read.
+to see the current cart and orders on the approved account. An older attempt
+without a dispatch record may qualify for an [owner-approved local reset](#reset-a-legacy-meny-cart-guard).
 Shopping-list matching and guarded cart changes have fixture coverage.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
@@ -673,7 +673,8 @@ use the original household's receipt-bearing `call` interface:
 {"request_id":"a new canonical UUID","request":{"operation":"native_cart_policy","action":"set","enabled":true,"browser_binding":{"origin":"https://meny.no","browser_id":"original cloud browser","tab_id":"original cloud tab","account_sha256":"original SHA256","cart_context_sha256":"original SHA256"}}}
 ```
 
-Supply the exact original binding. This changes only the write policy in the
+Supply the current approved binding. Use the replacement tab ID after an
+approved legacy reset. This changes only the write policy in the
 original configuration-bound state, under the existing root, target and state
 locks. It preserves configuration, registry ownership and prior receipts.
 Enabling stops while a cart change is pending; reconcile that original change
@@ -834,7 +835,8 @@ household and use `reconcile_change` with a fresh actual read; never resend
 the write frame or translate lost replies into a definite pre-click stop.
 An unchanged cart cannot release a native write fence. Retain the original
 journal and use the original native dispatch ending and bound readback for
-recovery. If the core saved that ending before its caller lost the command
+recovery. Older ordinary cart attempts may qualify for the
+[local reset below](#reset-a-legacy-meny-cart-guard). If the core saved that ending before its caller lost the command
 result, read-only reconciliation can still verify the cart. Use
 `python -I -B clients/dots_session.py inspect-cart --root ABSOLUTE_ORIGINAL_ROOT`
 from the selected source to see redacted evidence without opening a retailer
@@ -910,6 +912,45 @@ the household, receipts, the pending operation and write policy. Use the
 original commands and evidence for reconciliation. A current cart, including one that matches the
 original quantities, cannot establish the old dispatch ending. The new tab's
 result carries no reconciliation digest.
+
+## Reset a legacy MENY cart guard
+
+Use this only with the household owner's approval for the specific old
+ordinary cart attempt. Keep its dispatch outcome recorded as unknown. Verify
+that the earlier reply window expired, its executor has stopped and the old
+tab has been retired. Use a separate tab in the same cloud browser and keep
+the original household, configuration, command receipts and target registry.
+
+Run `inspect-cart` against the original root using the reviewed source. It
+includes `legacy_reset_digest` when the local journal is eligible. Use that
+exact value in `reset-legacy-cart --root ABSOLUTE_ORIGINAL_ROOT`. The command
+uses the same `core_ready` and stdin/stdout exchange as `observe`.
+
+```json
+{"tab_id":"actual replacement tab","legacy_reset_digest":"exact digest from inspect-cart","accept_unknown_dispatch":true,"original_executor_retired":true}
+```
+
+Answer the two read frames using the current-account observation protocol
+above. Verify the account and ordinary cart again in the replacement tab.
+The reset requires a complete empty rendered cart with zero total, no selected
+delivery and no order edit. If any evidence is missing or if the original
+attempt has a saved dispatch frame or acknowledgement, keep the guard in place.
+
+`archived_unknown` releases the old local guard and records the original
+pending operation privately. The old command UUID still returns its saved
+outcome or incomplete status. The replacement tab becomes the approved tab
+for `call`. Older source versions stop on the changed binding. If the reset
+is interrupted or its result is lost, use the exact same input and tab.
+`inspect-cart` can report `legacy_reset_status:"archived_unknown"` after
+publication. Keep the reset intent file with the household and original receipts.
+
+Run a fresh `cart.get` and `orders.list` through `call`. Cart writes stay
+disabled until explicitly authorized for the replacement binding. The reset
+retires local cart allocations, delivery selection and active product
+approvals. Saved recipes and menus stay available for a fresh product plan.
+The reset uses read-only merchant requests.
+
+## MENY rendered order evidence
 
 The shared MENY runtime can observe browser-generated order search and detail
 responses when its browser exposes request history and response bodies. The

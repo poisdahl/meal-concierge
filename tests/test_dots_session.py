@@ -1162,13 +1162,18 @@ raise SystemExit(dots_session.main())
                            item_table_class="ws-order-details-cart", item_disclosure_expanded=True)
         return response
 
-    def prepare_legacy_pending_cart(self):
+    def prepare_legacy_pending_cart(self, *, command_id=None, dispatched=False, retain_dispatch=False):
         def lose_reply(frame):
-            return None if frame["operation"] == "manipulate_cart" else self.host(frame)
+            if frame["operation"] == "manipulate_cart":
+                if dispatched:
+                    self.host(frame)
+                return None
+            return self.host(frame)
 
-        code, lost = self.call(self.ensure(), host=lose_reply)
+        code, lost = self.call(self.ensure(), command_id, host=lose_reply)
         self.assertEqual(code, 1, lost)
-        shutil.rmtree(self.root / "state/native-cart-dispatch")
+        if not retain_dispatch:
+            shutil.rmtree(self.root / "state/native-cart-dispatch")
         code, disabled = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
                                     "browser_binding": self.binding})
         self.assertEqual(code, 0, disabled)
@@ -1205,7 +1210,8 @@ raise SystemExit(dots_session.main())
     def test_replacement_observation_preserves_the_original_cart_and_orders_guard(self):
         status = self.prepare_legacy_pending_cart()
         self.assertEqual(status, {"pending": True, "writes_enabled": False,
-                                  "dispatch_evidence": "no_frame_record", "core_acknowledged": False})
+                                  "dispatch_evidence": "no_frame_record", "core_acknowledged": False,
+                                  "legacy_reset_digest": status["legacy_reset_digest"]})
         before = self.files()
         registry = self.home / ".meal-concierge-dots-targets"
         owners = {path.name: path.read_bytes() for path in registry.glob("*.json")}
@@ -1220,7 +1226,8 @@ raise SystemExit(dots_session.main())
         self.assertEqual(result["first_receipt"]["order_number"], result["history"]["orders"][0]["order_number"])
         self.assertEqual(result["first_receipt"]["receipt_layout"], "archived")
         for observation in (cart["result"], result):
-            self.assertEqual(observation["pending_cart_guard"], status)
+            self.assertEqual(observation["pending_cart_guard"],
+                             {key: value for key, value in status.items() if key != "legacy_reset_digest"})
             self.assertEqual(observation["observation_scope"], "current_account")
             self.assertEqual(observation["backend_freshness"], "unverified")
         self.assertEqual([frame["operation"] for frame in self.frames],
@@ -1233,6 +1240,226 @@ raise SystemExit(dots_session.main())
         self.assertEqual(code, 1, denied)
         self.assertIn("a cart write is uncertain", denied["error"])
         self.assertEqual(self.writes, 0)
+
+    def reset_request(self, status):
+        return {"tab_id": "synthetic-observation-tab", "legacy_reset_digest": status["legacy_reset_digest"],
+                "accept_unknown_dispatch": True, "original_executor_retired": True}
+
+    def run_reset(self, request, host=None, **kwargs):
+        return self.run_session("reset-legacy-cart", request, host or self.replacement_observation_host, **kwargs)
+
+    def test_legacy_reset_reopens_household_and_archives_a_dispatched_lost_reply(self):
+        old_apply = self.managed_request()
+        old_product_plan_ref = self.prepared_ref
+        old_id = str(uuid.uuid4())
+        status = self.prepare_legacy_pending_cart(command_id=old_id, dispatched=True)
+        self.assertEqual((self.quantity, self.writes), (1, 1))
+        self.quantity = 0  # A later cart change makes the current empty cart ambiguous about the old attempt.
+        old_state = self.state()
+        before = self.files()
+        registry = self.home / ".meal-concierge-dots-targets"
+        owners = {path.name: path.read_bytes() for path in registry.glob("*.json")}
+        request = self.reset_request(status)
+        old_policy_id = str(uuid.uuid4())
+        old_policy = {"operation": "native_cart_policy", "action": "set", "enabled": False,
+                      "browser_binding": self.binding}
+        _, old_policy_result = self.call(old_policy, old_policy_id)
+        incomplete_id = str(uuid.uuid4())
+        self.call({"operation": "health"}, incomplete_id)
+        (self.root / "calls" / incomplete_id / "result.json").unlink()
+        code, reset = self.run_reset(request)
+        self.assertEqual(code, 0, reset)
+        self.assertEqual(reset["result"]["status"], "archived_unknown")
+        self.assertEqual(reset["result"]["historical_dispatch"], "unknown")
+        self.assertFalse(reset["result"]["writes_enabled_at_reset"])
+        self.assertEqual([frame["operation"] for frame in self.frames], ["verify_observation_context", "get_cart"])
+        self.assertEqual(self.writes, 1)
+        after = self.state()
+        self.assertNotIn("pending_cart_change", after)
+        self.assertEqual(after["native_cart_legacy_reset"]["pending_cart_change"], old_state["pending_cart_change"])
+        self.assertNotEqual(after["native_config_sha256"], old_state["native_config_sha256"])
+        self.assertNotEqual(after["product_selection_generation"], old_state.get("product_selection_generation"))
+        self.assertEqual(after["menu"], old_state["menu"])
+        self.assertEqual(after["profile"], old_state["profile"])
+        self.assertNotIn(self.prepared_ref, after["menu_planning"]["prepared"])
+        current = self.files()
+        for name, data in before.items():
+            if name != "state/state.json":
+                self.assertEqual(current[name], data, name)
+        current_owners = {path.name: path.read_bytes() for path in registry.glob("*.json")}
+        self.assertEqual(len(current_owners), len(owners) + 1)
+        self.assertEqual({name: current_owners[name] for name in owners}, owners)
+        self.frames.clear()
+        self.assertEqual(self.call(old_policy, old_policy_id), (0, old_policy_result))
+        old_result = json.loads(before[f"calls/{old_id}/result.json"])
+        self.assertEqual(self.call(self.ensure(), old_id), (1, {"kind": "core_result", **old_result}))
+        self.assertEqual(self.call({"operation": "health"}, incomplete_id)[1]["status"], "incomplete")
+        self.assertEqual(self.run_reset(request)[1]["result"], {**reset["result"], "idempotent": True})
+        self.assertEqual(self.run_reset({**request, "tab_id": "another-tab"})[0], 1)
+        self.assertEqual(self.call({**old_policy, "enabled": True})[0], 1)
+        self.assertEqual(self.call(self.ensure())[0], 1)
+        for operation_id in (None, old_state["pending_cart_change"]["operation_id"]):
+            cleanup = {"operation": "cart", "action": "reconcile_change"}
+            if operation_id:
+                cleanup["operation_id"] = operation_id
+            code, unknown = self.call(cleanup)
+            self.assertEqual(code, 0, unknown)
+            self.assertEqual(unknown["result"], {"reconciled": False, "cart_write_pending": False,
+                                                "status": "archived_unknown", "historical_dispatch": "unknown"})
+        self.assertEqual(self.frames, [])
+        self.binding = {**self.binding, "tab_id": request["tab_id"]}
+        cart_command = str(uuid.uuid4())
+        cart_request = {"operation": "cart", "action": "get"}
+        code, empty = self.call(cart_request, cart_command)
+        self.assertEqual(code, 0, empty)
+        self.assertEqual(empty["result"]["count"], 0)
+        self.frames.clear()
+        self.assertEqual(self.call(cart_request, cart_command), (0, empty))
+        self.assertEqual(self.call({**old_policy, "enabled": True, "browser_binding": self.binding})[0], 0)
+        self.assertEqual(self.call(old_apply)[0], 1)
+        self.assertEqual(self.call({"operation": "products", "action": "apply", "cart_change_requested": True,
+                                    "product_plan_ref": old_product_plan_ref,
+                                    "product_plan_digest": old_apply["product_plan_digest"]})[0], 1)
+        self.assertEqual(self.frames, [])
+        menu = after["menu"]
+        prepare = {"operation": "products", "action": "prepare",
+                   "menu_ref": {key: menu[key] for key in ("menu_id", "revision", "digest")},
+                   "candidate_approvals": old_apply["candidate_approvals"]}
+        code, fresh = self.call(prepare)
+        self.assertEqual(code, 0, fresh)
+        code, applied = self.call({"operation": "products", **fresh["result"]["apply_arguments"],
+                                   "cart_change_requested": True})
+        self.assertEqual(code, 0, applied)
+        self.assertTrue(applied["result"]["applied"])
+        self.assertEqual((self.quantity, self.writes), (3, 3))
+
+    def test_legacy_reset_refuses_unsafe_baselines_without_removing_the_guard(self):
+        status = self.prepare_legacy_pending_cart()
+        request = self.reset_request(status)
+        for changed in ({"legacy_reset_digest": "0" * 64}, {"accept_unknown_dispatch": False},
+                        {"original_executor_retired": False}, {"tab_id": self.binding["tab_id"]}):
+            self.assertEqual(self.run_reset({**request, **changed})[0], 1)
+        self.assertEqual(self.frames, [])
+        before = self.files()
+        for unsafe in ("wrong_account", "expired", "changed_tab", "edit", "delivery", "nonempty"):
+            with self.subTest(unsafe=unsafe):
+                self.quantity = int(unsafe == "nonempty")
+
+                def host(frame):
+                    reply = self.replacement_observation_host(frame)
+                    if frame["operation"] == "get_cart":
+                        observation = reply["result"]["observation"]
+                        if unsafe == "delivery":
+                            observation["snapshot"].update(delivery_count=1, delivery={"display": "I dag, 18:00 - 20:00"})
+                        elif unsafe == "edit":
+                            observation["new_cart"] = False
+                        elif unsafe == "expired":
+                            reply["observed_at"] = frame["expires_at"]
+                        elif unsafe == "changed_tab":
+                            reply["browser_binding"] = self.binding
+                        elif unsafe == "wrong_account":
+                            reply["result"]["verified_context"]["account_sha256"] = "c" * 64
+                    return reply
+
+                self.assertEqual(self.run_reset(request, host)[0], 1)
+                self.assertEqual(self.files(), before)
+                self.assertEqual(self.inspect_cart(), status)
+        self.assertEqual(self.writes, 0)
+
+    def test_legacy_reset_retries_before_and_after_atomic_publication(self):
+        self.prepare_legacy_pending_cart()
+        for failure in ("owner_link", "before_state", "after_state"):
+            with self.subTest(failure=failure):
+                status = self.inspect_cart()
+                request = self.reset_request(status)
+                before = self.state()
+                launch_code = f"""
+import sys
+sys.path.insert(0, {str(SOURCE)!r})
+import core
+from clients import dots_session as client
+original = core._atomic_json
+original_link = client.os.link
+failure = {failure!r}
+def link(source, target, **kwargs):
+    if failure == 'owner_link' and target.parent.name == '.meal-concierge-dots-targets':
+        raise OSError('simulated interruption during owner publication')
+    return original_link(source, target, **kwargs)
+def interrupted(path, value):
+    if failure != 'owner_link' and path.name == 'state.json' and 'native_cart_legacy_reset' in value:
+        if failure == 'after_state':
+            original(path, value)
+        raise OSError('simulated interruption during state publication')
+    original(path, value)
+client.os.link = link
+core._atomic_json = interrupted
+raise SystemExit(client.main())
+"""
+                code, stopped = self.run_reset(request, launch_code=launch_code)
+                self.assertEqual(code, 1, stopped)
+                self.assertIn("simulated interruption", stopped["error"])
+                if failure != "after_state":
+                    self.assertEqual(self.state(), before)
+                    self.assertEqual(self.inspect_cart(), status)
+                    self.frames.clear()
+                    self.assertEqual(self.run_reset({**request, "tab_id": "different-tab"})[0], 1)
+                    self.assertEqual(self.frames, [])
+                else:
+                    self.frames.clear()
+                    code, retry = self.run_reset(request)
+                    self.assertEqual(code, 0, retry)
+                    self.assertTrue(retry["result"]["idempotent"])
+                    self.assertEqual(self.frames, [])
+        self.assertEqual(self.writes, 0)
+
+    def test_legacy_reset_detects_missing_intent_or_explicit_write_policy(self):
+        request = self.reset_request(self.prepare_legacy_pending_cart())
+        self.assertEqual(self.run_reset(request)[0], 0)
+        self.frames.clear()
+        cart = {"operation": "cart", "action": "get"}
+        state_file = self.root / "state" / "state.json"
+        saved = self.state()
+        state_file.write_text(json.dumps({key: value for key, value in saved.items()
+                                          if key != "native_cart_writes_enabled"}))
+        self.assertEqual(self.call(cart)[0], 1)
+        state_file.write_text(json.dumps(saved))
+        (self.root / "state" / "native-cart-legacy-reset-intent.json").unlink()
+        self.assertEqual(self.call(cart)[0], 1)
+        self.assertEqual(self.run_reset(request)[0], 1)
+        self.assertEqual(self.frames, [])
+
+    def test_legacy_reset_refuses_dispatch_evidence_and_an_owned_replacement(self):
+        status = self.prepare_legacy_pending_cart(retain_dispatch=True)
+        self.assertEqual(status["dispatch_evidence"], "frame_prepared")
+        self.assertNotIn("legacy_reset_digest", status)
+        saved = self.state()
+        attempt, = (self.root / "state" / "native-cart-dispatch").iterdir()
+        (attempt / "frame.json").unlink()
+        (attempt / "ack.json").write_text("{}")
+        self.assertEqual(self.inspect_cart()["dispatch_evidence"], "no_frame_record")
+        self.assertNotIn("legacy_reset_digest", self.inspect_cart())
+        shutil.rmtree(attempt.parent)
+        request = self.reset_request(self.inspect_cart())
+        attempt.mkdir(parents=True, mode=0o700)
+        (attempt / "ack.json").write_text("{}")
+        self.assertEqual(self.run_reset(request)[0], 1)
+        shutil.rmtree(attempt.parent)
+        state_file = self.root / "state" / "state.json"
+        state_file.write_text(json.dumps({**saved, "pending_checkout": {"status": "awaiting_confirmation"}}))
+        self.assertEqual(self.run_reset(request)[0], 1)
+        state_file.write_text(json.dumps(saved))
+        root = self.root
+        self.root = root.with_name("other-core")
+        try:
+            binding = {**self.binding, "tab_id": request["tab_id"], "account_sha256": "c" * 64}
+            self.assertEqual(self.run_session("init", {**self.config, "browser_binding": binding})[0], 0)
+        finally:
+            self.root = root
+        code, rejected = self.run_reset(request)
+        self.assertEqual(code, 1, rejected)
+        self.assertIn("already belongs", rejected["error"])
+        self.assertEqual(self.frames, [])
+        self.assertEqual(self.state(), saved)
 
     def test_replacement_observation_rejects_privilege_and_context_drift(self):
         cart = {"operation": "cart", "action": "get"}
