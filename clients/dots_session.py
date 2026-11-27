@@ -1097,11 +1097,14 @@ def accept_native_current(root, app, config, reader, request):
     record = on_demand._json(on_demand._read_file(calls / "intent.json", MAX_LINE))
     original = record["input"]["request"]
     receipt = on_demand._json(on_demand._read_file(calls / "result.json", on_demand.MAX_MENU))
+    # Application strips projection fields before the core journals cart input.
+    projection = {"response_view", "view_offset", "view_limit", "view_section"}
+    original_digest = planning_digest({key: value for key, value in original.items()
+                                       if key not in projection and not key.startswith("_")})
     if (record["input"]["request_id"] != original_id or record["config_sha256"] != config_digest
             or (original.get("operation"), original.get("action")) != ("cart", "clear")
             or original.get("cart_digest") != app._cart_digest(pending["before"])
-            or planning_digest({key: value for key, value in original.items() if not key.startswith("_")})
-                != pending["request_digest"] or receipt != {"ok": False, "error": HOST_FAILURE}):
+            or original_digest != pending["request_digest"] or receipt != {"ok": False, "error": HOST_FAILURE}):
         raise HouseholdError("the original single-unit removal request or correlated host failure changed")
 
     binding = config["browser_binding"]
@@ -1131,23 +1134,23 @@ def reconcile_cart_change(app, request):
     with app.store.locked() as state:
         reset = state.get("native_cart_legacy_reset")
         pending = state.get("pending_cart_change")
-        if reset and (operation == reset["pending_cart_change"]["operation_id"] or (operation is None and not pending)):
+        if reset and operation == reset["pending_cart_change"]["operation_id"]:
             return {"reconciled": False, "cart_write_pending": bool(pending), "status": "archived_unknown",
                     "historical_dispatch": "unknown"}
         if not pending:
+            if operation is None:
+                return {"reconciled": False, "cart_write_pending": False, "status": "no_pending"}
             receipt = (state.get("cart_change_receipts") or {}).get(operation) if isinstance(operation, str) else None
             if (receipt and receipt.get("status") == "owner_accepted_cart"
                     and receipt.get("dispatch_outcome") == "unknown" and receipt.get("native_owner_review")):
+                sync_native_record(app.store.path)
                 return {"reconciled": False, "cart_write_pending": False, "status": "owner_accepted_cart",
                         "historical_dispatch": "unknown"}
-            if reset or "native_cart_dispatch_protocol" in state:
-                if operation is None:
-                    return {"reconciled": False, "cart_write_pending": False, "status": "no_pending"}
-                if (not receipt or receipt.get("provider") != "meny"
-                        or receipt.get("status") not in ("read_back", "completed_with_cart_drift", "not_dispatched")):
-                    raise HouseholdError("no current or recorded MENY cart operation matches this reference")
-                return {"reconciled": receipt["status"] == "read_back", "cart_write_pending": False,
-                        "status": receipt["status"]}
+            if (not receipt or receipt.get("provider") != "meny"
+                    or receipt.get("status") not in ("read_back", "completed_with_cart_drift", "not_dispatched")):
+                raise HouseholdError("no current or recorded MENY cart operation matches this reference")
+            return {"reconciled": receipt["status"] == "read_back", "cart_write_pending": False,
+                    "status": receipt["status"]}
         if pending and pending["provider"] == "meny":
             original = {key: value for key, value in pending.items() if key != "dispatch_finished"}
             if operation in (None, app._cart_operation_ref(pending), app._cart_operation_ref(original)):

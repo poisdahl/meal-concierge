@@ -1302,14 +1302,13 @@ raise SystemExit(dots_session.main())
         self.assertEqual(self.run_reset({**request, "tab_id": "another-tab"})[0], 1)
         self.assertEqual(self.call({**old_policy, "enabled": True})[0], 1)
         self.assertEqual(self.call(self.ensure())[0], 1)
-        for operation_id in (None, old_state["pending_cart_change"]["operation_id"]):
-            cleanup = {"operation": "cart", "action": "reconcile_change"}
-            if operation_id:
-                cleanup["operation_id"] = operation_id
-            code, unknown = self.call(cleanup)
-            self.assertEqual(code, 0, unknown)
-            self.assertEqual(unknown["result"], {"reconciled": False, "cart_write_pending": False,
-                                                "status": "archived_unknown", "historical_dispatch": "unknown"})
+        cleanup = {"operation": "cart", "action": "reconcile_change"}
+        self.assertEqual(self.call(cleanup)[1]["result"],
+                         {"reconciled": False, "cart_write_pending": False, "status": "no_pending"})
+        code, unknown = self.call({**cleanup, "operation_id": old_state["pending_cart_change"]["operation_id"]})
+        self.assertEqual(code, 0, unknown)
+        self.assertEqual(unknown["result"], {"reconciled": False, "cart_write_pending": False,
+                                            "status": "archived_unknown", "historical_dispatch": "unknown"})
         for wrong in (old_id, request["legacy_reset_digest"]):
             code, unmatched = self.call({"operation": "cart", "action": "reconcile_change", "operation_id": wrong})
             self.assertEqual(code, 1, unmatched)
@@ -1669,7 +1668,8 @@ raise SystemExit(client.main())
         code, initial = self.call({"operation": "cart", "action": "get"})
         self.assertEqual(code, 0, initial)
         original_id = str(uuid.uuid4())
-        clear = {"operation": "cart", "action": "clear", "cart_digest": initial["result"]["cart_digest"]}
+        clear = {"operation": "cart", "action": "clear", "cart_digest": initial["result"]["cart_digest"],
+                 "response_view": "agent", "view_offset": 0, "view_limit": 2, "view_section": "items"}
 
         def stop_with_original_generic_error(frame):
             if frame["effect"] != "cart_write":
@@ -1734,6 +1734,8 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, recovered)
         self.assertEqual(recovered["result"], {"status": "owner_accepted_cart", "historical_dispatch": "unknown",
                                               "cart_write_pending": False, "reconciled": False})
+        self.assertEqual(self.call({"operation": "cart", "action": "reconcile_change"})[1]["result"],
+                         {"reconciled": False, "cart_write_pending": False, "status": "no_pending"})
         self.assertEqual(self.frames, [])
         self.assertEqual(self.writes, 0)
 
