@@ -901,12 +901,12 @@ raise SystemExit(client.main())
 import sys
 sys.path.insert(0, {str(SOURCE)!r})
 from clients import dots_session
-original = dots_session.dots.exclusive_json
-def fail_after_ack(path, record, maximum):
-    original(path, record, maximum)
+original = dots_session.publish_native_record
+def fail_after_ack(path, record):
+    original(path, record)
     if path.name == "ack.json":
         raise OSError("fixture interrupted after saving the original host acknowledgement")
-dots_session.dots.exclusive_json = fail_after_ack
+dots_session.publish_native_record = fail_after_ack
 raise SystemExit(dots_session.main())
 """
         code, result = self.run_session("call", {"request_id": command_id, "request": request},
@@ -1172,6 +1172,10 @@ raise SystemExit(dots_session.main())
 
         code, lost = self.call(self.ensure(), command_id, host=lose_reply)
         self.assertEqual(code, 1, lost)
+        # This fixture represents source from before it could mark new native writes.
+        saved = self.state()
+        saved.pop("native_cart_dispatch_protocol")
+        (self.root / "state" / "state.json").write_text(json.dumps(saved))
         if not retain_dispatch:
             shutil.rmtree(self.root / "state/native-cart-dispatch")
         code, disabled = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
@@ -1180,9 +1184,9 @@ raise SystemExit(dots_session.main())
         self.frames.clear()
         return self.inspect_cart()
 
-    def replacement_observation_host(self, frame):
+    def replacement_observation_host(self, frame, *, tab_id="synthetic-observation-tab"):
         target = {"origin": self.binding["origin"], "browser_id": self.binding["browser_id"],
-                  "tab_id": "synthetic-observation-tab"}
+                  "tab_id": tab_id}
         identity = {key: self.binding[key] for key in ("account_sha256", "cart_context_sha256")}
         self.assertEqual(frame["browser_binding"], target)
         self.assertEqual(frame["effect"], "read")
@@ -1427,9 +1431,9 @@ raise SystemExit(client.main())
 import sys
 sys.path.insert(0, {str(SOURCE)!r})
 from clients import dots_session as client
-def fail_sync(directory):
+def fail_sync(path):
     raise OSError('cannot confirm state durability')
-client.sync_reset_state = fail_sync
+client.sync_native_record = fail_sync
 raise SystemExit(client.main())
 """
                     failed_code, failed_retry = self.run_reset(request, launch_code=fail_sync)
@@ -1476,11 +1480,262 @@ raise SystemExit(client.main())
         self.assertNotIn("legacy_reset_digest", self.inspect_cart())
         shutil.rmtree(self.root / "state" / "native-cart-dispatch")
         for changed in ({"operations": [{}]}, {"expected": {}}, {"stopped_before_next_click": True},
-                        {"clear_requested": True, "clear_id": "b" * 32}, {"cart_only": 1}):
+                        {"clear_requested": True, "clear_id": "b" * 32}, {"cart_only": 1},
+                        {"before": {**pending["before"], "invalid": 1},
+                         "expected": {**pending["expected"], "invalid": 1}}):
             with self.subTest(changed=changed):
                 state_file.write_text(json.dumps({**state, "pending_cart_change": {**pending, **changed}}))
                 self.assertNotIn("legacy_reset_digest", self.inspect_cart())
         self.assertEqual(self.frames, [])
+
+    def test_legacy_reset_reconcile_retry_reports_a_recorded_cart_drift(self):
+        request = self.reset_request(self.prepare_legacy_pending_cart())
+        self.assertEqual(self.run_reset(request)[0], 0)
+        self.binding = {**self.binding, "tab_id": request["tab_id"]}
+        self.assertEqual(self.call({"operation": "native_cart_policy", "action": "set", "enabled": True,
+                                    "browser_binding": self.binding})[0], 0)
+
+        def drift_after_dispatch(frame):
+            result = self.host(frame)
+            if frame["operation"] == "manipulate_cart":
+                self.quantity += 1  # A later cart change obscures the result of the acknowledged batch.
+            return result
+
+        self.assertEqual(self.call(self.ensure(), host=drift_after_dispatch)[0], 1)
+        operation_id = self.state()["pending_cart_change"]["operation_id"]
+        reconcile = {"operation": "cart", "action": "reconcile_change", "operation_id": operation_id}
+        code, first = self.call(reconcile)
+        self.assertEqual(code, 0, first)
+        self.assertEqual(first["result"]["status"], "needs_input")
+        self.assertFalse(first["result"]["reconciled"])
+        self.frames.clear()
+        code, again = self.call(reconcile)
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again["result"], {"reconciled": False, "cart_write_pending": False,
+                                           "status": "completed_with_cart_drift"})
+        self.assertEqual(self.frames, [])
+        self.assertEqual(self.writes, 1)
+
+    def test_legacy_reset_refuses_a_new_write_even_if_dispatch_files_are_missing(self):
+        def lose_reply(frame):
+            return None if frame["effect"] == "cart_write" else self.host(frame)
+
+        self.assertEqual(self.call(self.ensure(), host=lose_reply)[0], 1)
+        shutil.rmtree(self.root / "state" / "native-cart-dispatch")
+        self.assertEqual(self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
+                                    "browser_binding": self.binding})[0], 0)
+        self.assertEqual(self.state()["native_cart_dispatch_protocol"], 1)
+        status = self.inspect_cart()
+        self.assertEqual(status["dispatch_evidence"], "no_frame_record")
+        self.assertNotIn("legacy_reset_digest", status)
+
+    def host_pre_click_stop(self, frame):
+        if frame["effect"] != "cart_write":
+            return self.host(frame)
+        result = {"dispatched": False, "stopped_before_first_click": True, "no_pending_clicks": True}
+        self.assertEqual(frame["stop_before_first_click_result"], result)
+        self.assertEqual(frame["operation_id"], self.state()["pending_cart_change"]["operation_id"])
+        return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
+
+    def test_native_cart_stop_before_click_preserves_original_quantities_and_receipt(self):
+        code, ended = self.call(self.ensure(), host=self.host_pre_click_stop)
+        self.assertEqual(code, 0, ended)
+        self.assertFalse(ended["result"]["ensured"])
+        self.assertEqual(ended["result"]["status"], "not_dispatched")
+        self.assertNotIn("pending_cart_change", self.state())
+        operation = ended["result"]["operation_id"]
+        self.assertEqual(self.state()["cart_change_receipts"][operation]["status"], "not_dispatched")
+        self.frames.clear()
+        code, known = self.call({"operation": "cart", "action": "reconcile_change", "operation_id": operation})
+        self.assertEqual(code, 0, known)
+        self.assertEqual(known["result"], {"reconciled": False, "cart_write_pending": False, "status": "not_dispatched"})
+        self.assertEqual(self.call({"operation": "cart", "action": "reconcile_change"})[1]["result"],
+                         {"reconciled": False, "cart_write_pending": False, "status": "no_pending"})
+        self.assertEqual(self.frames, [])
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+
+    def test_native_cart_stop_must_be_timely_and_certain(self):
+        def late(frame):
+            reply = self.host_pre_click_stop(frame)
+            if frame["effect"] == "cart_write":
+                reply["observed_at"] = frame["expires_at"]
+            return reply
+
+        self.assertEqual(self.call(self.ensure(), host=late)[0], 1)
+        self.assertEqual(self.inspect_cart()["dispatch_evidence"], "frame_prepared")
+        self.assertIn("pending_cart_change", self.state())
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+
+    def test_native_cart_stop_durable_before_interruption_reconciles_without_frames(self):
+        launch_code = f"""
+import sys
+sys.path.insert(0, {str(SOURCE)!r})
+from clients import dots_session as client
+publish = client.publish_native_record
+def interrupted(path, record):
+    publish(path, record)
+    if record.get('outcome') == 'not_dispatched':
+        raise OSError('interrupted after the original pre-click ending')
+client.publish_native_record = interrupted
+raise SystemExit(client.main())
+"""
+        code, stopped = self.run_session("call", {"request_id": str(uuid.uuid4()), "request": self.ensure()},
+                                         self.host_pre_click_stop, launch_code=launch_code)
+        self.assertEqual(code, 1, stopped)
+        self.assertEqual(self.inspect_cart()["dispatch_evidence"], "host_stopped_before_click")
+        operation = self.state()["pending_cart_change"]["operation_id"]
+        self.frames.clear()
+        code, bad = self.call({"operation": "cart", "action": "reconcile_change", "operation_id": "different"})
+        self.assertEqual(code, 1, bad)
+        self.assertEqual(self.inspect_cart()["dispatch_evidence"], "host_stopped_before_click")
+        fail_sync = f"""
+import sys
+sys.path.insert(0, {str(SOURCE)!r})
+from clients import dots_session as client
+def fail(path):
+    raise OSError('could not sync original ending')
+client.sync_native_record = fail
+raise SystemExit(client.main())
+"""
+        request = {"operation": "cart", "action": "reconcile_change", "operation_id": operation}
+        code, unsynced = self.run_session("call", {"request_id": str(uuid.uuid4()), "request": request},
+                                         launch_code=fail_sync)
+        self.assertEqual(code, 1, unsynced)
+        self.assertIn("could not sync original ending", unsynced["error"])
+        self.assertIn("pending_cart_change", self.state())
+        code, recovered = self.call(request)
+        self.assertEqual(code, 0, recovered)
+        self.assertEqual(recovered["result"], {"reconciled": False, "cart_write_pending": False,
+                                               "status": "not_dispatched"})
+        self.assertEqual(self.state()["cart_change_receipts"][operation]["status"], "not_dispatched")
+        self.assertNotIn("pending_cart_change", self.state())
+        self.assertEqual(self.frames, [])
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+
+    def test_native_cart_stop_after_prior_batch_reports_partial_clear(self):
+        self.quantity = 3
+        code, before = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, before)
+
+        def after_first_batch(frame):
+            return self.host_pre_click_stop(frame) if self.writes else self.host(frame)
+
+        code, stopped = self.call({"operation": "cart", "action": "clear", "cart_digest": before["result"]["cart_digest"]},
+                                  host=after_first_batch)
+        self.assertEqual(code, 0, stopped)
+        self.assertFalse(stopped["result"]["cleared"])
+        self.assertEqual(stopped["result"]["status"], "partially_applied")
+        self.assertEqual(stopped["result"]["batch_status"], "not_dispatched")
+        self.assertEqual(stopped["result"]["completed_batches"], 1)
+        self.assertEqual((self.quantity, self.writes), (1, 1))
+
+    def test_native_cart_stop_result_lost_after_core_commit_is_recoverable_by_frame_operation(self):
+        launch_code = f"""
+import sys
+sys.path.insert(0, {str(SOURCE)!r})
+from clients import dots_session as client
+publish = client.dots.exclusive_json
+def interrupted(path, record, maximum):
+    if path.name == 'result.json':
+        raise OSError('interrupted before publishing the command result')
+    publish(path, record, maximum)
+client.dots.exclusive_json = interrupted
+raise SystemExit(client.main())
+"""
+        original_id = str(uuid.uuid4())
+        code, stopped = self.run_session("call", {"request_id": original_id, "request": self.ensure()},
+                                         self.host_pre_click_stop, launch_code=launch_code)
+        self.assertEqual(code, 1, stopped)
+        operation = self.frames[-1]["operation_id"]
+        self.assertNotIn("pending_cart_change", self.state())
+        self.frames.clear()
+        self.assertEqual(self.call(self.ensure(), original_id)[1]["status"], "incomplete")
+        code, receipt = self.call({"operation": "cart", "action": "reconcile_change", "operation_id": operation})
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt["result"]["status"], "not_dispatched")
+        self.assertFalse(receipt["result"]["reconciled"])
+        self.assertEqual(self.frames, [])
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+
+    def test_native_cart_accept_current_archives_original_removed_test_unit_as_unknown(self):
+        reset = self.reset_request(self.prepare_legacy_pending_cart())
+        self.assertEqual(self.run_reset(reset)[0], 0)
+        legacy_archive = self.state()["native_cart_legacy_reset"]
+        self.binding = {**self.binding, "tab_id": reset["tab_id"]}
+        policy = {"operation": "native_cart_policy", "action": "set", "browser_binding": self.binding}
+        self.assertEqual(self.call({**policy, "enabled": True})[0], 0)
+        self.quantity = 1
+        code, initial = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, initial)
+        original_id = str(uuid.uuid4())
+        clear = {"operation": "cart", "action": "clear", "cart_digest": initial["result"]["cart_digest"]}
+
+        def stop_with_original_generic_error(frame):
+            if frame["effect"] != "cart_write":
+                return self.host(frame)
+            return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                    "observed_at": datetime.now(timezone.utc).isoformat(), "error": "synthetic readiness failure"}
+
+        code, failed = self.call(clear, original_id, stop_with_original_generic_error)
+        self.assertEqual(code, 1, failed)
+        self.assertIn("native host operation failed", failed["error"])
+        self.assertEqual(self.call({**policy, "enabled": False})[0], 0)
+        pending = self.state()["pending_cart_change"]
+        self.quantity = 0  # Separate, owner-authorized UI cleanup, outside Meal Concierge.
+        code, fresh = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, fresh)
+        request = {"operation": "cart", "action": "accept_current", "operation_id": pending["operation_id"],
+                   "original_request_id": original_id, "cart_digest": fresh["result"]["cart_digest"],
+                   "accept_unknown_dispatch": True, "original_executor_retired": True}
+
+        def observed(frame):
+            return self.replacement_observation_host(frame, tab_id=self.binding["tab_id"])
+
+        self.frames.clear()
+        self.assertEqual(self.call(request, host=observed)[0], 1)  # Still within the original write window.
+        self.assertEqual(self.frames, [])
+        frame_path, = (self.root / "state" / "native-cart-dispatch").glob("*/frame.json")
+        frame = json.loads(frame_path.read_bytes())
+        now = datetime.now(timezone.utc)
+        frame.update(emitted_at=(now - timedelta(minutes=2)).isoformat(),
+                     expires_at=(now - timedelta(minutes=1)).isoformat())
+        frame_path.write_text(json.dumps(frame))  # The later recovery runs after the original frame expired.
+        originals = self.files()
+        for changed in ({"original_request_id": str(uuid.uuid4())}, {"operation_id": "different"},
+                        {"accept_unknown_dispatch": False}, {"original_executor_retired": False}):
+            self.assertEqual(self.call({**request, **changed}, host=observed)[0], 1)
+            self.assertEqual(self.frames, [])
+        self.quantity = 1
+        self.assertEqual(self.call(request, host=observed)[0], 1)
+        self.assertEqual(self.state()["pending_cart_change"], pending)
+        self.quantity = 0
+        self.frames.clear()
+        request_id = str(uuid.uuid4())
+        code, accepted = self.call(request, request_id, observed)
+        self.assertEqual(code, 0, accepted)
+        self.assertEqual(accepted["result"]["historical_dispatch"], "unknown")
+        self.assertEqual([frame["operation"] for frame in self.frames], ["verify_observation_context", "get_cart"])
+        self.assertFalse(self.inspect_cart()["writes_enabled"])
+        self.assertNotIn("pending_cart_change", self.state())
+        self.assertEqual(self.state()["native_cart_legacy_reset"], legacy_archive)
+        archived = self.state()["cart_change_receipts"][pending["operation_id"]]
+        self.assertEqual(archived["original_operation"], pending)
+        self.assertEqual(archived["dispatch_outcome"], "unknown")
+        self.assertEqual(archived["native_owner_review"]["frame"], frame)
+        for name, contents in originals.items():
+            if name != "state/state.json":
+                self.assertEqual(self.files()[name], contents, name)
+        self.frames.clear()
+        self.assertEqual(self.call(clear, original_id), (1, failed))
+        self.assertEqual(self.call(request, request_id), (0, accepted))
+        code, recovered = self.call({"operation": "cart", "action": "reconcile_change",
+                                     "operation_id": pending["operation_id"]})
+        self.assertEqual(code, 0, recovered)
+        self.assertEqual(recovered["result"], {"status": "owner_accepted_cart", "historical_dispatch": "unknown",
+                                              "cart_write_pending": False, "reconciled": False})
+        self.assertEqual(self.frames, [])
+        self.assertEqual(self.writes, 0)
 
     def test_legacy_reset_refuses_dispatch_evidence_and_an_owned_replacement(self):
         status = self.prepare_legacy_pending_cart(retain_dispatch=True)

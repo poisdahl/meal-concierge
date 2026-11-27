@@ -87,12 +87,14 @@ The separate [MENY native-browser interface](#native-browser-requests-over-stdin
 supports native-browser reads and guarded cart changes where an operator can
 verify the owner-approved account and tab. It covers catalog search, cart,
 saved-menu product planning, delivery-window reads and rendered order reads.
-On the tested Dot, signed-in recipe and product searches, an ordinary cart read
-and delivery-window reads passed. The cart write frame expired without a
-dispatch acknowledgement. The operator reported no click, and a fresh read
-showed the original cart contents. The operation stayed pending. Parser
-fixtures cover the current history table and archived receipt layout. The
-pending cart guard still applies to native catalog and order `call` commands.
+On the test Dot, signed-in recipe and product searches, ordinary cart and
+order reads, and delivery-window reads passed. A one-package add passed an
+independent cart read. During the installed removal, the operator's scoped
+trace showed a pre-click stop at the cart readiness check. The original
+command retained a generic error and its dispatch outcome stayed unknown.
+The operator then removed the test unit once in the signed-in browser. A
+fresh installed read confirmed the empty baseline.
+The pending cart guard still applies to native catalog and order `call` commands.
 If the original cloud browser tab is gone, use a [read-only observation](#current-meny-reads-while-a-write-is-pending)
 to see the current cart and orders on the approved account. An older attempt
 without a dispatch record may qualify for an [owner-approved local reset](#reset-a-legacy-meny-cart-guard).
@@ -833,6 +835,17 @@ The command's existing deadline still caps each reply. EOF, timeout, stale/misma
 or ambiguous dispatch leaves the original pending journal. Reopen the same
 household and use `reconcile_change` with a fresh actual read; never resend
 the write frame or translate lost replies into a definite pre-click stop.
+Ordinary `cart.ensure` and `cart.clear` frames advertise
+`stop_before_first_click_result`. If a guard fails or the cart totals are still
+loading, stop in time to send that exact result for the original frame. Use it
+only when the executor has issued no click for this batch and has no queued or
+in-flight click. If a click might have happened, the ending stays unknown.
+Keep the original frame identity, browser binding and expiry. Retain the
+frame's `operation_id` to recover that batch's receipt if the command reply
+is lost. A multi-batch request can report `partially_applied` when an earlier
+batch completed and the next one stopped. Managed menu applies use their
+existing verified-batch recovery.
+
 An unchanged cart cannot release a native write fence. Retain the original
 journal and use the original native dispatch ending and bound readback for
 recovery. Older ordinary cart attempts may qualify for the
@@ -845,8 +858,13 @@ dispatch is still unknown. `writes_enabled` reports policy. A pending
 operation still fences writes.
 `host_acknowledged` means the reply to that exact frame was validated and
 saved before updating the core. In that case `reconcile_change` can pair the
-ending with fresh bound readback after a restart. `no_frame_record` also
-covers older attempts. It does not prove that a click did or did not happen.
+ending with fresh bound readback after a restart.
+`host_stopped_before_click` means the original executor's timely zero-click
+ending was saved. `reconcile_change` can then record `not_dispatched` for
+that exact batch without a new browser write. The receipt describes the
+original batch. Read the cart afresh before planning any later write.
+`no_frame_record` covers older attempts. It does not prove whether a click
+happened.
 A missing native dispatch reply keeps the operation pending and blocks managed
 product preparation.
 If the native interface cannot preserve these guards, leave writes disabled.
@@ -920,6 +938,10 @@ ordinary cart attempt. Keep its dispatch outcome recorded as unknown. Verify
 that the earlier reply window expired, its executor has stopped and the old
 tab has been retired. Use a separate tab in the same cloud browser and keep
 the original household, configuration, command receipts and target registry.
+The input flags record the operator's attestations of approval and retirement.
+The core checks the fresh browser replies but cannot independently inspect
+the old executor or collect the owner's approval. Use those flags only after
+verifying the original executor can no longer dispatch.
 
 Run `inspect-cart` against the original root using the reviewed source. It
 includes `legacy_reset_digest` when the local journal is eligible. Use that
@@ -934,8 +956,9 @@ Answer the two read frames using the current-account observation protocol
 above. Verify the account and ordinary cart again in the replacement tab.
 The reset requires a complete empty rendered cart with zero total, no selected
 delivery and no order edit. The original journal must have its operation and
-request identifiers and a valid ordinary cart batch. If any evidence is missing
-or the household has saved dispatch artifacts, keep the guard in place.
+request identifiers and a valid ordinary cart batch. Keep the guard when
+evidence is missing, the household has saved dispatch artifacts, or the state
+marks admission through the current native dispatch protocol.
 
 `archived_unknown` releases the old local guard and records the original
 pending operation privately. The old command UUID still returns its saved
@@ -952,6 +975,29 @@ disabled until explicitly authorized for the replacement binding. The reset
 retires local cart allocations, delivery selection and active product
 approvals. Saved recipes and menus stay available for a fresh product plan.
 The reset uses read-only merchant requests.
+
+## Accept a restored single-unit MENY test cart
+
+Use this when the original installed one-unit `cart.clear` has an expired
+frame and a retained, correlated host failure. Verify the executor and its
+click work have stopped. Confirm that the owner accepts archiving this exact
+attempt with an unknown dispatch outcome. Keep writes disabled and retain
+the original command, frame, journal and any earlier archive.
+
+Read the restored cart on the active approved tab. It must be empty, with
+zero total, no delivery slot and no order edit. Send the original clear's
+command UUID and the `operation_id` and `cart_digest` from that read in a new
+`call` request.
+
+```json
+{"request_id":"new command UUID","request":{"operation":"cart","action":"accept_current","original_request_id":"original clear command UUID","operation_id":"the pending removal","cart_digest":"the fresh empty-cart digest","accept_unknown_dispatch":true,"original_executor_retired":true}}
+```
+
+Answer both fresh read frames on the same active, verified tab. An
+`owner_accepted_cart` receipt removes the local guard and keeps the removal's
+historical dispatch outcome unknown. An acknowledgement to the original write
+uses ordinary reconciliation instead. The acceptance issues no checkout or
+cart mutation and does not change write policy.
 
 ## MENY rendered order evidence
 

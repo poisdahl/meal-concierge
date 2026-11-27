@@ -35,6 +35,23 @@ read frames and read the first displayed receipt only if requested. Present
 the results as current rendered observations. Preserve the original pending
 operation and its disabled write policy.
 
+An ordinary native MENY `ensure` or `clear` frame can advertise a pre-click
+stop result. Return it only for the original live frame when no click has
+been issued and none remains queued or in flight. Send it before expiry.
+Keep the original journal when a click might have happened or the reply is lost.
+
+Use `reset-legacy-cart` only after the household owner explicitly approves
+archiving that exact eligible MENY attempt with its historical outcome unknown.
+Verify that the earlier reply window expired, the executor stopped and its old
+tab was retired. The reset flags record your attestation of those checks and
+the owner's approval. Follow the fresh same-account empty-cart checks in
+`docs/dots.md`, retain the original receipts, and leave writes disabled.
+
+When the owner approves archiving an exact failed removal after a separately
+restored single-unit MENY test cart, follow `cart.accept_current` in the Dots
+guide. Verify the retired frame and fresh empty cart in the active bound tab.
+Record the historical outcome as unknown and keep the original records.
+
 When discovery returns `provider:"oda"` and `transport:"hosted_mcp"`, bind
 this installation to its reported official Oda plugin. Use the discovered
 cart, catalog, delivery and order read actions documented in `docs/dots.md`
