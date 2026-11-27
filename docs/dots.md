@@ -860,9 +860,11 @@ execution, payment support or dependable long-running availability.
 Use the original native household with a pending ordinary cart change and
 writes already disabled. Select a separate, unowned tab in the same approved
 cloud browser. Verify the account and the ordinary new-cart context using the
-original private fingerprint rules. If that identity cannot be proved, stop
-and use the original private sign-in handoff if needed. Keep account details
-inside the browser and private workspace.
+original private fingerprint rules. If the profile fields render blank after
+an order read, return to the same signed-in profile and refresh it normally
+before checking the identity. If the identity remains unavailable, stop and use
+the original private sign-in handoff if needed. Keep account details inside
+the browser and private workspace.
 
 Run `clients/dots_session.py observe --root ABSOLUTE_ORIGINAL_ROOT` from the
 reviewed checkout, using the same stdin/stdout session as `call`. After

@@ -771,7 +771,10 @@ def current_account_observation(root, value, reader):
             dots.object_fields(observed, fields, fields)
             if observed["source_url"] != "https://meny.no/varer" or observed["new_cart"] is not True:
                 raise HouseholdError("replacement tab did not show the ordinary MENY cart at /varer")
-            cart = cart_summary(normalize_cart_snapshot(observed["snapshot"]))
+            try:
+                cart = cart_summary(normalize_cart_snapshot(observed["snapshot"]))
+            except OverflowError:
+                raise HouseholdError("rendered MENY cart numbers exceed the supported range") from None
             return {**result, "cart": cart, "observed_at": timestamp}
         observed, timestamp = read("get_orders", {"page": 1, "size": limit})
         orders = normalize_order_ui(observed, limit=limit)

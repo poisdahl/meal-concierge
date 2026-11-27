@@ -1258,7 +1258,7 @@ raise SystemExit(dots_session.main())
         self.assertEqual(code, 1, refused)
         self.assertNotIn("result", refused)
         self.assertEqual([frame["operation"] for frame in self.frames], ["verify_observation_context"])
-        for invalid in ("account", "cart", "lifetime", "tab", "context_not_verified", "order_edit"):
+        for invalid in ("account", "cart", "lifetime", "tab", "context_not_verified", "order_edit", "oversized_total"):
             with self.subTest(invalid=invalid):
                 def wrong(frame):
                     reply = self.replacement_observation_host(frame)
@@ -1273,13 +1273,17 @@ raise SystemExit(dots_session.main())
                         reply["browser_binding"] = self.binding
                     elif invalid == "context_not_verified":
                         context["account_verified_before_and_after"] = 1
-                    else:
+                    elif invalid == "order_edit":
                         reply["result"]["observation"]["new_cart"] = False
+                    else:
+                        reply["result"]["observation"]["snapshot"]["total"] = 10**400
                     return reply
 
                 code, output = self.observe_current(cart, host=wrong)
                 self.assertEqual(code, 1, output)
                 self.assertNotIn("result", output)
+                if invalid == "oversized_total":
+                    self.assertIn("numbers exceed the supported range", output["error"])
         for invalid in ("another_order", "unclassified_receipt"):
             with self.subTest(invalid=invalid):
                 def wrong_detail(frame):
