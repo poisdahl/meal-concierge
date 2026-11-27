@@ -2315,10 +2315,11 @@ raise SystemExit(client.main())
         weekdays = ("mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag")
         months = ("januar", "februar", "mars", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "desember")
         display = f"{weekdays[day.weekday()]} {day.day}. {months[day.month - 1]} kl. 08:00-12:00"
+        receipt_display = f"{weekdays[day.weekday()]} {day.day}. {months[day.month - 1][:3]}. kl. 08:00 - 12:00"
         original = {"url": f"https://meny.no/trumf-profil/nettbutikk/bestilling/{order_id}",
                     "order_number": order_id, "authenticated": True, "account_sha256": self.binding["account_sha256"],
                     "edit_code_sha256": "c" * 64, "address_sha256": "d" * 64,
-                    "slot_ref": f"meny:{day.isoformat()}T08:00/12:00", "delivery_display": display,
+                    "slot_ref": f"meny:{day.isoformat()}T08:00/12:00", "delivery_display": receipt_display,
                     "reservation_ore": 12800, "product_subtotal_ore": 2000, "status": "editable", "items_complete": True,
                     "item_count": 1, "items": [{"identity": "Synthetic oats 500 g", "quantity": 1}]}
         addition = {"product_id": EDIT_PRODUCT, "identity": "Synthetic pasta 500 g", "quantity": 1}

@@ -1188,17 +1188,20 @@ receipts are historical and grant no current merchant action.
 
 Use the original native cloud household and its bound signed-in browser.
 This flow covers an exact product and positive package quantity on an
-eligible home-delivery order with verifiable package prices. Use the [ordinary handoff above](#meny-delivery-and-owner-handoffs)
-for other changes. Keep the reviewed source and original household available
-until the edit has been resolved.
+eligible home-delivery order with verifiable package prices. Use the [ordinary
+handoff above](#meny-delivery-and-owner-handoffs) for other changes. Keep the
+reviewed source and original household available until the edit has been
+resolved.
 
 1. Call `orders.change_begin` before entering the merchant’s edit mode.
    Supply the original `order_id` and `addition` with its exact `product_id`
    path, complete visible product-and-package `identity` and integer
    `quantity`. The ordinary cart must be empty. The `read_edit_receipt` frame
-   with `phase: "original"` reads the exact signed-in order. Record the
-   original edit code, package quantities, address, delivery and reservation
-   before staging any change.
+   with `phase: "original"` reads the exact signed-in order. If **Se bestilling**
+   opens its receipt with URL parameters, open the canonical HTTPS order path
+   without the query or fragment and recheck the displayed order number.
+   Record the original edit code, package quantities, address, delivery and
+   reservation before staging any change.
 2. Stage the addition in MENY’s existing-order draft following the merchant
    UI. Match **Du endrer bestilling** to the original order code, verify
    **Avbryt endring** and leave the address and window selected. Open the
@@ -1250,7 +1253,8 @@ which uses the same units as `review_checkout`.
   original edit marker and abort control in the cart, then the item prices
   and payment review. Package prices multiplied by their quantities must
   reconcile to the goods subtotal, using the displayed discount if it is
-  already included in that subtotal. Finish on the same **Send oppdatering** page.
+  already included in that subtotal. Finish on the same **Send oppdatering**
+  page.
 - `observe_edit_handoff` reads only the current page. Return `status`,
   `origin`, `path`, `order_id` and `reservation_ore`. Use `payment_pending`
   only for the original live Vipps gateway with the matching MENY reserve.
