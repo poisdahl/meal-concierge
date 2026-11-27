@@ -369,6 +369,8 @@ def observe_current_checkout(record, value, key):
         if (prior_payment.get("payment_evidence_conflicting")
                 or checkout.get("result", {}).get("payment_conflict_unresolved")):
             payment_outcome = "previously_conflicting_observations"
+        elif checkout.get("result", {}).get("payment_label_unresolved"):
+            payment_outcome = "previously_unresolved_payment_label"
         exact_tracking = None
         detail = None
         if order_id:

@@ -528,6 +528,29 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             self.assertFalse(pending["dispatch"])
             read = self.step("recheck_checkout")
 
+    def test_archived_payment_summary_retains_unfamiliar_wording_after_earlier_authorization(self):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
+        self.assertEqual(self.step("observe_checkout_order", **self.receipt_observation(read, "linked"))["status"],
+                         "checkout_readback")
+        self.clock.return_value += timedelta(minutes=1)
+        read = self.step("recheck_checkout")
+        receipt = self.receipt_observation(read, "linked")
+        receipt["browser"]["payment_label"] = "Unfamiliar payment wording"
+        self.assertEqual(self.step("observe_checkout_order", **receipt)["status"], "checkout_readback")
+        self.clock.return_value += timedelta(days=2)
+        read = self.step("recheck_checkout_archive", attempt_id=self.identifier, owner_accepted_unknown=True,
+                         reviewed_total_ore=4900, retirement=self.checkout_retirement())
+        stamp = self.clock.return_value.isoformat()
+        done = self.step("observe_checkout_archive", frame_id=read["hosted_request"]["frame_id"], plugin_id="fixture",
+                         addresses=ADDRESS, address_observed_at=stamp, cart=snapshot(), cart_observed_at=stamp,
+                         existing_orders={"orders": [], "hasMore": False}, orders_observed_at=stamp,
+                         order=None, tracking=None, order_observed_at=stamp)
+        self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_unresolved_payment_label")
+        self.assertTrue(done["checkout_order"]["payment_label_unresolved"])
+        self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "authorized")
+
     def test_migrated_payment_conflict_survives_two_unlabeled_reads(self):
         ready = self.saved_card_preflight()
         self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
