@@ -26,6 +26,10 @@ def active(state):
     return (state.get(STATE_KEY) or {}).get("status") in ACTIVE
 
 
+def has_update_ack(record):
+    return record.get("confirmation_visible_update") is True
+
+
 def exact_fields(value, fields):
     dots.object_fields(value, fields, fields)
 
@@ -154,8 +158,8 @@ def items_view(lines, count, *, quote=False):
 def receipt(host, order_id, *, phase):
     value = host.exchange("read_edit_receipt", {"order_id": order_id, "phase": phase})
     fields = {"url", "order_number", "authenticated", "account_sha256", "status"}
-    terminal_read = phase in {"outcome", "accept_discrepancy"}
-    closure_required = phase in {"discarded", "accept_discrepancy"}
+    terminal_read = phase in {"outcome", "closed_outcome"}
+    closure_required = phase in {"discarded", "closed_outcome"}
     if value.get("status") == "cancelled" and terminal_read:
         exact_fields(value, fields)
     else:
@@ -344,7 +348,10 @@ def observe_handoff(host, record):
     reserve = (record.get("quote") or {}).get("reservation_ore")
     value, observed = host.exchange("observe_edit_handoff", {"order_id": order_id, "reservation_ore": reserve},
                                     observation_time=True)
-    exact_fields(value, {"status", "origin", "path", "order_id", "reservation_ore"})
+    fields = {"status", "origin", "path", "order_id", "reservation_ore"}
+    if value.get("status") == "edit_confirmed":
+        fields.add("visible_update_ack")
+    exact_fields(value, fields)
     status = value["status"]
     original_tab = host.config["browser_binding"]["tab_id"] == record["tab"]
     if status == "payment_pending":
@@ -354,6 +361,7 @@ def observe_handoff(host, record):
             raise HouseholdError("the visible Vipps page is unverified; preserve the original MENY checkout")
     elif status == "edit_confirmed":
         if (not original_tab or record["status"] != "edit_owner_pending" or value["order_id"] != order_id
+                or value["visible_update_ack"] is not True
                 or value["origin"] != "https://meny.no" or value["path"] not in {
                     "/kassen/bekreftelse", f"/trumf-profil/nettbutikk/bestilling/{order_id}",
                     f"/profil/nettbutikk/bestilling/{order_id}"} or value["reservation_ore"] is not None):
@@ -372,10 +380,12 @@ def reconcile_discrepancy(store, record, observed, accepted, *, items_match, amo
     before_subtotal, after_subtotal = original["product_subtotal_ore"], observed["product_subtotal_ore"]
     changed_subtotal = before_subtotal is not None and after_subtotal is not None and before_subtotal != after_subtotal
     delivered = observed.get("status") == "delivered"
-    if not delivered and ("confirmation_observed_at" not in record
+    if not delivered and (not has_update_ack(record)
                           or not (changed_goods or changed_reservation or changed_subtotal)):
-        return output(record, observed=False, items_match=items_match, amounts_match=amounts_match,
-                      discrepancy_current=False)
+        result = output(record, observed=False, items_match=items_match, amounts_match=amounts_match,
+                        discrepancy_current=False)
+        result.pop("discrepancy", None)
+        return result
     outcome = {"items": [observed["items"][key] for key in sorted(observed["items"])],
                "reservation_ore": observed["reservation_ore"],
                "product_subtotal_ore": observed["product_subtotal_ore"],
@@ -389,7 +399,7 @@ def reconcile_discrepancy(store, record, observed, accepted, *, items_match, amo
         updated["status"] = "edit_original_order_delivered" if delivered else "edit_acknowledged_with_drift"
         replace(store, record, updated)
         return output(updated, observed=False, discrepancy_current=True, discrepancy_accepted=True,
-                      original_confirmation_seen="confirmation_observed_at" in updated,
+                      original_confirmation_seen=has_update_ack(updated),
                       items_match=items_match, amounts_match=amounts_match)
     if previous != discrepancy:
         replace(store, record, updated)
@@ -418,11 +428,14 @@ def reconcile(host, store, record, action, accepted):
             raise HouseholdError("the untouched original MENY receipt could not be verified")
         ending = "edit_discarded"
     else:
-        if handoff == "edit_confirmed" and "confirmation_observed_at" not in record:
-            confirmed = {**record, "confirmation_observed_at": observed_at.isoformat()}
+        if handoff == "edit_confirmed" and not has_update_ack(record):
+            confirmed = {**record, "confirmation_observed_at": observed_at.isoformat(),
+                         "confirmation_visible_update": True}
             replace(store, record, confirmed)
             record = confirmed
-        phase = "accept_discrepancy" if accepted is not None else "outcome"
+        replacement_after_handoff = (record["status"] == "edit_owner_pending"
+                                     and host.config["browser_binding"]["tab_id"] != record["tab"])
+        phase = "closed_outcome" if accepted is not None or replacement_after_handoff else "outcome"
         observed = receipt(host, original["order_id"], phase=phase)
         if observed.get("status") == "cancelled":
             ending = "edit_original_order_cancelled"
@@ -431,7 +444,7 @@ def reconcile(host, store, record, action, accepted):
             exact_window = observed["slot_ref"] == original["slot_ref"]
             date_only = (delivered and observed["slot_ref"] is None
                          and observed["delivery_day"] == original["slot_ref"][len("meny:"):].split("T", 1)[0])
-            has_ack = "confirmation_observed_at" in record
+            has_ack = has_update_ack(record)
             if (observed["address_sha256"] != original["address_sha256"] or not (exact_window or date_only)
                     or (observed["edit_code_sha256"] != original["edit_code_sha256"] and not (has_ack or delivered))):
                 raise HouseholdError("the exact original MENY order, address or window changed during readback")
@@ -455,4 +468,4 @@ def reconcile(host, store, record, action, accepted):
         updated["receipt_product_subtotal_ore"] = subtotal
     replace(store, record, updated)
     return output(updated, observed=ending == "edit_observed",
-                  original_confirmation_seen="confirmation_observed_at" in updated)
+                  original_confirmation_seen=has_update_ack(updated))

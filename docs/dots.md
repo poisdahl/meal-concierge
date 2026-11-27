@@ -1246,7 +1246,9 @@ the original draft never reached handoff or the edit acknowledgement was lost.
 This archives `edit_original_order_delivered` and leaves the amendment
 unverified. Leave an omitted reservation or full time range unknown. For an active
 receipt, a missing or rotated edit code requires the original explicit update
-acknowledgement.
+acknowledgement. An unresolved active receipt that differs from the quote and
+lacks the original update acknowledgement stays pending. Check that attempt
+with MENY before trying another edit.
 
 Verify the actual signed-in account before and after each observation. Hash
 the locally observed edit code and normalized visible delivery address. Keep
@@ -1265,13 +1267,16 @@ which uses the same units as `review_checkout`.
   `receipt_browser_id` and `receipt_tab_id` of the separate receipt read.
   For a positive cancellation in `outcome`, return just `url`,
   `order_number`, `authenticated`, `account_sha256` and `status: "cancelled"`.
-  The `outcome` and `accept_discrepancy` phases also accept `status: "delivered"`
+  The `outcome` and `closed_outcome` phases also accept `status: "delivered"`
   only for an explicit delivered status on the exact receipt. If the
   delivered receipt only shows a date, return it as `delivery_display` with
   `slot_ref: null`. Use `null` for an unavailable reservation on a delivered
   receipt or a missing display edit code in either phase. For
-  `accept_discrepancy` on an uncancelled receipt, add the same handoff and
-  payment closure flags as in `discarded`.
+  `closed_outcome` on an uncancelled receipt, add the same handoff and payment
+  closure flags as in `discarded`. This phase is used when accepting an observed
+  discrepancy or reading an outcome on a replacement tab after handoff. Verify
+  closure through the original handoff or with the owner. A retired tab alone
+  leaves an earlier Vipps request unverified.
 - `review_edit_checkout` reads the original draft and matching final quote
   on the bound tab. Return `url`, `authenticated`, `account_sha256`,
   `edit_code_sha256`, `address_sha256`, `slot_ref`, `ordinary_cart: false`,
@@ -1289,7 +1294,9 @@ which uses the same units as `review_checkout`.
   only for the original live Vipps gateway with the matching MENY reserve.
   Supply that reserve and `order_id: null`. Use `edit_confirmed` with the
   exact original `order_id` and `reservation_ore: null` only for a visible
-  MENY update acknowledgement. Use `ready_for_readback` when the verified
+  MENY notice explicitly acknowledging the update and set
+  `visible_update_ack: true`. For a plain order receipt, use
+  `ready_for_readback` when the verified
   MENY tab is safe to navigate, with both values `null`. A different or
   unverified gateway stays open and blocks readback on that tab.
 

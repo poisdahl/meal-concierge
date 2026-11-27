@@ -2358,7 +2358,7 @@ raise SystemExit(client.main())
                     response["cutoff_at"] = live["cutoff"]
                 if phase == "approval":
                     response.update(receipt_tab_id="same-browser-read-tab", receipt_browser_id=self.binding["browser_id"])
-                if phase in ("discarded", "accept_discrepancy") and response["status"] != "cancelled":
+                if phase in ("discarded", "closed_outcome") and response["status"] != "cancelled":
                     response.update(original_handoff_ended=live.get("handoff_ended", True),
                                     no_payment_pending=live.get("no_payment_pending", True))
             elif operation == "review_edit_checkout":
@@ -2432,7 +2432,11 @@ raise SystemExit(client.main())
         self.assertTrue(pending["result"]["owner_payment_pending"])
         self.assertEqual([entry["operation"] for entry in self.frames[before:]], ["observe_edit_handoff"])
         live["handoff"] = {**live["ready"], "status": "edit_confirmed", "path": "/kassen/bekreftelse",
-                           "order_id": live["original"]["order_number"]}
+                           "order_id": live["original"]["order_number"], "visible_update_ack": False}
+        code, plain = self.call(reconcile, host=host)
+        self.assertEqual(code, 1, plain)
+        self.assertNotIn("confirmation_observed_at", self.state()["native_meny_edit"])
+        live["handoff"]["visible_update_ack"] = True
         live["lose_receipt"] = True
         code, lost = self.call(reconcile, host=host)
         self.assertEqual(code, 1, lost)
@@ -2540,7 +2544,7 @@ raise SystemExit(client.main())
         self.assertFalse(no_ack["result"]["discrepancy_current"])
 
         live["handoff"] = {**live["ready"], "status": "edit_confirmed", "path": "/kassen/bekreftelse",
-                           "order_id": order["order_number"]}
+                           "order_id": order["order_number"], "visible_update_ack": True}
         order.update(item_count=1, items=updated_lines[:1], reservation_ore=12800, product_subtotal_ore=2500)
         code, repriced = self.call(reconcile, host=host)
         self.assertEqual(code, 0, repriced)
@@ -2594,7 +2598,7 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, approved)
         order = live["original"]
         live["handoff"] = {**live["ready"], "status": "edit_confirmed", "path": "/kassen/bekreftelse",
-                           "order_id": order["order_number"]}
+                           "order_id": order["order_number"], "visible_update_ack": True}
         order.update(status="delivered", reservation_ore=None, edit_code_sha256="f" * 64)
         reconcile = {**request, "action": "change_reconcile"}
         code, reported = self.call(reconcile, host=host)
@@ -2657,6 +2661,31 @@ raise SystemExit(client.main())
         code, closed = self.call(discard, host=host)
         self.assertEqual(code, 0, closed)
         self.assertEqual(closed["result"]["status"], "edit_discarded")
+
+    def test_meny_edit_replacement_readback_requires_original_handoff_closure(self):
+        request, review, live, host = self.begin_meny_edit()
+        code, approved = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 0, approved)
+        pending = self.state()
+        pending["native_meny_edit"]["owner_handoff_admit_by"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        (self.root / "state/state.json").write_text(json.dumps(pending))
+        rebind = {"tab_id": "synthetic-observation-tab", "previous_tab_id": self.binding["tab_id"],
+                  "original_tab_retired": True, "edit_recovery": request["edit_id"]}
+        code, rebound = self.run_session("rebind-tab", rebind, self.replacement_observation_host)
+        self.assertEqual(code, 0, rebound)
+        self.binding = {**self.binding, "tab_id": rebind["tab_id"]}
+        live["original"].update(status="confirmed", item_count=2, reservation_ore=14490, product_subtotal_ore=3690,
+                                items=[{"identity": line["identity"], "quantity": line["quantity"]}
+                                       for line in live["draft"]["items"]])
+        reconcile = {**request, "action": "change_reconcile"}
+        live["no_payment_pending"] = False
+        code, blocked = self.call(reconcile, host=host)
+        self.assertEqual(code, 1, blocked)
+        self.assertEqual(self.state()["native_meny_edit"]["status"], "edit_owner_pending")
+        live["no_payment_pending"] = True
+        code, closed = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, closed)
+        self.assertEqual(closed["result"]["status"], "edit_observed")
 
     def test_native_target_cannot_be_adopted_by_a_second_household(self):
         def lose_write(frame):
