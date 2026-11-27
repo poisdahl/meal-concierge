@@ -10,6 +10,7 @@ import stat
 import uuid
 
 import hosted_oda
+import hosted_oda_delivery
 import hosted_oda_menu
 from install import bounded_json, write_json
 from on_demand import _sync_directory
@@ -21,14 +22,14 @@ ANCHOR_NAME = REGISTRY_NAME + "-identity.json"
 DOT_WORKSPACE = Path("/workspace/shared")
 BINDING_NAME = "hosted-oda-cart-binding.json"
 GENERATION_NAME = "hosted-oda-cart-generation.json"
-FINISHED = {"restored", "aborted", "reconciled_empty", "reconciled_baseline", "applied", "unchanged"}
-BEFORE_WRITE = {"reading_baseline", "baseline_verified", "checking_add", "menu_search", "menu_choices", "menu_review"}
+FINISHED = {"restored", "aborted", "reconciled_empty", "reconciled_baseline", "applied", "unchanged"} | hosted_oda_delivery.FINISHED
+BEFORE_WRITE = {"reading_baseline", "baseline_verified", "checking_add", "menu_search", "menu_choices", "menu_review"} | hosted_oda_delivery.BEFORE_WRITE
 READBACK = {"verify_add", "verify_remove"}
 WRITE_PHASES = {"awaiting_add_response": 1, "awaiting_remove_response": -1}
 UNVERIFIED = {"add_response_unverified", "remove_response_unverified"}
 NEEDS_RECOVERY = UNVERIFIED | WRITE_PHASES.keys()
 READ_TOOLS = ("get_delivery_addresses", "get_cart")
-STATUSES = BEFORE_WRITE | READBACK | NEEDS_RECOVERY | FINISHED | {"added", "checking_remove"}
+STATUSES = BEFORE_WRITE | READBACK | NEEDS_RECOVERY | FINISHED | {"added", "checking_remove"} | hosted_oda_delivery.PENDING
 JOURNAL_LIMIT = 512 * 1024
 JOURNAL_ENDING_RESERVE = 64 * 1024
 BASELINE_JOURNAL_VERSION = 1
@@ -76,7 +77,14 @@ def verify_record(record):
             or not isinstance(record.get("build"), dict)
             or "source_commit" not in record["build"] or not isinstance(record.get("account"), str)):
         raise ValueError("the original hosted Oda cart journal is invalid")
-    if "menu" not in record and not provider_id(record.get("product_id")):
+    if "delivery" in record:
+        delivery = record["delivery"]
+        if (not isinstance(delivery, dict) or not provider_id(delivery.get("address_id"))
+                or not provider_id(delivery.get("slot_id")) or not isinstance(delivery.get("slot_ref"), str)
+                or record["status"] not in hosted_oda_delivery.FINISHED | hosted_oda_delivery.BEFORE_WRITE
+                | hosted_oda_delivery.PENDING | {"aborted"} or "menu" in record or "product_id" in record):
+            raise ValueError("the original hosted Oda delivery journal is invalid")
+    elif "menu" not in record and not provider_id(record.get("product_id")):
         raise ValueError("the original hosted Oda cart product is invalid")
     if "menu" in record:
         menu = record["menu"]
@@ -168,7 +176,7 @@ def require_idle(state, *, target_program=None):
                 mode = current["menu"]["mode"]
                 if mode not in {"keep", "restore"} and not supports_menu_journal(target_program, mode):
                     raise ValueError("the target program cannot preserve the original Oda cart baseline or undo receipt")
-        elif "menu" in current:
+        elif "menu" in current or "delivery" in current:
             archive_record(directory, current)
             write_json(ledger, {**saved, "current": None})
 
@@ -532,7 +540,18 @@ def status_view(record):
               "add_acknowledged": "add_response" in record and not linked_undo,
               "remove_acknowledged": "remove_response" in record,
               "evidence": hosted_oda.EVIDENCE, "backend_freshness": "unverified", "dispatch": False}
-    if "menu" in record:
+    if "delivery" in record:
+        delivery = record["delivery"]
+        for field in ("slot_ref", "review", "review_digest", "reservation", "reconciled_at"):
+            if field in delivery:
+                result[field] = delivery[field]
+        if record["status"] == "delivery_dispatched":
+            result["pending_response"] = {key: record["frame"][key] for key in ("frame_id", "issued_at", "expires_at")}
+        if record["status"] in hosted_oda_delivery.FINISHED:
+            result["delivery_evidence_scope"] = "historical_observation"
+            result["original_dispatch_outcome"] = (
+                "acknowledged" if delivery.get("acknowledged") else "unknown" if "dispatch_expires_at" in delivery else "none")
+    elif "menu" in record:
         menu = record["menu"]
         result["menu_ref"] = menu["source"]["menu_ref"]
         result["mode"] = MENU_MODES[menu["mode"]]
@@ -711,7 +730,9 @@ def write_record(ledger, authority, record):
 def run(state, directory, operation_id, value, plugin, build):
     action = value.get("action") if isinstance(value, dict) else None
     new_cart = action in ("begin", "begin_menu")
-    beginning = new_cart or action == "restore_menu"
+    new_delivery = action == "begin_delivery"
+    authorizing = new_cart or new_delivery
+    beginning = authorizing or action == "restore_menu"
     if action == "begin":
         require_fields(value, ("action", "product_id", "isolated_new_cart", "authorized_addresses"))
         if not provider_id(value["product_id"]) or value["isolated_new_cart"] is not True:
@@ -734,13 +755,17 @@ def run(state, directory, operation_id, value, plugin, build):
         require_fields(value, ("action", "choices"))
     elif action == "approve_menu":
         require_fields(value, ("action", "review_digest"))
-    elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search"):
+    elif new_delivery:
+        require_fields(value, ("action", "slot_ref", "authorized_addresses"))
+    elif action == "approve_delivery":
+        require_fields(value, ("action", "review_digest"))
+    elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery"):
         require_fields(value, ("action",))
 
     build = {field: build[field] for field in ("source_commit", "source_sha256", "installed_runtime_sha256")}
     owner = str(state)
-    with registry(state, directory, initialize=new_cart) as (anchor, ledger, saved), ExitStack() as locks:
-        account = account_fingerprint(value["authorized_addresses"], saved["key"]) if new_cart else None
+    with registry(state, directory, initialize=authorizing) as (anchor, ledger, saved), ExitStack() as locks:
+        account = account_fingerprint(value["authorized_addresses"], saved["key"]) if authorizing else None
         current = saved["current"]
         history_path = directory / (operation_id + ".json")
         if current is not None and current["operation_id"] == operation_id:
@@ -767,19 +792,29 @@ def run(state, directory, operation_id, value, plugin, build):
                 raise ValueError("the operation ID belongs to a different saved menu or account")
             if action == "restore_menu" and record.get("restores_operation_id") != original_id:
                 raise ValueError("the operation ID belongs to a different original menu restoration")
+            if new_delivery and (record.get("delivery", {}).get("slot_ref") != value["slot_ref"]
+                                 or not hmac.compare_digest(record["account"], account)):
+                raise ValueError("the operation ID belongs to a different delivery window or account")
             return status_view(record)
+        delivery_dispatch = False
         if beginning:
             if current is not None:
                 if current["status"] not in FINISHED:
                     raise ValueError("an original hosted Oda cart operation still owns this registry")
                 archive_record(directory, current)
-            initial = (initial_record(action, value, account, locks) if new_cart else
-                       initial_restoration(directory, original_id, owner, plugin, saved["write_generation"]))
+            if new_delivery:
+                initial = hosted_oda_delivery.begin(value, account)
+            elif new_cart:
+                initial = initial_record(action, value, account, locks)
+            else:
+                initial = initial_restoration(directory, original_id, owner, plugin, saved["write_generation"])
             record = {"operation_id": operation_id, "owner": owner, "plugin_id": plugin, "build": build, **initial}
-            record["frame"] = frame(record)
+            record["frame"] = hosted_oda_delivery.frame(record) if new_delivery else frame(record)
         elif (record is None or record is not current
                 or (record["build"] != build and not continue_from_other_build(record, action))):
             raise ValueError("use the original active hosted Oda operation and installed build")
+        elif "delivery" in record:
+            delivery_dispatch = hosted_oda_delivery.advance(record, value, saved["key"])
         elif action == "observe":
             observe(record, value, saved["key"], locks)
         elif action == "observe_menu_search":
@@ -801,7 +836,7 @@ def run(state, directory, operation_id, value, plugin, build):
         else:
             advance(record, action)
 
-        dispatch = action == "observe" and record["status"] in WRITE_PHASES
+        dispatch = delivery_dispatch or (action == "observe" and record["status"] in WRITE_PHASES)
         generation = saved["write_generation"] + int(dispatch)
         if dispatch and record["status"] == "awaiting_add_response" and "menu" in record:
             record["add_write_generation"] = generation
@@ -811,11 +846,11 @@ def run(state, directory, operation_id, value, plugin, build):
             # Persist the latest issued write in the workspace and owning home.
             write_json(anchor, authority)
             write_json(state / GENERATION_NAME, authority)
-        elif "menu" in record and record["status"] in FINISHED:
+        elif ("menu" in record or "delivery" in record) and record["status"] in FINISHED:
             archive_record(directory, record)
             write_json(ledger, {**authority, "current": None})
         result = status_view(record)
-        if action == "recheck":
+        if action == "recheck" and "delivery" not in record:
             result["hosted_request"] = record["recovery_read"]
         elif action not in {"defer", "observe_recovery"} and "frame" in record:
             result.update(hosted_request=record["frame"], dispatch=dispatch)

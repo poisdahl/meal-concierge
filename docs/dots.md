@@ -207,7 +207,60 @@ Each call has a new request ID.
 `orders.track` reports the status supplied by the Oda plugin. Keep the results
 in the owner’s chat. The receipt stores request fingerprints and metadata.
 These private fingerprints may be guessable for short order IDs or queries.
-Delivery reservations and order changes are outside this foreground workflow.
+For a new Oda cart, discover `delivery_reservation_command` and follow
+[Reserve one Oda delivery window](#reserve-one-oda-delivery-window). For a
+previously reserved cart or an existing order, use the signed-in Oda shop.
+
+##### Reserve one Oda delivery window
+
+Use the same private hosted Oda home, attached plugin and dedicated cloud
+browser. List the offered windows first. Choose one dated `slot_ref` to review.
+Start a new operation with `foreground.py --home "$household" hosted-cart
+OPERATION_UUID`. Send `begin_delivery` with the exact `slot_ref` and
+`authorized_addresses`. Project the attached app’s current delivery-address
+list to `{ "id", "isSelected" }` objects with exactly one selected address.
+Reuse the original UUID throughout.
+
+1. For each emitted read frame, call the attached app’s exact
+   `get_delivery_addresses`, `get_cart` and `get_delivery_slots`, in order.
+   Verify the original dedicated signed-in browser tab. Its visible Oda address
+   edit link must contain the same address ID and its ordinary cart must show
+   no order edit. Send `observe_delivery` with `frame_id`, `plugin_id`, the
+   projected `addresses`, the selected address’s `address_label`, and
+   `address_observed_at`, `cart_observed_at`, `slots_observed_at` from each
+   real observation. Set `browser` to the observed `browser_id`, `tab_id`,
+   integer `address_id`, `new_cart: true` and exact Oda `cart_url`.
+   Send the structured dated `slots`, exact `slot_arguments`, and the
+   complete cart projection (`groups` with all ordinary items,
+   `productQuantityCount`, `totalGrossAmount`, `totalBreakdown`, `url`, explicit
+   `deliverySlot`, `deliveryAddress` and `isUnattendedDelivery`). Use `null`
+   for documented optional fields known to be absent. Keep address, account
+   and tab details private.
+2. Present the exact calendar date and local window, listed fee, current cart
+   totals and whether Oda shows unattended delivery. Ask the owner to approve
+   that reservation. Use `approve_delivery` with its `review_digest` after the
+   owner approves that specific offer. Complete the new read frame with fresh
+   observations. A changed context or offer needs a fresh review. `abort` ends
+   an operation before any dispatch.
+3. Only a newly emitted `dispatch: true` grants one `select_delivery_slot`
+   call. Invoke its exact arguments before expiry. Send `acknowledge_delivery`
+   with the original `frame_id`, `plugin_id`, `tool`, `arguments`,
+   `dispatched_at`, `observed_at`, `result_source:
+   "original_attached_mutation_response"`, `is_error` and the original
+   structured `slot` (or `null` for an actual provider error). Complete the
+   returned read frame independently. Check the selection and actual cart fee
+   before reporting the result. Payment, a purchase and order changes need
+   separate authorization.
+4. After a lost reply, retain the operation and wait for the original dispatch
+   frame to expire before using `recheck`. Complete only the new read frame.
+   Report the observed selection separately from the original outcome. A
+   provider error or an expired original window can be reconciled by a fresh
+   unchanged cart and no selected slot. Keep an unresolved operation fenced
+   when the reads disagree. `status` returns historical evidence without a
+   new dispatch. Re-read the current cart before checkout.
+
+Oda’s app supplies account and cart observations through the host. Use the
+shop for checkout and payment. [Official Oda MCP specification](https://oda.com/mcp/manifest/)
 
 #### Oda saved-menu shopping
 

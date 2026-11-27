@@ -65,6 +65,13 @@ for a fresh read after expiry. If the plugin is unavailable, use the private
 ChatGPT authorization for that original entry. The owner completes checkout
 with the Oda cart link.
 
+For delivery selection, follow the Oda reservation workflow in the retained
+source’s `docs/dots.md`. Review one exact date, window and listed fee. Wait
+for the owner’s explicit reservation approval before `approve_delivery`.
+Only a fresh one-shot `dispatch: true` grants the actual reservation. Finish
+the independent readback in the original account. A historical or uncertain
+receipt grants no new store action.
+
 For saved-menu Oda shopping, use the discovered `menu_shopping_command`
 and the saved-menu workflow in the retained source’s `docs/dots.md`.
 Use `shopping_list.get` in the original planning home. Resolve or review

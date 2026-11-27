@@ -319,6 +319,8 @@ def execute(options):
                             "transport": "hosted_mcp", "plugin_id": plugin, "operations": sorted(ODA_TOOLS),
                             **{f"{operation}_actions": sorted(actions) for operation, actions in ODA_TOOLS.items()},
                             "cart_write_command": "hosted-cart",
+                            "delivery_reservation_command": "hosted-cart",
+                            "delivery_reservation_start": "begin_delivery",
                             "menu_shopping_command": "hosted-cart",
                             "menu_shopping_start": "begin_menu",
                             "menu_shopping_restore": "restore_menu",
@@ -369,7 +371,7 @@ def main():
     cli.output_options(command)
     subparsers.add_parser("receipt").add_argument("request_id", type=request_id)
     subparsers.add_parser("complete-hosted").add_argument("request_id", type=request_id)
-    cart = subparsers.add_parser("hosted-cart", help="prepare and apply an approved hosted Oda cart operation")
+    cart = subparsers.add_parser("hosted-cart", help="prepare and apply an approved hosted Oda cart or delivery operation")
     cart.add_argument("request_id", type=request_id)
     options = parser.parse_args()
     try:
