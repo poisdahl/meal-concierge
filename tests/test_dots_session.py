@@ -2358,8 +2358,9 @@ raise SystemExit(client.main())
                     response["cutoff_at"] = live["cutoff"]
                 if phase == "approval":
                     response.update(receipt_tab_id="same-browser-read-tab", receipt_browser_id=self.binding["browser_id"])
-                if phase == "discarded":
-                    response.update(original_handoff_ended=True, no_payment_pending=True)
+                if phase in ("discarded", "accept_discrepancy") and response["status"] != "cancelled":
+                    response.update(original_handoff_ended=live.get("handoff_ended", True),
+                                    no_payment_pending=live.get("no_payment_pending", True))
             elif operation == "review_edit_checkout":
                 self.assertEqual(frame["arguments"]["order_id"], order_id)
                 self.assertEqual(frame["arguments"]["addition"], addition)
@@ -2442,6 +2443,7 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, old)
         self.assertFalse(old["result"]["observed"])
         live["original"].update(status="confirmed", item_count=2, reservation_ore=14490, product_subtotal_ore=None,
+                                edit_code_sha256=None,
                                 items=[{"identity": line["identity"], "quantity": line["quantity"]}
                                        for line in live["draft"]["items"]])
         code, completed = self.call(reconcile, host=host)
@@ -2503,17 +2505,132 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, discarded)
         self.assertEqual(discarded["result"]["status"], "edit_discarded")
 
+        code, ordinary = self.call({"operation": "cart", "action": "get"}, host=host)
+        self.assertEqual(code, 0, ordinary)
+
         request, review, live, host = self.begin_meny_edit(original_subtotal=None)
         live["original"]["product_subtotal_ore"] = 2000
         code, approved = self.approve_meny_edit(request, review, host)
         self.assertEqual(code, 0, approved)
         self.assertTrue(approved["result"]["owner_handoff_ready"])
         discard = {**request, "action": "change_discard", "owner_confirmed_no_submit": True}
+        count = len(self.frames)
+        code, too_soon = self.call(discard, host=host)
+        self.assertEqual(code, 1, too_soon)
+        self.assertIn("admission to expire", too_soon["error"])
+        self.assertEqual(len(self.frames), count)
+        pending = self.state()
+        pending["native_meny_edit"]["owner_handoff_admit_by"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        (self.root / "state/state.json").write_text(json.dumps(pending))
         code, discarded = self.call(discard, host=host)
         self.assertEqual(code, 0, discarded)
         self.assertEqual(discarded["result"]["status"], "edit_discarded")
+
+    def test_meny_edit_acknowledged_discrepancy_needs_fresh_exact_owner_acceptance(self):
+        request, review, live, host = self.begin_meny_edit()
+        code, approved = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 0, approved)
+        reconcile = {**request, "action": "change_reconcile"}
+        order = live["original"]
+        updated_lines = [{"identity": line["identity"], "quantity": line["quantity"]} for line in live["draft"]["items"]]
+        order.update(status="confirmed", item_count=2, items=updated_lines, reservation_ore=14590,
+                     product_subtotal_ore=3690)
+        code, no_ack = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, no_ack)
+        self.assertFalse(no_ack["result"]["discrepancy_current"])
+
+        live["handoff"] = {**live["ready"], "status": "edit_confirmed", "path": "/kassen/bekreftelse",
+                           "order_id": order["order_number"]}
+        code, reviewed = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, reviewed)
+        difference = reviewed["result"]["discrepancy"]
+        self.assertEqual(difference["reservation_ore"], 14590)
+        self.assertEqual(reviewed["result"]["quote"]["reservation_ore"], 14490)
+        self.assertTrue(reviewed["result"]["discrepancy_acceptance_required"])
+        self.assertFalse(reviewed["result"]["observed"])
+
+        acceptance = {**reconcile, "accept_observed_digest": difference["digest"]}
+        live["handoff"] = {"status": "payment_pending", "origin": "https://api.vipps.no",
+                           "path": "/dwo-api-application/v1/deeplink/vippsgateway", "order_id": None, "reservation_ore": 14490}
+        code, pending = self.call(acceptance, host=host)
+        self.assertEqual(code, 0, pending)
+        self.assertTrue(pending["result"]["owner_payment_pending"])
+
+        live["handoff"] = live["ready"]
+        live["no_payment_pending"] = False
+        code, unverified = self.call(acceptance, host=host)
+        self.assertEqual(code, 1, unverified)
+        self.assertIn("still unresolved", unverified["error"])
+        live["no_payment_pending"] = True
+        order.update(item_count=1, items=updated_lines[:1], reservation_ore=12800, product_subtotal_ore=2000)
+        code, old = self.call(acceptance, host=host)
+        self.assertEqual(code, 0, old)
+        self.assertFalse(old["result"]["discrepancy_current"])
+        self.assertEqual(old["result"]["status"], "edit_owner_pending")
+
+        order.update(item_count=2, items=updated_lines, reservation_ore=14690, product_subtotal_ore=3690)
+        code, changed = self.call(acceptance, host=host)
+        self.assertEqual(code, 0, changed)
+        self.assertTrue(changed["result"]["discrepancy_acceptance_required"])
+        self.assertNotEqual(changed["result"]["discrepancy"]["digest"], difference["digest"])
+        code, closed = self.call({**reconcile, "accept_observed_digest": changed["result"]["discrepancy"]["digest"]}, host=host)
+        self.assertEqual(code, 0, closed)
+        self.assertEqual(closed["result"]["status"], "edit_acknowledged_with_drift")
+        self.assertTrue(closed["result"]["discrepancy_accepted"])
+        self.assertTrue(closed["result"]["original_confirmation_seen"])
+        self.assertFalse(closed["result"]["observed"])
+        self.assertFalse(closed["result"]["dispatch"])
         code, ordinary = self.call({"operation": "cart", "action": "get"}, host=host)
         self.assertEqual(code, 0, ordinary)
+
+    def test_meny_edit_archives_verified_delivery_without_inferring_a_reservation(self):
+        request, review, live, host = self.begin_meny_edit()
+        code, approved = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 0, approved)
+        order = live["original"]
+        live["handoff"] = {**live["ready"], "status": "edit_confirmed", "path": "/kassen/bekreftelse",
+                           "order_id": order["order_number"]}
+        order.update(status="delivered", reservation_ore=None, edit_code_sha256="f" * 64)
+        reconcile = {**request, "action": "change_reconcile"}
+        code, reported = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, reported)
+        discrepancy = reported["result"]["discrepancy"]
+        self.assertTrue(discrepancy["delivered"])
+        self.assertIsNone(discrepancy["reservation_ore"])
+        code, closed = self.call({**reconcile, "accept_observed_digest": discrepancy["digest"]}, host=host)
+        self.assertEqual(code, 0, closed)
+        self.assertEqual(closed["result"]["status"], "edit_acknowledged_with_drift")
+        self.assertFalse(closed["result"]["observed"])
+
+    def test_meny_edit_fences_draft_reads_and_requires_exact_replacement_recovery(self):
+        request, review, live, host = self.begin_meny_edit()
+        count = len(self.frames)
+        code, refused = self.call({"operation": "cart", "action": "get"}, host=host)
+        self.assertEqual(code, 1, refused)
+        self.assertEqual(len(self.frames), count)
+        rebind = {"tab_id": "synthetic-observation-tab", "previous_tab_id": self.binding["tab_id"],
+                  "original_tab_retired": True}
+        code, refused = self.run_session("rebind-tab", rebind, self.replacement_observation_host)
+        self.assertEqual(code, 1, refused)
+        self.assertIn("use the original MENY edit", refused["error"])
+        self.assertEqual(len(self.frames), count)
+        recovery = {**rebind, "edit_recovery": request["edit_id"]}
+        self.quantity = 1
+        code, refused = self.run_session("rebind-tab", recovery, self.replacement_observation_host)
+        self.assertEqual(code, 1, refused)
+        self.assertIn("empty ordinary MENY cart", refused["error"])
+        self.quantity = 0
+        code, rebound = self.run_session("rebind-tab", recovery, self.replacement_observation_host)
+        self.assertEqual(code, 0, rebound)
+        self.assertFalse(rebound["result"]["writes_enabled"])
+        self.binding = {**self.binding, "tab_id": rebind["tab_id"]}
+        code, refused = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 1, refused)
+        self.assertIn("original MENY edit tab or cutoff", refused["error"])
+        discard = {**request, "action": "change_discard", "owner_confirmed_no_submit": True}
+        code, closed = self.call(discard, host=host)
+        self.assertEqual(code, 0, closed)
+        self.assertEqual(closed["result"]["status"], "edit_discarded")
 
     def test_native_target_cannot_be_adopted_by_a_second_household(self):
         def lose_write(frame):

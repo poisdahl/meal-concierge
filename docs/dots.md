@@ -1202,12 +1202,17 @@ resolved.
    without the query or fragment and recheck the displayed order number.
    Record the original edit code, package quantities, address, delivery and
    reservation before staging any change.
-2. Stage the addition in MENY’s existing-order draft following the merchant
-   UI. Match **Du endrer bestilling** to the original order code, verify
+2. When the owner asks you to prepare the exact draft, stage only that
+   addition in MENY’s signed-in shop. The CLI grants no browser clicks and
+   its cart-write setting applies to CLI cart operations. Match **Du endrer
+   bestilling** to the original order code, verify
    **Avbryt endring** and leave the address and window selected. Open the
    non-binding checkout review and leave **Send oppdatering** untouched.
    `orders.change_review` takes the `edit_id` and reads the staged review.
-   Show the owner the exact goods, every fee and the full reservation.
+   Show the owner the exact goods, every fee and the full reservation. The
+   added product must match its exact checkout path. Compare original lines
+   by their unique visible product-and-package labels and quantities. The
+   signed-in receipt may omit original product paths.
 3. After exact approval, call `orders.change_approve` with `edit_id`,
    `review_id`, `review_digest` and `approved_reservation_ore`. First answer
    `read_edit_receipt` with `phase: "approval"` from a separate signed-in
@@ -1226,6 +1231,19 @@ resolved.
    An unchanged receipt leaves the attempt pending. An explicit merchant
    cancellation of the original order ends it.
 
+If MENY acknowledges the exact edit and a fresh changed receipt differs
+from the approved quote, show the approved and observed values separately.
+An owner can accept that specific observation by repeating
+`orders.change_reconcile` with `accept_observed_digest` from the current
+discrepancy. The original browser handoff and payment checks must both be
+clear. An open Vipps page stays pending. The runner rechecks the receipt and
+only archives the same observed values as `edit_acknowledged_with_drift`. This records the
+discrepancy without declaring the approved edit fulfilled or submitting an
+update. A stale original receipt or changed discrepancy needs another read.
+A delivered receipt can omit its reservation. Keep it unknown and show the
+visible delivery outcome. A rotated or missing post-edit display code requires
+an affirmative update acknowledgement tied to the original order.
+
 Verify the actual signed-in account before and after each observation. Hash
 the locally observed edit code and normalized visible delivery address. Keep
 the underlying values and any private receipt or gateway links inside the
@@ -1243,6 +1261,12 @@ which uses the same units as `review_checkout`.
   `receipt_browser_id` and `receipt_tab_id` of the separate receipt read.
   For a positive cancellation in `outcome`, return just `url`,
   `order_number`, `authenticated`, `account_sha256` and `status: "cancelled"`.
+  The `outcome` and `accept_discrepancy` phases also accept `status: "delivered"`
+  only for an explicit delivered status on the exact receipt. Use `null` for
+  an unavailable reservation on a delivered receipt or a missing display
+  edit code in either phase. For
+  `accept_discrepancy` on an uncancelled receipt, add the same handoff and
+  payment closure flags as in `discarded`.
 - `review_edit_checkout` reads the original draft and matching final quote
   on the bound tab. Return `url`, `authenticated`, `account_sha256`,
   `edit_code_sha256`, `address_sha256`, `slot_ref`, `ordinary_cart: false`,
@@ -1267,15 +1291,18 @@ which uses the same units as `review_checkout`.
 To abandon an unsubmitted edit, use the matching **Avbryt endring** in the
 shop. After the owner confirms no submission or payment, call
 `orders.change_discard` with `edit_id` and `owner_confirmed_no_submit: true`.
+If a private handoff was granted, wait until its admission time expires.
 The ordinary cart must again be empty and the exact original receipt
 unchanged. In `read_edit_receipt` with `phase: "discarded"`, verify
 `original_handoff_ended: true` and `no_payment_pending: true`. Keep an
 unknown result pending. Historical command receipts carry no new handoff.
 If the original tab retires, inspect the exact same-account receipt read-only.
 Use [tab replacement above](#meny-delivery-and-owner-handoffs) once the
-ordinary cart can be verified. Reconcile the original edit on that replacement
-and preserve the original handoff evidence. Avoid reopening or discarding an
-uncertain merchant edit to free the tab.
+ordinary cart is verified empty, adding `edit_recovery` with the exact original
+`edit_id`. A granted handoff must be beyond its admission time. The replacement
+can read the original outcome or verify a genuinely unsubmitted draft discard.
+It carries no original approval or handoff grant. Avoid reopening or discarding
+an uncertain merchant edit to free the tab.
 
 For approved live tests, schedule delivery a few days ahead. When the owner
 has authorized cleanup, cancel that exact test order promptly after it has

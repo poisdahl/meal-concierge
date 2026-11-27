@@ -14,6 +14,12 @@ STATE_KEY = "native_meny_edit"
 ACTIONS = {"change_begin", "change_review", "change_approve", "change_reconcile", "change_discard"}
 ACTIVE = {"edit_draft", "edit_review", "edit_owner_pending"}
 UPDATE_CONTROL = "Send oppdatering"
+READS_BY_ACTION = {
+    "change_review": {"review_edit_checkout"},
+    "change_approve": {"read_edit_receipt", "review_edit_checkout"},
+    "change_reconcile": {"observe_edit_handoff", "read_edit_receipt"},
+    "change_discard": {"observe_edit_handoff", "read_edit_receipt", "verify_observation_context", "get_cart"},
+}
 
 
 def active(state):
@@ -73,7 +79,8 @@ def validate(request):
         fields |= {"review_id", "review_digest", "approved_reservation_ore"}
     if action == "change_discard":
         fields |= {"owner_confirmed_no_submit"}
-    exact_fields(request, fields)
+    optional = {"accept_observed_digest"} if action == "change_reconcile" else set()
+    dots.object_fields(request, fields | optional, fields)
     if not canonical_uuid(request["edit_id"]):
         raise ValueError("use the original MENY edit reference")
     if action == "change_approve" and (not canonical_uuid(request["review_id"])
@@ -81,6 +88,8 @@ def validate(request):
         raise ValueError("use the exact owner-approved MENY edit review and reservation")
     if action == "change_discard" and request["owner_confirmed_no_submit"] is not True:
         raise ValueError("the owner must confirm no original edit submission or payment")
+    if "accept_observed_digest" in request and not fingerprint(request["accept_observed_digest"]):
+        raise ValueError("use the exact owner-accepted MENY receipt discrepancy")
 
 
 def account_binding(host):
@@ -130,7 +139,9 @@ def items_view(lines, count, *, quote=False):
 def receipt(host, order_id, *, phase):
     value = host.exchange("read_edit_receipt", {"order_id": order_id, "phase": phase})
     fields = {"url", "order_number", "authenticated", "account_sha256", "status"}
-    if value.get("status") == "cancelled" and phase == "outcome":
+    terminal_read = phase in {"outcome", "accept_discrepancy"}
+    closure_required = phase in {"discarded", "accept_discrepancy"}
+    if value.get("status") == "cancelled" and terminal_read:
         exact_fields(value, fields)
     else:
         fields |= {"edit_code_sha256", "address_sha256", "slot_ref", "delivery_display", "reservation_ore",
@@ -139,7 +150,7 @@ def receipt(host, order_id, *, phase):
             fields.add("cutoff_at")
         if phase == "approval":
             fields |= {"receipt_browser_id", "receipt_tab_id"}
-        if phase == "discarded":
+        if closure_required:
             fields |= {"original_handoff_ended", "no_payment_pending"}
         exact_fields(value, fields)
     check_account(host, value)
@@ -152,14 +163,17 @@ def receipt(host, order_id, *, phase):
     if value["order_number"] != order_id or value["url"] not in {
             f"https://meny.no/{prefix}profil/nettbutikk/bestilling/{order_id}" for prefix in ("", "trumf-")}:
         raise HouseholdError("the rendered MENY receipt is not the exact original order")
-    if value["status"] == "cancelled" and phase == "outcome":
+    if value["status"] == "cancelled" and terminal_read:
         return {"status": "cancelled"}
-    if (value["status"] not in {"editable", "confirmed"}
-            or not all(fingerprint(value[key]) for key in ("edit_code_sha256", "address_sha256"))
-            or value["items_complete"] is not True or not amount(value["reservation_ore"])
+    delivered = terminal_read and value["status"] == "delivered"
+    verified_code = fingerprint(value["edit_code_sha256"]) or terminal_read and value["edit_code_sha256"] is None
+    if (not (delivered or value["status"] in {"editable", "confirmed"})
+            or not verified_code or not fingerprint(value["address_sha256"])
+            or value["items_complete"] is not True
+            or not (amount(value["reservation_ore"]) or delivered and value["reservation_ore"] is None)
             or (value["product_subtotal_ore"] is not None and not amount(value["product_subtotal_ore"]))):
         raise HouseholdError("the original MENY order or reservation could not be verified")
-    if phase == "discarded" and (
+    if closure_required and (
             value["original_handoff_ended"] is not True or value["no_payment_pending"] is not True):
         raise HouseholdError("the original MENY owner handoff or payment is still unresolved")
     slot_ref = window(value["slot_ref"], value["delivery_display"])
@@ -167,6 +181,8 @@ def receipt(host, order_id, *, phase):
               "address_sha256": value["address_sha256"], "slot_ref": slot_ref,
               "reservation_ore": value["reservation_ore"], "product_subtotal_ore": value["product_subtotal_ore"],
               "items": items_view(value["items"], value["item_count"])}
+    if delivered:
+        result["status"] = "delivered"
     if phase in {"original", "approval"}:
         cutoff = dots.timestamp(value["cutoff_at"]).astimezone(timezone.utc)
         day, span = slot_ref[len("meny:"):].split("T", 1)
@@ -228,7 +244,7 @@ def output(record, **extra):
             "original_reservation_ore": original["reservation_ore"],
             "original_product_subtotal_ore": original["product_subtotal_ore"], "dispatch": False,
             **delivery.EVIDENCE, **{key: record[key] for key in ("quote", "review_id", "review_digest", "expires_at",
-                                                                "receipt_product_subtotal_ore")
+                                                                "receipt_product_subtotal_ore", "discrepancy")
                                     if key in record}, **extra}
 
 
@@ -271,7 +287,7 @@ def handle(host, store, request, command_id):
     if not record or request["edit_id"] != record["edit_id"] or account_binding(host) != record["account"]:
         raise HouseholdError("use the exact original MENY edit and account")
     if action in {"change_reconcile", "change_discard"}:
-        return reconcile(host, store, record, action)
+        return reconcile(host, store, record, action, request.get("accept_observed_digest"))
     if record["status"] not in {"edit_draft", "edit_review"}:
         raise HouseholdError("reconcile the original MENY owner handoff without submitting again")
     if (host.config["browser_binding"]["tab_id"] != record["tab"]
@@ -332,10 +348,41 @@ def observe_handoff(host, record):
     return status, observed
 
 
-def reconcile(host, store, record, action):
+def reconcile_discrepancy(store, record, observed, accepted, *, items_match, amounts_match):
+    original = record["original"]
+    changed_goods = observed["items"] != original["items"]
+    changed_reservation = observed["reservation_ore"] is not None and observed["reservation_ore"] != original["reservation_ore"]
+    if ("confirmation_observed_at" not in record
+            or not (changed_goods or changed_reservation or observed.get("status") == "delivered")):
+        return output(record, observed=False, items_match=items_match, amounts_match=amounts_match,
+                      discrepancy_current=False)
+    outcome = {"items": [observed["items"][key] for key in sorted(observed["items"])],
+               "reservation_ore": observed["reservation_ore"],
+               "product_subtotal_ore": observed["product_subtotal_ore"],
+               "delivered": observed.get("status") == "delivered"}
+    digest = delivery.digest({"edit_id": record["edit_id"], "review_digest": record["review_digest"],
+                              "outcome": outcome})
+    previous = record.get("discrepancy")
+    discrepancy = {"digest": digest, **outcome}
+    updated = {**record, "discrepancy": discrepancy}
+    if accepted is not None and previous == discrepancy and accepted == digest:
+        updated["status"] = "edit_acknowledged_with_drift"
+        replace(store, record, updated)
+        return output(updated, observed=False, discrepancy_current=True, discrepancy_accepted=True,
+                      original_confirmation_seen=True, items_match=items_match, amounts_match=amounts_match)
+    if previous != discrepancy:
+        replace(store, record, updated)
+    return output(updated, observed=False, discrepancy_current=True, discrepancy_acceptance_required=True,
+                  items_match=items_match, amounts_match=amounts_match)
+
+
+def reconcile(host, store, record, action, accepted):
     if record["status"] not in ACTIVE:
         return output(record, observation_scope="historical")
     original = record["original"]
+    if (action == "change_discard" and record["status"] == "edit_owner_pending"
+            and datetime.now(timezone.utc) < dots.timestamp(record["owner_handoff_admit_by"])):
+        raise HouseholdError("wait for the original MENY handoff admission to expire before discard")
     handoff, observed_at = observe_handoff(host, record)
     if handoff == "payment_pending":
         return output(record, observed=False, owner_payment_pending=True)
@@ -354,13 +401,16 @@ def reconcile(host, store, record, action):
             confirmed = {**record, "confirmation_observed_at": observed_at.isoformat()}
             replace(store, record, confirmed)
             record = confirmed
-        observed = receipt(host, original["order_id"], phase="outcome")
+        phase = "accept_discrepancy" if accepted is not None else "outcome"
+        observed = receipt(host, original["order_id"], phase=phase)
         if observed.get("status") == "cancelled":
             ending = "edit_original_order_cancelled"
         else:
             if record["status"] != "edit_owner_pending":
                 raise HouseholdError("no original MENY owner handoff to reconcile")
-            if any(observed[key] != original[key] for key in ("edit_code_sha256", "address_sha256", "slot_ref")):
+            if (any(observed[key] != original[key] for key in ("address_sha256", "slot_ref"))
+                    or (observed["edit_code_sha256"] != original["edit_code_sha256"]
+                        and "confirmation_observed_at" not in record)):
                 raise HouseholdError("the exact original MENY order, address or window changed during readback")
             reviewed = record["quote"]
             items_match = ({key: line["quantity"] for key, line in observed["items"].items()}
@@ -369,9 +419,11 @@ def reconcile(host, store, record, action):
             amounts_match = (observed["reservation_ore"] == reviewed["reservation_ore"]
                              and (subtotal is None or subtotal == reviewed["price_breakdown"]["product_subtotal_ore"]))
             if not items_match or not amounts_match:
-                return output(record, observed=False, items_match=items_match, amounts_match=amounts_match)
+                return reconcile_discrepancy(store, record, observed, accepted,
+                                             items_match=items_match, amounts_match=amounts_match)
             ending = "edit_observed"
     updated = {**record, "status": ending}
+    updated.pop("discrepancy", None)
     if ending == "edit_observed":
         updated["receipt_product_subtotal_ore"] = subtotal
     replace(store, record, updated)

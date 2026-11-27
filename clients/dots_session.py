@@ -436,11 +436,10 @@ class NativeHost:
         state = self.store.read()
         if state.get("native_config_sha256") != dots.digest(dots.encoded(self.config)):
             raise HouseholdError("original native household/browser configuration changed")
-        if (state.get(dots_meny_edit.STATE_KEY) or {}).get("status") == "edit_owner_pending":
-            recovery = (self.request.get("operation") == "orders"
-                        and self.request.get("action") in {"change_reconcile", "change_discard"})
-            if not recovery or operation not in {"observe_edit_handoff", "read_edit_receipt", "verify_observation_context", "get_cart"}:
-                raise HouseholdError("keep the original MENY checkout tab for the owner; reconcile the edit first")
+        allowed_edit_reads = dots_meny_edit.READS_BY_ACTION.get(self.request.get("action"), ())
+        if (dots_meny_edit.active(state)
+                and (self.request.get("operation") != "orders" or operation not in allowed_edit_reads)):
+            raise HouseholdError("keep the original MENY edit tab; reconcile the edit before another browser operation")
         return state.get("pending_cart_change")
 
     def verify_original_account(self):
@@ -1089,7 +1088,7 @@ def current_account_observation(root, value, reader):
 
 def rebind_tab(root, value, reader):
     fields = {"tab_id", "previous_tab_id", "original_tab_retired"}
-    dots.object_fields(value, fields | {"delivery_recovery"}, fields)
+    dots.object_fields(value, fields | {"delivery_recovery", "edit_recovery"}, fields)
     tab_id = observation_tab_id(value["tab_id"])
     previous_tab = observation_tab_id(value["previous_tab_id"])
     if value["original_tab_retired"] is not True:
@@ -1120,6 +1119,14 @@ def rebind_tab(root, value, reader):
             raise ValueError("use a new tab in the original MENY cloud browser")
         if any(saved.get(key) for key in dots_meny_delivery.ORDINARY):
             raise HouseholdError("resolve the original MENY operation before replacing its browser tab")
+        edit = saved.get(dots_meny_edit.STATE_KEY) or {}
+        edit_recovery = value.get("edit_recovery")
+        if dots_meny_edit.active(saved):
+            if (edit_recovery != edit["edit_id"] or (edit["status"] == "edit_owner_pending"
+                    and datetime.now(timezone.utc) < dots.timestamp(edit["owner_handoff_admit_by"]))):
+                raise HouseholdError("use the original MENY edit and a retired handoff for read-only tab recovery")
+        elif edit_recovery is not None:
+            raise HouseholdError("no active original MENY edit matches this tab recovery")
         pending = saved.get(dots_meny_delivery.STATE_KEY) or {}
         recovery = value.get("delivery_recovery")
         if pending.get("status") in dots_meny_delivery.PENDING:
@@ -1142,7 +1149,9 @@ def rebind_tab(root, value, reader):
         lock_core_files(stack, directory)
         store = StateStore(directory, {"household": config["household"], "provider": "meny"})
         read = verify_observation(reader, binding, tab_id)
-        _, observed = read_observation_cart(read)
+        cart, observed = read_observation_cart(read)
+        if edit_recovery is not None and cart["items"]:
+            raise HouseholdError("verify the original empty ordinary MENY cart before edit tab recovery")
         settled = None
         if pending.get("status") in dots_meny_delivery.PENDING:
             settled = dots_meny_delivery.readback(DeliveryObservation(read), store, pending,
@@ -1449,9 +1458,9 @@ def command(root, value, reader):
         enabling_writes = request.get("operation") == "native_cart_policy" and request.get("enabled") is True
         if dots_meny_edit.active(saved) and (write or enabling_writes or native_delivery or handoff):
             raise ValueError("reconcile the original MENY order edit before another write or handoff")
-        if ((saved.get(dots_meny_edit.STATE_KEY) or {}).get("status") == "edit_owner_pending"
+        if (dots_meny_edit.active(saved)
                 and not native_edit and request["operation"] in {"orders", "catalog", "cart", "delivery", "products"}):
-            raise ValueError("keep the original MENY checkout tab for the owner; reconcile the edit first")
+            raise ValueError("keep the original MENY edit tab; reconcile the edit before another browser operation")
         if ((saved.get(dots_meny_delivery.STATE_KEY) or {}).get("status") in dots_meny_delivery.PENDING
                 and (write or enabling_writes)):
             raise ValueError("reconcile the original MENY delivery selection before changing the cart")
