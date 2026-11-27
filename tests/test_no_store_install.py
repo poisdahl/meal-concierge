@@ -94,7 +94,7 @@ class NoStoreInstallTests(unittest.TestCase):
                  patch.object(hosted_oda_cart, 'require_idle', side_effect=ValueError('original cart active')) as guard, \
                  self.assertRaisesRegex(ValueError, 'original cart active'):
                 install.main()
-            guard.assert_called_once_with(Path(meta['paths']['state']))
+        guard.assert_called_once_with(Path(meta['paths']['state']), check_target_later=True)
         for action in ('run', 'attach', 'connect-store'):
             with self.subTest(action=action), patch.object(sys, 'argv', ['install.py', action, '--home', str(self.home)]):
                 with self.assertRaisesRegex(RuntimeError, 'uses foreground tools'):
