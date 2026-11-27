@@ -114,6 +114,21 @@ def window(value, display):
     return ref
 
 
+def delivered_day(display):
+    text = " ".join(display.casefold().split()) if isinstance(display, str) else ""
+    numeric = re.fullmatch(r"(\d{1,2})\.(\d{2})\.(\d{4})", text)
+    named = re.fullmatch(r"(\d{1,2})\. ([a-z]+)\.? (\d{4})", text)
+    if numeric:
+        day, month, year = map(int, numeric.groups())
+        return date(year, month, day).isoformat()
+    if named:
+        day, label, year = named.groups()
+        for month, name in enumerate(MENY_MONTH_NAMES, 1):
+            if label in (name, name[:3]):
+                return date(int(year), month, int(day)).isoformat()
+    raise HouseholdError("the exact delivered MENY date could not be verified")
+
+
 def items_view(lines, count, *, quote=False):
     if (not isinstance(lines, list) or not 1 <= len(lines) <= 100
             or type(count) is not int or not 1 <= count <= 10000):
@@ -176,13 +191,15 @@ def receipt(host, order_id, *, phase):
     if closure_required and (
             value["original_handoff_ended"] is not True or value["no_payment_pending"] is not True):
         raise HouseholdError("the original MENY owner handoff or payment is still unresolved")
-    slot_ref = window(value["slot_ref"], value["delivery_display"])
+    slot_ref = None if delivered and value["slot_ref"] is None else window(value["slot_ref"], value["delivery_display"])
     result = {"order_id": order_id, "edit_code_sha256": value["edit_code_sha256"],
               "address_sha256": value["address_sha256"], "slot_ref": slot_ref,
               "reservation_ore": value["reservation_ore"], "product_subtotal_ore": value["product_subtotal_ore"],
               "items": items_view(value["items"], value["item_count"])}
     if delivered:
         result["status"] = "delivered"
+        result["delivery_day"] = (delivered_day(value["delivery_display"]) if slot_ref is None
+                                  else slot_ref[len("meny:"):].split("T", 1)[0])
     if phase in {"original", "approval"}:
         cutoff = dots.timestamp(value["cutoff_at"]).astimezone(timezone.utc)
         day, span = slot_ref[len("meny:"):].split("T", 1)
@@ -352,24 +369,28 @@ def reconcile_discrepancy(store, record, observed, accepted, *, items_match, amo
     original = record["original"]
     changed_goods = observed["items"] != original["items"]
     changed_reservation = observed["reservation_ore"] is not None and observed["reservation_ore"] != original["reservation_ore"]
-    if ("confirmation_observed_at" not in record
-            or not (changed_goods or changed_reservation or observed.get("status") == "delivered")):
+    before_subtotal, after_subtotal = original["product_subtotal_ore"], observed["product_subtotal_ore"]
+    changed_subtotal = before_subtotal is not None and after_subtotal is not None and before_subtotal != after_subtotal
+    delivered = observed.get("status") == "delivered"
+    if not delivered and ("confirmation_observed_at" not in record
+                          or not (changed_goods or changed_reservation or changed_subtotal)):
         return output(record, observed=False, items_match=items_match, amounts_match=amounts_match,
                       discrepancy_current=False)
     outcome = {"items": [observed["items"][key] for key in sorted(observed["items"])],
                "reservation_ore": observed["reservation_ore"],
                "product_subtotal_ore": observed["product_subtotal_ore"],
-               "delivered": observed.get("status") == "delivered"}
-    digest = delivery.digest({"edit_id": record["edit_id"], "review_digest": record["review_digest"],
+               "delivered": delivered, "window_verified": observed["slot_ref"] is not None}
+    digest = delivery.digest({"edit_id": record["edit_id"], "review_digest": record.get("review_digest"),
                               "outcome": outcome})
     previous = record.get("discrepancy")
     discrepancy = {"digest": digest, **outcome}
     updated = {**record, "discrepancy": discrepancy}
     if accepted is not None and previous == discrepancy and accepted == digest:
-        updated["status"] = "edit_acknowledged_with_drift"
+        updated["status"] = "edit_original_order_delivered" if delivered else "edit_acknowledged_with_drift"
         replace(store, record, updated)
         return output(updated, observed=False, discrepancy_current=True, discrepancy_accepted=True,
-                      original_confirmation_seen=True, items_match=items_match, amounts_match=amounts_match)
+                      original_confirmation_seen="confirmation_observed_at" in updated,
+                      items_match=items_match, amounts_match=amounts_match)
     if previous != discrepancy:
         replace(store, record, updated)
     return output(updated, observed=False, discrepancy_current=True, discrepancy_acceptance_required=True,
@@ -406,12 +427,18 @@ def reconcile(host, store, record, action, accepted):
         if observed.get("status") == "cancelled":
             ending = "edit_original_order_cancelled"
         else:
+            delivered = observed.get("status") == "delivered"
+            exact_window = observed["slot_ref"] == original["slot_ref"]
+            date_only = (delivered and observed["slot_ref"] is None
+                         and observed["delivery_day"] == original["slot_ref"][len("meny:"):].split("T", 1)[0])
+            has_ack = "confirmation_observed_at" in record
+            if (observed["address_sha256"] != original["address_sha256"] or not (exact_window or date_only)
+                    or (observed["edit_code_sha256"] != original["edit_code_sha256"] and not (has_ack or delivered))):
+                raise HouseholdError("the exact original MENY order, address or window changed during readback")
+            if delivered and (not has_ack or date_only):
+                return reconcile_discrepancy(store, record, observed, accepted, items_match=None, amounts_match=None)
             if record["status"] != "edit_owner_pending":
                 raise HouseholdError("no original MENY owner handoff to reconcile")
-            if (any(observed[key] != original[key] for key in ("address_sha256", "slot_ref"))
-                    or (observed["edit_code_sha256"] != original["edit_code_sha256"]
-                        and "confirmation_observed_at" not in record)):
-                raise HouseholdError("the exact original MENY order, address or window changed during readback")
             reviewed = record["quote"]
             items_match = ({key: line["quantity"] for key, line in observed["items"].items()}
                            == {line["identity"]: line["quantity"] for line in reviewed["items"]})

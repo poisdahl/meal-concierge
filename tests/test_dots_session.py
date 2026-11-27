@@ -2541,6 +2541,11 @@ raise SystemExit(client.main())
 
         live["handoff"] = {**live["ready"], "status": "edit_confirmed", "path": "/kassen/bekreftelse",
                            "order_id": order["order_number"]}
+        order.update(item_count=1, items=updated_lines[:1], reservation_ore=12800, product_subtotal_ore=2500)
+        code, repriced = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, repriced)
+        self.assertEqual(repriced["result"]["discrepancy"]["product_subtotal_ore"], 2500)
+        order.update(item_count=2, items=updated_lines, reservation_ore=14590, product_subtotal_ore=3690)
         code, reviewed = self.call(reconcile, host=host)
         self.assertEqual(code, 0, reviewed)
         difference = reviewed["result"]["discrepancy"]
@@ -2599,8 +2604,29 @@ raise SystemExit(client.main())
         self.assertIsNone(discrepancy["reservation_ore"])
         code, closed = self.call({**reconcile, "accept_observed_digest": discrepancy["digest"]}, host=host)
         self.assertEqual(code, 0, closed)
-        self.assertEqual(closed["result"]["status"], "edit_acknowledged_with_drift")
+        self.assertEqual(closed["result"]["status"], "edit_original_order_delivered")
         self.assertFalse(closed["result"]["observed"])
+
+    def test_meny_edit_date_only_delivery_closes_without_assuming_an_amendment(self):
+        request, _, live, host = self.begin_meny_edit()
+        order = live["original"]
+        day = datetime.fromisoformat(order["slot_ref"][len("meny:"):].split("T", 1)[0])
+        order.update(status="delivered", slot_ref=None, reservation_ore=None, edit_code_sha256=None,
+                     delivery_display=(day + timedelta(days=1)).strftime("%d.%m.%Y"))
+        reconcile = {**request, "action": "change_reconcile"}
+        code, wrong = self.call(reconcile, host=host)
+        self.assertEqual(code, 1, wrong)
+        order["delivery_display"] = day.strftime("%d.%m.%Y")
+        code, reported = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, reported)
+        difference = reported["result"]["discrepancy"]
+        self.assertTrue(difference["delivered"])
+        self.assertFalse(difference["window_verified"])
+        code, closed = self.call({**reconcile, "accept_observed_digest": difference["digest"]}, host=host)
+        self.assertEqual(code, 0, closed)
+        self.assertEqual(closed["result"]["status"], "edit_original_order_delivered")
+        self.assertFalse(closed["result"]["observed"])
+        self.assertFalse(closed["result"]["original_confirmation_seen"])
 
     def test_meny_edit_fences_draft_reads_and_requires_exact_replacement_recovery(self):
         request, review, live, host = self.begin_meny_edit()

@@ -1203,8 +1203,8 @@ resolved.
    Record the original edit code, package quantities, address, delivery and
    reservation before staging any change.
 2. When the owner asks you to prepare the exact draft, stage only that
-   addition in MENY’s signed-in shop. The CLI grants no browser clicks and
-   its cart-write setting applies to CLI cart operations. Match **Du endrer
+   addition using MENY’s signed-in shop controls. The CLI cart-write setting
+   applies to its own cart operations. Match **Du endrer
    bestilling** to the original order code, verify
    **Avbryt endring** and leave the address and window selected. Open the
    non-binding checkout review and leave **Send oppdatering** untouched.
@@ -1237,12 +1237,16 @@ An owner can accept that specific observation by repeating
 `orders.change_reconcile` with `accept_observed_digest` from the current
 discrepancy. The original browser handoff and payment checks must both be
 clear. An open Vipps page stays pending. The runner rechecks the receipt and
-only archives the same observed values as `edit_acknowledged_with_drift`. This records the
-discrepancy without declaring the approved edit fulfilled or submitting an
-update. A stale original receipt or changed discrepancy needs another read.
-A delivered receipt can omit its reservation. Keep it unknown and show the
-visible delivery outcome. A rotated or missing post-edit display code requires
-an affirmative update acknowledgement tied to the original order.
+only archives the same observed values as `edit_acknowledged_with_drift`.
+This records the merchant’s observed outcome and leaves fulfillment of the
+approved edit unverified. A stale original receipt or changed discrepancy
+needs another read.
+An explicit delivery receipt for the original order can be accepted even if
+the original draft never reached handoff or the edit acknowledgement was lost.
+This archives `edit_original_order_delivered` and leaves the amendment
+unverified. Leave an omitted reservation or full time range unknown. For an active
+receipt, a missing or rotated edit code requires the original explicit update
+acknowledgement.
 
 Verify the actual signed-in account before and after each observation. Hash
 the locally observed edit code and normalized visible delivery address. Keep
@@ -1262,9 +1266,10 @@ which uses the same units as `review_checkout`.
   For a positive cancellation in `outcome`, return just `url`,
   `order_number`, `authenticated`, `account_sha256` and `status: "cancelled"`.
   The `outcome` and `accept_discrepancy` phases also accept `status: "delivered"`
-  only for an explicit delivered status on the exact receipt. Use `null` for
-  an unavailable reservation on a delivered receipt or a missing display
-  edit code in either phase. For
+  only for an explicit delivered status on the exact receipt. If the
+  delivered receipt only shows a date, return it as `delivery_display` with
+  `slot_ref: null`. Use `null` for an unavailable reservation on a delivered
+  receipt or a missing display edit code in either phase. For
   `accept_discrepancy` on an uncancelled receipt, add the same handoff and
   payment closure flags as in `discarded`.
 - `review_edit_checkout` reads the original draft and matching final quote
@@ -1301,8 +1306,8 @@ Use [tab replacement above](#meny-delivery-and-owner-handoffs) once the
 ordinary cart is verified empty, adding `edit_recovery` with the exact original
 `edit_id`. A granted handoff must be beyond its admission time. The replacement
 can read the original outcome or verify a genuinely unsubmitted draft discard.
-It carries no original approval or handoff grant. Avoid reopening or discarding
-an uncertain merchant edit to free the tab.
+The original approval and handoff apply only to the original tab. Preserve
+uncertain merchant edits for reconciliation.
 
 For approved live tests, schedule delivery a few days ahead. When the owner
 has authorized cleanup, cancel that exact test order promptly after it has
