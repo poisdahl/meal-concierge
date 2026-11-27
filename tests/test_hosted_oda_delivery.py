@@ -228,9 +228,14 @@ class HostedOdaDeliveryTest(unittest.TestCase):
                                        addresses=same_account)
         with self.assertRaisesRegex(ValueError, "original Oda account"):
             self.step("observe_delivery", **{**observation, "addresses": [{"id": 9, "isSelected": True}]})
+        with self.assertRaisesRegex(ValueError, "original Oda account"):
+            self.step("observe_delivery", **{**observation, "addresses": [{"id": 7, "isSelected": False}, {"id": 8, "isSelected": True}]})
+        with self.assertRaisesRegex(ValueError, "original Oda account"):
+            self.step("observe_delivery", **{**observation, "browser": {**observation["browser"], "tab_id": "other-tab"}})
         result = self.step("observe_delivery", **observation)
         self.assertEqual(result["status"], "delivery_archived_unknown")
         self.assertTrue(result["observed_address_changed"])
+        self.assertFalse(result["original_cart_still_matches"])
         self.assertEqual(result["original_dispatch_outcome"], "unknown")
 
 

@@ -267,7 +267,7 @@ accept archiving that specific inactive attempt with its outcome unknown. Use
 `owner_accepted_unknown: true` and `original_executor_stopped: true`. Verify the
 owner’s original account using its original opaque address reference in both
 the attached app and the dedicated browser. If the current selected address has
-changed, the original address must still be visible on that account. The
+changed, the original saved address set and dedicated tab must still match. The
 fresh cart and dated slot reads must show that the target is absent from the
 observed selection. A different visible window is reported separately. This
 archive grants no new reservation and does not attest what happened earlier.
@@ -1039,6 +1039,9 @@ window is absent before an inactive ending.
    outcome staying unknown, use `delivery.accept_current` with the same review
    and `owner_accepted_unknown: true`, `original_executor_stopped: true` after
    checking that no old browser click can still run. Keep the original receipts.
+   Answer `verify_observation_context` with freshly derived original account and
+   ordinary-cart fingerprints plus `authenticated: true` and `new_cart: true`.
+   Verify the original account again after the reads.
 
 For checkout, `checkout.prepare` checks the current cart and selected home
 delivery. The `review_checkout` frame has `effect: "checkout_review"`. It can

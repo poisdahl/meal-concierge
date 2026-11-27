@@ -130,7 +130,7 @@ def inactive_readback(record, baseline, current, selected, observed, cart_date, 
     if not same_slot and delivery["slot_id"] not in selected and observed >= boundary and ended:
         record["status"] = "delivery_archived_unknown" if "owner_accepted_unknown_at" in delivery else "delivery_inactive"
         delivery["reconciled_at"] = observed.isoformat()
-        delivery["original_cart_still_matches"] = current is None and baseline == delivery["baseline"]
+        delivery["original_cart_still_matches"] = not address_changed and current is None and baseline == delivery["baseline"]
         delivery["observed_current_delivery"] = ({key: current[key] for key in ("slot_id", "display")}
                                                  if current is not None else None)
         delivery["observed_address_changed"] = address_changed
@@ -157,8 +157,13 @@ def observe(record, value, key):
     context, address = browser_context(value, key, delivery["address_id"])
     physical_changed = "physical_address" in delivery and not hmac.compare_digest(delivery["physical_address"], address)
     address_set = journal.address_selection(value["addresses"])
-    if accepting and delivery["address_id"] not in address_set["ids"]:
-        raise ValueError("verify the original Oda account through its original address reference before archiving")
+    if accepting:
+        original_addresses = [{"id": identity, "isSelected": identity == delivery["address_id"]}
+                              for identity in address_set["ids"]]
+        if (delivery["address_id"] not in address_set["ids"]
+                or not hmac.compare_digest(record["account"], journal.account_fingerprint(original_addresses, key))
+                or not hmac.compare_digest(delivery["browser_context"], context)):
+            raise ValueError("verify the original Oda account, saved addresses and dedicated tab before archiving")
     if physical_changed and not accepting:
         raise ValueError("the reviewed Oda physical delivery address changed")
     selected = [raw["id"] for raw in slots["slots"] if raw["isSelected"]]

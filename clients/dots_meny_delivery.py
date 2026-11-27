@@ -106,7 +106,7 @@ def ending_view(record):
             "readback_calendar_price_display": record["readback_calendar_price_display"]}
 
 
-def readback(host, store, record, *, accept_current=False, original_account_verified=False):
+def readback(host, store, record, *, accept_current=False, original_account_verified=False, verify_account=None):
     window = record["review"]["window"]
     reviewed, current, _ = review_inputs(host, window["slot_ref"], allow_inactive=True)
     observed = datetime.now(timezone.utc)
@@ -117,6 +117,8 @@ def readback(host, store, record, *, accept_current=False, original_account_veri
     if ((address_changed and not (inactive and accept_current and original_account_verified))
             or (not inactive and (not target_selected or reviewed is None or not same_cart))):
         raise HouseholdError("the selected MENY window, address or original cart is unverified; reconcile without resend")
+    if verify_account is not None:
+        verify_account()
     observed_price = reviewed["calendar_price_display"] if reviewed else None
     price_matches = (current.get("calendar_label") == record["binding"]["calendar_label"]
                      and observed_price == record["review"]["calendar_price_display"])
@@ -169,7 +171,8 @@ def handle(host, store, request, command_id):
         accepting = action == "accept_current"
         if accepting:
             host.verify_original_account()
-        return readback(host, store, record, accept_current=accepting, original_account_verified=accepting)
+        return readback(host, store, record, accept_current=accepting, original_account_verified=accepting,
+                        verify_account=host.verify_original_account if accepting else None)
     if record["status"] != "delivery_review" or datetime.now(timezone.utc) >= dots.timestamp(record["expires_at"]):
         raise HouseholdError("the approval expired or the original MENY delivery attempt needs reconciliation")
     slot_ref = record["review"]["window"]["slot_ref"]

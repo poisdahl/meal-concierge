@@ -2246,7 +2246,7 @@ raise SystemExit(client.main())
         self.assertEqual(code, 1, conflict)
 
     def test_owner_can_reconcile_an_expired_dispatch_on_an_explicitly_empty_picker(self):
-        reference, live, host = self.protected_delivery_host(lose_reply=True)
+        reference, live, host = self.protected_delivery_host(lose_reply=True, altered_address=True)
         code, review = self.call({"operation": "delivery", "action": "prepare", "slot_ref": reference}, host=host)
         self.assertEqual(code, 0, review)
         review_ref = {key: review["result"][key] for key in ("review_id", "review_digest")}
@@ -2263,9 +2263,27 @@ raise SystemExit(client.main())
         self.assertEqual(code, 1, blocked)
         self.assertEqual(self.state()["native_delivery_selection"]["status"], "dispatching")
         live["empty_calendar"] = "verified"
+        live["changed"] = True
+        account_reads = 0
+
+        def swapped_account(frame):
+            nonlocal account_reads
+            reply = host(frame)
+            if frame["operation"] == "verify_observation_context":
+                account_reads += 1
+                if account_reads == 2:
+                    reply["result"]["account_sha256"] = "f" * 64
+            return reply
+
+        code, refused = self.call(accept, host=swapped_account)
+        self.assertEqual(code, 1, refused)
+        self.assertIn("original MENY account", refused["error"])
+        self.assertEqual(account_reads, 2)
+        self.assertEqual(self.state()["native_delivery_selection"]["status"], "dispatching")
         code, ending = self.call(accept, host=host)
         self.assertEqual(code, 0, ending)
         self.assertEqual(ending["result"]["status"], "delivery_archived_unknown")
+        self.assertTrue(ending["result"]["observed_address_changed"])
         self.assertIsNone(ending["result"]["observed_current_slot_ref"])
         self.assertEqual(ending["result"]["original_dispatch_outcome"], "unknown")
         self.assertEqual(live["writes"], 1)
