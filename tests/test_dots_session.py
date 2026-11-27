@@ -1050,11 +1050,11 @@ raise SystemExit(dots_session.main())
                            "slots": [{"slot_id": label, "display": label, "date": "2026-10-06",
                                       "start": "09:00", "end": "12:00", "selected": False}]}}
 
-    def rendered_orders_host(self, frame):
-        self.assertEqual(frame["browser_binding"], self.binding)
+    def rendered_orders_host(self, frame, *, binding=None, max_lifetime=60):
+        self.assertEqual(frame["browser_binding"], binding or self.binding)
         self.assertEqual(frame["effect"], "read")
         self.assertLessEqual((datetime.fromisoformat(frame["expires_at"])
-                            - datetime.fromisoformat(frame["emitted_at"])).total_seconds(), 60)
+                            - datetime.fromisoformat(frame["emitted_at"])).total_seconds(), max_lifetime)
         identity = frame["arguments"].get("order_number", "123456")
         path = f"/trumf-profil/nettbutikk/bestilling/{identity}"
         location = {"origin": "https://meny.no", "path": path,
@@ -1078,7 +1078,7 @@ raise SystemExit(dots_session.main())
                           products=[{"name": f"Synthetic item {i}", "quantity": 2} for i in range(18)]
                                    + [{"name": "Synthetic last item", "quantity": 4}],
                           amounts={"Betalt beløp (kort)": "80,00 kr"})
-        return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+        return {"reply_to": frame["call_id"], "browser_binding": binding or self.binding,
                 "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
 
     def test_rendered_orders_keep_qualification_through_core_agent_pages_and_receipts(self):
@@ -1149,8 +1149,8 @@ raise SystemExit(dots_session.main())
         self.assertEqual(self.writes, 0)
         self.assertIsNone(self.state().get("pending_cart_change"))
 
-    def current_order_layout_host(self, frame):
-        response = self.rendered_orders_host(frame)
+    def current_order_layout_host(self, frame, **kwargs):
+        response = self.rendered_orders_host(frame, **kwargs)
         details = response["result"]
         if frame["operation"] == "get_orders":
             details["columns"].append("")
@@ -1161,6 +1161,171 @@ raise SystemExit(dots_session.main())
             details.update(source_archived=True, order_number_label="Ordrenummer", heading_matches_pickup_code=True,
                            item_table_class="ws-order-details-cart", item_disclosure_expanded=True)
         return response
+
+    def prepare_legacy_pending_cart(self):
+        def lose_reply(frame):
+            return None if frame["operation"] == "manipulate_cart" else self.host(frame)
+
+        code, lost = self.call(self.ensure(), host=lose_reply)
+        self.assertEqual(code, 1, lost)
+        shutil.rmtree(self.root / "state/native-cart-dispatch")
+        code, disabled = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
+                                    "browser_binding": self.binding})
+        self.assertEqual(code, 0, disabled)
+        self.frames.clear()
+        return self.inspect_cart()
+
+    def replacement_observation_host(self, frame):
+        target = {"origin": self.binding["origin"], "browser_id": self.binding["browser_id"],
+                  "tab_id": "synthetic-observation-tab"}
+        identity = {key: self.binding[key] for key in ("account_sha256", "cart_context_sha256")}
+        self.assertEqual(frame["browser_binding"], target)
+        self.assertEqual(frame["effect"], "read")
+        self.assertEqual(frame["scope"], "current_account_observation")
+        self.assertNotIn("before_quantities", frame)
+        self.assertNotIn("expected_quantities", frame)
+        if frame["operation"] == "verify_observation_context":
+            return {"reply_to": frame["call_id"], "browser_binding": target,
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "result": {**identity, "authenticated": True, "new_cart": True}}
+        if frame["operation"] == "get_cart":
+            reply = {"reply_to": frame["call_id"], "browser_binding": target,
+                     "observed_at": datetime.now(timezone.utc).isoformat(),
+                     "result": {"source_url": "https://meny.no/varer", "new_cart": True, "snapshot": self.snapshot()}}
+        else:
+            reply = self.current_order_layout_host(frame, binding=target, max_lifetime=120)
+        reply["result"] = {"verified_context": {**identity, "account_verified_before_and_after": True},
+                           "observation": reply["result"]}
+        return reply
+
+    def observe_current(self, request, *, tab_id="synthetic-observation-tab", host=None):
+        return self.run_session("observe", {"tab_id": tab_id, "request": request},
+                                host or self.replacement_observation_host)
+
+    def test_replacement_observation_preserves_the_original_cart_and_orders_guard(self):
+        status = self.prepare_legacy_pending_cart()
+        self.assertEqual(status, {"pending": True, "writes_enabled": False,
+                                  "dispatch_evidence": "no_frame_record", "core_acknowledged": False})
+        before = self.files()
+        registry = self.home / ".meal-concierge-dots-targets"
+        owners = {path.name: path.read_bytes() for path in registry.glob("*.json")}
+        code, cart = self.observe_current({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, cart)
+        self.assertEqual(cart["result"]["cart"]["count"], 0)
+        self.assertNotIn("cart_digest", cart["result"])
+        code, orders = self.observe_current({"operation": "orders", "action": "list", "include_first_receipt": True})
+        self.assertEqual(code, 0, orders)
+        result = orders["result"]
+        self.assertEqual(result["history"]["rendered_row_count"], 1)
+        self.assertEqual(result["first_receipt"]["order_number"], result["history"]["orders"][0]["order_number"])
+        self.assertEqual(result["first_receipt"]["receipt_layout"], "archived")
+        for observation in (cart["result"], result):
+            self.assertEqual(observation["pending_cart_guard"], status)
+            self.assertEqual(observation["observation_scope"], "current_account")
+            self.assertEqual(observation["backend_freshness"], "unverified")
+        self.assertEqual([frame["operation"] for frame in self.frames],
+                         ["verify_observation_context", "get_cart", "verify_observation_context", "get_orders", "get_order"])
+        self.assertEqual(self.frames[-2]["arguments"], {"page": 1, "size": 1})
+        self.assertEqual(self.files(), before)
+        self.assertEqual({path.name: path.read_bytes() for path in registry.glob("*.json")}, owners)
+        self.assertEqual(self.inspect_cart(), status)
+        code, denied = self.call({"operation": "orders", "action": "list"})
+        self.assertEqual(code, 1, denied)
+        self.assertIn("a cart write is uncertain", denied["error"])
+        self.assertEqual(self.writes, 0)
+
+    def test_replacement_observation_rejects_privilege_and_context_drift(self):
+        cart = {"operation": "cart", "action": "get"}
+        self.assertEqual(self.observe_current(cart)[0], 1)  # An ordinary household uses call.
+        self.assertEqual(self.frames, [])
+        status = self.prepare_legacy_pending_cart()
+        before = self.files()
+        for request in (self.ensure(), {"operation": "cart", "action": "accept_current"},
+                        {"operation": "cart", "action": "reconcile_change"},
+                        {"operation": "orders", "action": "get", "order_id": "123456"},
+                        {"operation": "orders", "action": "list", "include_first_receipt": 1}):
+            with self.subTest(request=request):
+                self.assertEqual(self.observe_current(request)[0], 1)
+        self.assertEqual(self.observe_current(cart, tab_id=self.binding["tab_id"])[0], 1)
+        self.assertEqual(self.frames, [])
+
+        def wrong_before_read(frame):
+            reply = self.replacement_observation_host(frame)
+            reply["result"]["account_sha256"] = "c" * 64
+            return reply
+
+        code, refused = self.observe_current({"operation": "orders", "action": "list"}, host=wrong_before_read)
+        self.assertEqual(code, 1, refused)
+        self.assertNotIn("result", refused)
+        self.assertEqual([frame["operation"] for frame in self.frames], ["verify_observation_context"])
+        for invalid in ("account", "cart", "lifetime", "tab", "context_not_verified", "order_edit"):
+            with self.subTest(invalid=invalid):
+                def wrong(frame):
+                    reply = self.replacement_observation_host(frame)
+                    if frame["operation"] == "verify_observation_context":
+                        return reply
+                    context = reply["result"]["verified_context"]
+                    if invalid in {"account", "cart"}:
+                        context["account_sha256" if invalid == "account" else "cart_context_sha256"] = "c" * 64
+                    elif invalid == "lifetime":
+                        reply["observed_at"] = frame["expires_at"]
+                    elif invalid == "tab":
+                        reply["browser_binding"] = self.binding
+                    elif invalid == "context_not_verified":
+                        context["account_verified_before_and_after"] = 1
+                    else:
+                        reply["result"]["observation"]["new_cart"] = False
+                    return reply
+
+                code, output = self.observe_current(cart, host=wrong)
+                self.assertEqual(code, 1, output)
+                self.assertNotIn("result", output)
+        for invalid in ("another_order", "unclassified_receipt"):
+            with self.subTest(invalid=invalid):
+                def wrong_detail(frame):
+                    reply = self.replacement_observation_host(frame)
+                    if frame["operation"] == "get_order":
+                        detail = reply["result"]["observation"]
+                        if invalid == "another_order":
+                            detail["order_number"] = "987654"
+                        else:
+                            for key in ("source_archived", "order_number_label", "heading_matches_pickup_code",
+                                        "item_table_class", "item_disclosure_expanded"):
+                                del detail[key]
+                    return reply
+
+                code, output = self.observe_current({"operation": "orders", "action": "list", "include_first_receipt": True},
+                                                    host=wrong_detail)
+                self.assertEqual(code, 1, output)
+                self.assertNotIn("result", output)
+        self.assertEqual(self.inspect_cart(), status)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.writes, 0)
+
+    def test_replacement_observation_refuses_owned_tab_and_conflicting_checkout_without_frames(self):
+        self.prepare_legacy_pending_cart()
+        root = self.root
+        self.root = root.with_name("other-core")
+        try:
+            binding = {**self.binding, "tab_id": "synthetic-observation-tab", "account_sha256": "c" * 64}
+            code, result = self.run_session("init", {**self.config, "browser_binding": binding})
+            self.assertEqual(code, 0, result)
+        finally:
+            self.root = root
+        cart = {"operation": "cart", "action": "get"}
+        before = self.files()
+        code, owned = self.observe_current(cart)
+        self.assertEqual(code, 1, owned)
+        self.assertIn("already belongs", owned["error"])
+        self.assertEqual(self.files(), before)
+        state_file = root / "state/state.json"
+        state_file.write_text(json.dumps({**self.state(), "pending_checkout": {"status": "awaiting_confirmation"}}))
+        before = self.files()
+        code, protected = self.observe_current(cart, tab_id="synthetic-unused-tab")
+        self.assertEqual(code, 1, protected)
+        self.assertIn("pending ordinary MENY cart", protected["error"])
+        self.assertEqual(self.frames, [])
+        self.assertEqual(self.files(), before)
 
     def test_current_receipt_layout_stays_a_read_only_visible_window(self):
         code, listed = self.call({"operation": "orders"}, host=self.current_order_layout_host)

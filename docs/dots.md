@@ -92,10 +92,10 @@ and delivery-window reads passed. The cart write frame expired without a
 dispatch acknowledgement. The operator reported no click, and a fresh read
 showed the original cart contents. The operation stayed pending. Parser
 fixtures cover the current history table and archived receipt layout. The
-pending cart guard blocks native catalog and order reads in that household.
-A read of the original bound cart can show current contents while the pending
-operation still requires its original dispatch ending. A later live check
-found that the original cloud browser tab was gone.
+pending cart guard still applies to native catalog and order `call` commands.
+If the original cloud browser tab is gone, use a [read-only observation](#current-meny-reads-while-a-write-is-pending)
+to see the current cart and orders on the approved account. Reconciliation
+still requires the original dispatch ending and a fresh bound read.
 Shopping-list matching and guarded cart changes have fixture coverage.
 Delivery reservations, checkout and existing-order changes require the full
 store runtime. Keep each store in its original private household.
@@ -850,6 +850,67 @@ product preparation.
 If the native interface cannot preserve these guards, leave writes disabled.
 Synthetic protocol/recovery tests do not establish authenticated browser
 execution, payment support or dependable long-running availability.
+
+## Current MENY reads while a write is pending
+
+> Read my current MENY cart and order history on your cloud computer. Use a
+> separate tab on my original signed-in account and show me the first displayed
+> order receipt. Keep the original pending write and its disabled write policy.
+
+Use the original native household with a pending ordinary cart change and
+writes already disabled. Select a separate, unowned tab in the same approved
+cloud browser. Verify the account and the ordinary new-cart context using the
+original private fingerprint rules. If that identity cannot be proved, stop
+and use the original private sign-in handoff if needed. Keep account details
+inside the browser and private workspace.
+
+Run `clients/dots_session.py observe --root ABSOLUTE_ORIGINAL_ROOT` from the
+reviewed checkout, using the same stdin/stdout session as `call`. After
+`core_ready`, send one request. Use the actual observation tab ID.
+
+```json
+{"tab_id":"actual observation tab","request":{"operation":"cart","action":"get"}}
+```
+
+```json
+{"tab_id":"actual observation tab","request":{"operation":"orders","action":"list","limit":1,"include_first_receipt":true}}
+```
+
+Every frame has `effect:"read"`, `scope:"current_account_observation"`, a
+fresh `call_id`, and up to 120 seconds. Its `browser_binding` holds only the
+origin and browser and tab identities. Reply with that exact observed target
+in the usual envelope. The first frame, `verify_observation_context`, checks
+the original identity before any cart or order frame. Return only the freshly
+derived `account_sha256` and `cart_context_sha256`, `authenticated:true` and
+`new_cart:true` under `result`. The stored fingerprints stay in the runtime.
+
+For subsequent frames, check the account before and after obtaining each
+observation and verify the approved ordinary-cart context. Place these two
+objects under `result`.
+
+- `verified_context` contains the freshly observed `account_sha256` and
+  `cart_context_sha256` and `account_verified_before_and_after:true`.
+- `observation` is the rendered evidence. For `get_cart`, supply
+  `source_url:"https://meny.no/varer"`, `new_cart:true` and `snapshot` with
+  the complete drawer fields from the cart contract above. For `get_orders`
+  and `get_order`, use the rendered shapes below. Follow the first displayed
+  order's actual archived receipt link only if the tool emits its exact order
+  number. Check the labeled order number and expanded goods on that page.
+
+Each frame accepts one reply within its own expiry. Order history defaults to
+one displayed row. The output labels the results as current account observations
+with unverified backend freshness. `pending_cart_guard` describes the household
+guard during the read. A new observation has its own read window. It uses a tab
+lock in the shared registry and preserves the ownership records, household,
+receipts, pending operation and write policy. Use the original commands and
+evidence for reconciliation. A current cart, including one that matches the
+original quantities, cannot establish the old dispatch ending. The new tab's
+result carries no reconciliation digest.
+
+The shared MENY runtime can observe browser-generated order search and detail
+responses when its browser exposes request history and response bodies. The
+native observation flow uses the rendered cart and order pages. Current order
+responses have no link to a prior cart mutation's terminal state.
 
 ## Read-only rendered order history
 

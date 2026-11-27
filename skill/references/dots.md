@@ -28,6 +28,13 @@ When discovery lists the public MENY catalog, use `catalog.products` or
 public catalog figures. Use a separately verified signed-in store connection
 for stock, cart actions and checkout.
 
+For current MENY cart or order reads while an original write is pending, use
+`clients/dots_session.py observe` as documented in `docs/dots.md`. Work in a
+separate tab on the same verified cloud browser and account. Follow the emitted
+read frames and read the first displayed receipt only if requested. Present
+the results as current rendered observations. Preserve the original pending
+operation and its disabled write policy.
+
 When discovery returns `provider:"oda"` and `transport:"hosted_mcp"`, bind
 this installation to its reported official Oda plugin. Use the discovered
 cart, catalog, delivery and order read actions documented in `docs/dots.md`

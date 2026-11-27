@@ -217,6 +217,34 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False, allow_nan=False), flush=True)
 
 
+def native_frame(command_id, operation, arguments, binding, deadline, *, write=False):
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=max(0, deadline - time.monotonic()))
+    return {"kind": "native_host_request", "command_id": command_id, "call_id": str(uuid.uuid4()),
+            "provider": "meny", "operation": operation, "arguments": arguments,
+            "browser_binding": binding, "emitted_at": now.isoformat(), "expires_at": expires.isoformat(),
+            "effect": "cart_write" if write else "read"}
+
+
+def native_reply(reader, frame, deadline):
+    emit(frame)
+    reply = reader.line(deadline)
+    dots.object_fields(reply, {"reply_to", "browser_binding", "observed_at", "result", "error"},
+                       {"reply_to", "browser_binding", "observed_at"})
+    observed = dots.timestamp(reply["observed_at"])
+    if (reply["reply_to"] != frame["call_id"] or reply["browser_binding"] != frame["browser_binding"]
+            or not dots.timestamp(frame["emitted_at"]) <= observed <= datetime.now(timezone.utc)
+            < dots.timestamp(frame["expires_at"])):
+        raise HouseholdError("native host reply identity or lifetime changed")
+    if ("result" in reply) == ("error" in reply):
+        raise HouseholdError("native host must return exactly one result or error")
+    if "error" in reply:
+        raise HouseholdError("native host operation failed; reconcile any pending write without resend")
+    if not isinstance(reply["result"], dict):
+        raise HouseholdError("native host result must be an object")
+    return reply["result"], observed
+
+
 def configuration(value):
     dots.object_fields(value, {"household", "browser_binding", "allow_cart_writes", "target_registry"}, {"household"})
     if not isinstance(value["household"], str) or not 1 <= len(value["household"].strip()) <= 150:
@@ -377,13 +405,7 @@ class NativeHost:
         deadline = min(self.deadline, deadline or self.deadline, time.monotonic() + reply_seconds)
         if deadline <= time.monotonic():
             raise HouseholdError("native host operation deadline reached")
-        call_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        expires = now + timedelta(seconds=max(0, deadline - time.monotonic()))
-        frame = {"kind": "native_host_request", "command_id": self.command_id, "call_id": call_id,
-                 "provider": "meny", "operation": operation, "arguments": arguments,
-                 "browser_binding": binding, "emitted_at": now.isoformat(), "expires_at": expires.isoformat(),
-                 "effect": "cart_write" if write else "read"}
+        frame = native_frame(self.command_id, operation, arguments, binding, deadline, write=write)
         if write:
             with self.store.locked() as state:
                 if not cart_writes_enabled(self.config, state):
@@ -399,27 +421,14 @@ class NativeHost:
                                            "complete current cart equals before_quantities",
                                            "exact product and unique enabled unobscured control", "unexpired request"]
                 attempt = prepare_cart_dispatch(self.store.directory, state["native_config_sha256"], pending, frame)
-        emit(frame)  # Core intent and immutable household identity precede issuance.
-        reply = self.reader.line(deadline)
-        dots.object_fields(reply, {"reply_to", "browser_binding", "observed_at", "result", "error"},
-                           {"reply_to", "browser_binding", "observed_at"})
-        observed = dots.timestamp(reply["observed_at"])
-        if (reply["reply_to"] != call_id or reply["browser_binding"] != binding
-                or not now <= observed <= datetime.now(timezone.utc) < expires):
-            raise HouseholdError("native host reply identity or lifetime changed")
-        if ("result" in reply) == ("error" in reply):
-            raise HouseholdError("native host must return exactly one result or error")
-        if "error" in reply:
-            raise HouseholdError("native host operation failed; reconcile any pending write without resend")
-        if not isinstance(reply["result"], dict):
-            raise HouseholdError("native host result must be an object")
+        result, observed = native_reply(self.reader, frame, deadline)  # Original write intent precedes emission.
         if write:
-            if set(reply["result"]) != {"dispatched"} or reply["result"]["dispatched"] is not True:
+            if set(result) != {"dispatched"} or result["dispatched"] is not True:
                 raise HouseholdError("native cart dispatch ending is unknown; reconcile without resend")
             dots.exclusive_json(attempt / "ack.json", {
-                "command_id": self.command_id, "call_id": call_id, "observed_at": observed.isoformat(),
+                "command_id": self.command_id, "call_id": frame["call_id"], "observed_at": observed.isoformat(),
             }, MAX_LINE)
-        return (reply["result"], observed) if observation_time else reply["result"]
+        return (result, observed) if observation_time else result
 
     def probe(self, **kwargs):
         self.verify_order_change(None, None, deadline=kwargs.get("deadline"))
@@ -600,6 +609,7 @@ def native_ownership(stack, root, config, *, new):
         path = registry / (target + ".json")
         if new and not os.path.lexists(path):
             dots.exclusive_json(path, owner, MAX_LINE)
+    return registry
 
 
 def application(root, config, reader, command_id, deadline, *, new=False, request=None):
@@ -674,10 +684,106 @@ def inspect_cart(root):
         data = on_demand._read_file(root / "config.json", MAX_LINE)
         config = configuration(on_demand._json(data))
         state, saved = load_bound_state(root, data)
+        return cart_journal_status(state, config, saved)
+
+
+def cart_journal_status(state, config, saved):
+    pending = saved.get("pending_cart_change")
+    ending = cart_dispatch_status(state, saved["native_config_sha256"], pending) if pending else "none"
+    return {"pending": bool(pending), "writes_enabled": cart_writes_enabled(config, saved),
+            "dispatch_evidence": ending, "core_acknowledged": bool(pending and pending.get("dispatch_finished") is True)}
+
+
+def observation_exchange(reader, command_id, target, operation, arguments):
+    deadline = time.monotonic() + 120
+    frame = native_frame(command_id, operation, arguments, target, deadline)
+    frame["scope"] = "current_account_observation"
+    frame["preconditions"] = ["same approved cloud browser on this observation tab",
+                              "fresh matching account before and after the observation",
+                              "fresh matching ordinary cart context without an order edit"]
+    return native_reply(reader, frame, deadline)
+
+
+def observation_reply(reader, command_id, target, identity, operation, arguments):
+    reply, observed_at = observation_exchange(reader, command_id, target, operation, arguments)
+    fields = {"verified_context", "observation"}
+    dots.object_fields(reply, fields, fields)
+    verified = reply["verified_context"]
+    if (verified != {**identity, "account_verified_before_and_after": True}
+            or verified["account_verified_before_and_after"] is not True):
+        raise HouseholdError("replacement tab did not verify the original MENY account and ordinary cart")
+    return reply["observation"], observed_at.isoformat()
+
+
+def current_account_observation(root, value, reader):
+    dots.object_fields(value, {"tab_id", "request"}, {"tab_id", "request"})
+    tab_id, request = value["tab_id"], value["request"]
+    if not isinstance(tab_id, str) or not 1 <= len(tab_id) <= 150 or not tab_id.isprintable() or tab_id != tab_id.strip():
+        raise ValueError("a distinct native cloud observation tab is required")
+    dots.object_fields(request, {"operation", "action", "limit", "include_first_receipt"}, {"operation", "action"})
+    is_cart = request == {"operation": "cart", "action": "get"}
+    limit, receipt = request.get("limit", 1), request.get("include_first_receipt", False)
+    if not is_cart and ((request["operation"], request["action"]) != ("orders", "list")
+                        or type(limit) is not int or not 1 <= limit <= 5 or type(receipt) is not bool):
+        raise ValueError("observation supports only current cart.get or orders.list with optional first receipt")
+
+    root = dots.existing_root(root)
+    on_demand._read_file(root / "command.lock", 0)
+    with ExitStack() as stack:
+        stack.enter_context(file_lock(root / "command.lock"))
+        data = on_demand._read_file(root / "config.json", MAX_LINE)
+        config = configuration(on_demand._json(data))
+        original = config.get("browser_binding")
+        if original is None or tab_id == original["tab_id"]:
+            raise ValueError("use a separate native cloud tab for current-account observation")
+        target = {"origin": original["origin"], "browser_id": original["browser_id"], "tab_id": tab_id}
+        identity = {key: original[key] for key in ("account_sha256", "cart_context_sha256")}
+        registry = native_ownership(stack, root, config, new=False)
+        state = dots.existing_root(root / "state")
+        for name in OWNER_FILES:
+            on_demand._read_file(state / name, 0)
+            stack.enter_context(file_lock(state / name))
+        state, saved = load_bound_state(root, data)
         pending = saved.get("pending_cart_change")
-        ending = cart_dispatch_status(state, saved["native_config_sha256"], pending) if pending else "none"
-        return {"pending": bool(pending), "writes_enabled": cart_writes_enabled(config, saved),
-                "dispatch_evidence": ending, "core_acknowledged": bool(pending and pending.get("dispatch_finished") is True)}
+        status = cart_journal_status(state, config, saved)
+        if (not pending or pending.get("provider") != "meny" or pending.get("order_change") or status["writes_enabled"]
+                or any(saved.get(key) for key in ("pending_checkout", "pending_cancellation", "order_change"))):
+            raise HouseholdError("current-account observation requires a pending ordinary MENY cart change and disabled writes")
+        tab = dots.digest(dots.encoded({key: target[key] for key in ("browser_id", "tab_id")}))
+        stack.enter_context(file_lock(registry / (tab + ".lock")))
+        if os.path.lexists(registry / (tab + ".json")):
+            raise HouseholdError("the observation tab already belongs to an original core household")
+
+        command_id = str(uuid.uuid4())
+        proof, _ = observation_exchange(reader, command_id, target, "verify_observation_context", {})
+        if proof != {**identity, "authenticated": True, "new_cart": True} or (
+                proof["authenticated"] is not True or proof["new_cart"] is not True):
+            raise HouseholdError("replacement tab did not verify the original MENY account and ordinary cart")
+
+        def read(operation, arguments):
+            return observation_reply(reader, command_id, target, identity, operation, arguments)
+
+        result = {"observation_scope": "current_account", **RENDERED_UI_EVIDENCE,
+                  "pending_cart_guard": status}
+        if is_cart:
+            observed, timestamp = read("get_cart", {})
+            fields = {"source_url", "new_cart", "snapshot"}
+            dots.object_fields(observed, fields, fields)
+            if observed["source_url"] != "https://meny.no/varer" or observed["new_cart"] is not True:
+                raise HouseholdError("replacement tab did not show the ordinary MENY cart at /varer")
+            cart = cart_summary(normalize_cart_snapshot(observed["snapshot"]))
+            return {**result, "cart": cart, "observed_at": timestamp}
+        observed, timestamp = read("get_orders", {"page": 1, "size": limit})
+        orders = normalize_order_ui(observed, limit=limit)
+        result.update(history=orders, observed_at=timestamp)
+        if receipt:
+            order_id = orders["orders"][0]["order_number"]
+            observed, timestamp = read("get_order", {"order_number": order_id})
+            detail = normalize_order_ui(observed, order_id=order_id)
+            if detail["receipt_layout"] != "archived":
+                raise HouseholdError("the first displayed MENY order has no verified archived receipt")
+            result["first_receipt"] = {**detail, "observed_at": timestamp}
+        return result
 
 
 def restore_cart_acknowledgement(app, request):
@@ -788,7 +894,7 @@ def command(root, value, reader):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("init", "call", "inspect-cart"))
+    parser.add_argument("action", choices=("init", "call", "inspect-cart", "observe"))
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
     if args.action == "inspect-cart":
@@ -804,8 +910,12 @@ def execute(args, reader):
             result = {"ok": True, "result": inspect_cart(args.root)}
         else:
             value = reader.line(time.monotonic() + 60)
-            result = ({"ok": True, "result": init(args.root, value, reader)} if args.action == "init"
-                      else command(args.root, value, reader))
+            if args.action == "init":
+                result = {"ok": True, "result": init(args.root, value, reader)}
+            elif args.action == "observe":
+                result = {"ok": True, "result": current_account_observation(args.root, value, reader)}
+            else:
+                result = command(args.root, value, reader)
         emit({"kind": "core_result", **result})
         return 0 if result["ok"] else 1
     except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
