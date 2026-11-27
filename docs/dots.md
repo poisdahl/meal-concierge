@@ -1179,6 +1179,103 @@ in the shop. Leave any edit or cancellation untouched until the owner takes
 over. Reopen the exact order receipt to verify the result. Replayed command
 receipts are historical and grant no current merchant action.
 
+### Review and verify an item addition to a MENY order
+
+> On your cloud computer, prepare an addition to my exact existing MENY
+> order. Show the complete revised reservation and ask me to approve it.
+> Recheck the review and hand me the original order update privately. After
+> I submit it, verify that same order and its item quantities in MENY.
+
+Use the original native cloud household and its bound signed-in browser.
+This flow covers an exact product and positive package quantity on an
+eligible home-delivery order. Use the [ordinary handoff above](#meny-delivery-and-owner-handoffs)
+for other changes. Keep the reviewed source and original household available
+until the edit has been resolved.
+
+1. Call `orders.change_begin` before entering the merchant’s edit mode.
+   Supply the original `order_id` and `addition` with its exact `product_id`
+   path, complete visible product-and-package `identity` and integer
+   `quantity`. The ordinary cart must be empty. The `read_edit_receipt` frame
+   with `phase: "original"` reads the exact signed-in order. Record the
+   original edit code, package quantities, address, delivery and reservation
+   before staging any change.
+2. Stage the addition in MENY’s existing-order draft following the merchant
+   UI. Match **Du endrer bestilling** to the original order code, verify
+   **Avbryt endring** and leave the address and window selected. Open the
+   non-binding checkout review and leave **Send oppdatering** untouched.
+   `orders.change_review` takes the `edit_id` and reads the staged review.
+   Show the owner the exact goods, every fee and the full reservation.
+3. After exact approval, call `orders.change_approve` with `edit_id`,
+   `review_id`, `review_digest` and `approved_reservation_ore`. First answer
+   `read_edit_receipt` with `phase: "approval"` from a separate signed-in
+   tab of the same cloud browser. Keep the staged checkout on the bound tab.
+   Then re-read the bound checkout. Changed prices or fees require a new
+   approval, even if the total is the same. Request the native private owner
+   handoff only while `owner_handoff_ready` is true and before
+   `owner_handoff_admit_by`. The owner checks the exact page and presses
+   **Send oppdatering** in MENY. Hand over any actual further Vipps approval.
+4. After the owner returns control, call `orders.change_reconcile` with the
+   original `edit_id`. Observe the bound page before navigating. Keep an
+   open Vipps request in place. Capture a visible original-order update
+   confirmation before reading the exact order receipt afresh. The receipt
+   must match the approved package quantities, address, window and labeled
+   reservation. A goods subtotal omitted by the receipt stays unverified.
+   An unchanged receipt leaves the attempt pending. An explicit merchant
+   cancellation of the original order ends it.
+
+Verify the actual signed-in account before and after each observation. Hash
+the locally observed edit code and normalized visible delivery address. Keep
+the underlying values and any private receipt or gateway links inside the
+cloud browser. All amounts are integer øre except the `payment` snapshot,
+which uses the same units as `review_checkout`.
+
+- `read_edit_receipt` takes the exact `order_id` and `phase`. For an active
+  receipt, return `url`, `order_number`, `authenticated`, `account_sha256`,
+  `status` (`editable` or `confirmed`), `edit_code_sha256`, `address_sha256`,
+  the dated `slot_ref` and `delivery_display`, and labeled `reservation_ore`.
+  Return `product_subtotal_ore` from a separate goods subtotal, or `null` if
+  missing. Return `items_complete`, `item_count` and `items` with their unique
+  visible full product-and-package `identity` and `quantity`. Add `cutoff_at`
+  as an ISO timestamp in `original` and `approval`. In `approval`, report
+  `receipt_browser_id` and `receipt_tab_id` of the separate receipt read.
+  For a positive cancellation in `outcome`, return just `url`,
+  `order_number`, `authenticated`, `account_sha256` and `status: "cancelled"`.
+- `review_edit_checkout` reads the original draft and matching final quote
+  on the bound tab. Return `url`, `authenticated`, `account_sha256`,
+  `edit_code_sha256`, `address_sha256`, `slot_ref`, `ordinary_cart: false`,
+  `abort_available`, `submit_label`, `items_complete`, `item_count`, and the
+  complete `items` with `identity`, `quantity`, exact `product_id` and
+  `unit_price_ore`. Include `payment` with the same fields as
+  `review_checkout` and every observed `price_rows` component. Read the
+  original edit marker and abort control in the cart, then the item prices
+  and payment review. Finish on the same **Send oppdatering** page.
+- `observe_edit_handoff` reads only the current page. Return `status`,
+  `origin`, `path`, `order_id` and `reservation_ore`. Use `payment_pending`
+  only for the original live Vipps gateway with the matching MENY reserve.
+  Supply that reserve and `order_id: null`. Use `edit_confirmed` with the
+  exact original `order_id` and `reservation_ore: null` only for a visible
+  MENY update acknowledgement. Use `ready_for_readback` when the verified
+  MENY tab is safe to navigate, with both values `null`. A different or
+  unverified gateway stays open and blocks readback on that tab.
+
+To abandon an unsubmitted edit, use the matching **Avbryt endring** in the
+shop. After the owner confirms no submission or payment, call
+`orders.change_discard` with `edit_id` and `owner_confirmed_no_submit: true`.
+The ordinary cart must again be empty and the exact original receipt
+unchanged. In `read_edit_receipt` with `phase: "discarded"`, verify
+`original_handoff_ended: true` and `no_payment_pending: true`. Keep an
+unknown result pending. Historical command receipts carry no new handoff.
+If the original tab retires, inspect the exact same-account receipt read-only.
+Use [tab replacement above](#meny-delivery-and-owner-handoffs) once the
+ordinary cart can be verified. Reconcile the original edit on that replacement
+and preserve the original handoff evidence. Avoid reopening or discarding an
+uncertain merchant edit to free the tab.
+
+For approved live tests, schedule delivery a few days ahead. When the owner
+has authorized cleanup, cancel that exact test order promptly after it has
+served its purpose and while MENY permits it. Verify the cancellation against
+the same order.
+
 ## Current MENY reads while a write is pending
 
 > Read my current MENY cart and order history on your cloud computer. Use a

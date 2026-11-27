@@ -19,7 +19,7 @@ from urllib.parse import parse_qsl, urlsplit
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from clients import dots, dots_meny_delivery, dots_meny_handoff
+from clients import dots, dots_meny_delivery, dots_meny_edit, dots_meny_handoff
 from core import HouseholdError, STATE_VERSION, StateStore, _flush_drive_cache, cart_summary
 from menu_planning import digest as planning_digest
 from meny import (MenyCartStoppedError, meny_order_card_status, normalize_cart_snapshot,
@@ -432,10 +432,15 @@ class NativeHost:
         before = self.app._cart_lines(cart_summary(self.last_cart))[0]
         return self.app._native_managed_intent(self.command_id, self.request, before, operations)
 
-    def pending_binding(self):
+    def pending_binding(self, operation):
         state = self.store.read()
         if state.get("native_config_sha256") != dots.digest(dots.encoded(self.config)):
             raise HouseholdError("original native household/browser configuration changed")
+        if (state.get(dots_meny_edit.STATE_KEY) or {}).get("status") == "edit_owner_pending":
+            recovery = (self.request.get("operation") == "orders"
+                        and self.request.get("action") in {"change_reconcile", "change_discard"})
+            if not recovery or operation not in {"observe_edit_handoff", "read_edit_receipt", "verify_observation_context", "get_cart"}:
+                raise HouseholdError("keep the original MENY checkout tab for the owner; reconcile the edit first")
         return state.get("pending_cart_change")
 
     def verify_original_account(self):
@@ -484,11 +489,12 @@ class NativeHost:
         binding = self.config.get("browser_binding")
         if binding is None:
             raise HouseholdError("native cloud browser/account/cart binding is required; no browser started")
-        self.pending_binding()
+        self.pending_binding(operation)
         self.calls += 1
         if self.calls > 64:
             raise HouseholdError("native host command exceeded its call limit")
-        reply_seconds = 120 if operation in {"get_delivery_slots", "product_search", "recipe_search"} and not write else 60
+        reply_seconds = 120 if operation in {"get_delivery_slots", "product_search", "recipe_search",
+                                              "read_edit_receipt", "review_edit_checkout"} and not write else 60
         deadline = min(self.deadline, deadline or self.deadline, time.monotonic() + reply_seconds)
         if deadline <= time.monotonic():
             raise HouseholdError("native host operation deadline reached")
@@ -1349,8 +1355,11 @@ def command(root, value, reader):
     request = value["request"]
     handoff = isinstance(request, dict) and (request.get("operation"), request.get("action")) in (
         ("checkout", "prepare"), ("orders", "change_handoff"))
+    native_edit = (isinstance(request, dict) and request.get("operation") == "orders"
+                   and isinstance(request.get("action"), str) and request["action"] in dots_meny_edit.ACTIONS)
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
             and not handoff
+            and not native_edit
             and not (request.get("operation") == "catalog" and request.get("action") in {"products", "recipes"})
             and not (request.get("operation") == "products" and request.get("action", "prepare") in {"prepare", "get", "apply"})
             and not (request.get("operation") == "delivery" and request.get("action", "list") in {
@@ -1364,12 +1373,14 @@ def command(root, value, reader):
     native_delivery = request.get("operation") == "delivery" and request.get("action", "list") != "list"
     if handoff:
         dots_meny_handoff.validate(request)
+    if native_edit:
+        dots_meny_edit.validate(request)
     if native_delivery:
         dots_meny_delivery.validate(request)
     elif request.get("operation") == "delivery":
         dots.object_fields(request, {"operation", "action", "dates", "response_view", "view_offset",
                                     "view_limit", "view_section"}, {"operation"})
-    if request.get("operation") == "orders" and not handoff:
+    if request.get("operation") == "orders" and not (handoff or native_edit):
         action = request.get("action", "list")
         fields = {"operation", "action", "response_view", "view_offset", "view_limit", "view_section"}
         dots.object_fields(request, fields | ({"limit"} if action == "list" else {"order_id"}),
@@ -1420,8 +1431,12 @@ def command(root, value, reader):
             if not os.path.lexists(target / "result.json"):
                 return {"ok": False, "status": "incomplete", "message": "Original command has no ending; no replay."}
             result = on_demand._json(on_demand._read_file(target / "result.json", on_demand.MAX_MENU))
-            if result["ok"] and (native_delivery or handoff):
+            if result["ok"] and (native_delivery or handoff or native_edit):
                 result["result"].update(observation_scope="historical", dispatch=False)
+                if result["result"].get("owner_handoff_ready") is True:
+                    result["result"].update(owner_handoff_ready=False)
+                    result["result"].pop("next_control", None)
+                    result["result"].pop("owner_handoff_admit_by", None)
             return result
         # Fail missing originals BEFORE publishing a new command intent.
         _, saved, active = load_bound_state(root, config_data, config)
@@ -1431,8 +1446,14 @@ def command(root, value, reader):
         if active != config and apply and not request.get("product_plan_ref"):
             raise ValueError("prepare and review a new saved product plan after resetting the legacy cart")
         write = apply or (request.get("operation") == "cart" and request.get("action") in {"ensure", "clear"})
+        enabling_writes = request.get("operation") == "native_cart_policy" and request.get("enabled") is True
+        if dots_meny_edit.active(saved) and (write or enabling_writes or native_delivery or handoff):
+            raise ValueError("reconcile the original MENY order edit before another write or handoff")
+        if ((saved.get(dots_meny_edit.STATE_KEY) or {}).get("status") == "edit_owner_pending"
+                and not native_edit and request["operation"] in {"orders", "catalog", "cart", "delivery", "products"}):
+            raise ValueError("keep the original MENY checkout tab for the owner; reconcile the edit first")
         if ((saved.get(dots_meny_delivery.STATE_KEY) or {}).get("status") in dots_meny_delivery.PENDING
-                and (write or request.get("operation") == "native_cart_policy" and request.get("enabled") is True)):
+                and (write or enabling_writes)):
             raise ValueError("reconcile the original MENY delivery selection before changing the cart")
         if write and not cart_writes_enabled(active, saved):
             raise ValueError("native cart writes are disabled; no intent or browser operation started")
@@ -1470,6 +1491,8 @@ def command(root, value, reader):
                     result = dots_meny_delivery.handle(app.provider_client, app.store, request, command_id)
                 elif handoff:
                     result = dots_meny_handoff.handle(app.provider_client, app.store, request)
+                elif native_edit:
+                    result = dots_meny_edit.handle(app.provider_client, app.store, request, command_id)
                 else:
                     result = app.handle(request)
                 if write and request["operation"] == "cart" and result.get("status") == "not_dispatched":

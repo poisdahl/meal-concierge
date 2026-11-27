@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
 PRODUCT = "/varer/frokost/havregryn-1234567890123"
+EDIT_PRODUCT = "/varer/middag/pasta-1234567890222"
 
 
 class DotsSessionTests(unittest.TestCase):
@@ -2307,6 +2308,168 @@ raise SystemExit(client.main())
         self.assertFalse(good["result"]["dispatch"])
         code, wrong = self.call({**check, "order_id": "123459"}, host=host)
         self.assertEqual(code, 1, wrong)
+
+    def meny_edit_host(self):
+        order_id = "123456"
+        day = (datetime.now(ZoneInfo("Europe/Oslo")) + timedelta(days=3)).date()
+        weekdays = ("mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag")
+        months = ("januar", "februar", "mars", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "desember")
+        display = f"{weekdays[day.weekday()]} {day.day}. {months[day.month - 1]} kl. 08:00-12:00"
+        original = {"url": f"https://meny.no/trumf-profil/nettbutikk/bestilling/{order_id}",
+                    "order_number": order_id, "authenticated": True, "account_sha256": self.binding["account_sha256"],
+                    "edit_code_sha256": "c" * 64, "address_sha256": "d" * 64,
+                    "slot_ref": f"meny:{day.isoformat()}T08:00/12:00", "delivery_display": display,
+                    "reservation_ore": 12800, "product_subtotal_ore": 2000, "status": "editable", "items_complete": True,
+                    "item_count": 1, "items": [{"identity": "Synthetic oats 500 g", "quantity": 1}]}
+        addition = {"product_id": EDIT_PRODUCT, "identity": "Synthetic pasta 500 g", "quantity": 1}
+        draft = {**{key: original[key] for key in ("authenticated", "account_sha256", "edit_code_sha256", "address_sha256", "slot_ref")},
+                 "url": "https://meny.no/kassen", "ordinary_cart": False, "abort_available": True,
+                 "submit_label": "Send oppdatering", "items_complete": True, "item_count": 2,
+                 "items": [{**original["items"][0], "product_id": PRODUCT, "unit_price_ore": 2000},
+                           {**addition, "unit_price_ore": 1690}],
+                 "payment": {"ready": True, "authenticated": True, "vipps_checked": True, "home_delivery": True,
+                             "submit_enabled": True, "submit_controls": 1, "total": 144.90, "delivery": display,
+                             "price_rows": [False, [["product_subtotal", 3690], ["delivery_price", 4900],
+                                                    ["picking_fee", 5900], ["reserved_total", 14490]]]}}
+        ready = {"status": "ready_for_readback", "origin": "https://meny.no", "path": "/kassen",
+                 "order_id": None, "reservation_ore": None}
+        live = {"original": original, "draft": draft, "handoff": ready, "ready": ready,
+                "cutoff": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), "lose_receipt": False}
+
+        def host(frame):
+            self.assertEqual(frame["effect"], "read")
+            self.assertEqual(frame["browser_binding"], self.binding)
+            operation = frame["operation"]
+            if operation == "verify_observation_context":
+                response = {key: self.binding[key] for key in ("account_sha256", "cart_context_sha256")}
+                response.update(authenticated=True, new_cart=True)
+            elif operation == "get_cart":
+                response = self.snapshot()
+            elif operation == "read_edit_receipt":
+                phase = frame["arguments"]["phase"]
+                self.assertEqual(frame["arguments"]["order_id"], order_id)
+                if live["lose_receipt"]:
+                    return None
+                response = dict(live["original"])
+                if response["status"] == "cancelled":
+                    response = {key: response[key] for key in ("url", "order_number", "authenticated", "account_sha256", "status")}
+                if phase in ("original", "approval"):
+                    response["cutoff_at"] = live["cutoff"]
+                if phase == "approval":
+                    response.update(receipt_tab_id="same-browser-read-tab", receipt_browser_id=self.binding["browser_id"])
+                if phase == "discarded":
+                    response.update(original_handoff_ended=True, no_payment_pending=True)
+            elif operation == "review_edit_checkout":
+                self.assertEqual(frame["arguments"]["order_id"], order_id)
+                self.assertEqual(frame["arguments"]["addition"], addition)
+                response = live["draft"]
+            else:
+                self.assertEqual(operation, "observe_edit_handoff")
+                response = live["handoff"]
+            return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                    "observed_at": datetime.now(timezone.utc).isoformat(), "result": response}
+
+        begin = {"operation": "orders", "action": "change_begin", "order_id": order_id, "addition": addition}
+        return begin, live, host
+
+    def begin_meny_edit(self):
+        begin, live, host = self.meny_edit_host()
+        code, started = self.call(begin, host=host)
+        self.assertEqual(code, 0, started)
+        request = {"operation": "orders", "edit_id": started["result"]["edit_id"]}
+        code, reviewed = self.call({**request, "action": "change_review"}, host=host)
+        self.assertEqual(code, 0, reviewed)
+        return request, reviewed["result"], live, host
+
+    def approve_meny_edit(self, request, review, host, *, command_id=None):
+        return self.call({**request, "action": "change_approve", "review_id": review["review_id"],
+                          "review_digest": review["review_digest"], "approved_reservation_ore": review["quote"]["reservation_ore"]},
+                         command_id=command_id, host=host)
+
+    def test_meny_edit_fee_drift_requires_new_approval_and_handoff_is_never_replayed(self):
+        request, review, live, host = self.begin_meny_edit()
+        live["draft"]["payment"]["price_rows"][1][1:3] = [["delivery_price", 5000], ["picking_fee", 5800]]
+        code, changed = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 0, changed)
+        revised = changed["result"]
+        self.assertTrue(revised["quote_changed"])
+        self.assertEqual(revised["quote"]["reservation_ore"], review["quote"]["reservation_ore"])
+        self.assertNotEqual(revised["review_digest"], review["review_digest"])
+        code, stale = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 1, stale)
+        command_id = str(uuid.uuid4())
+        code, live_handoff = self.approve_meny_edit(request, revised, host, command_id=command_id)
+        self.assertEqual(code, 0, live_handoff)
+        self.assertTrue(live_handoff["result"]["owner_handoff_ready"])
+        self.assertFalse(live_handoff["result"]["dispatch"])
+        before = len(self.frames)
+        code, historical = self.approve_meny_edit(request, revised, host, command_id=command_id)
+        self.assertEqual(code, 0, historical)
+        self.assertFalse(historical["result"]["owner_handoff_ready"])
+        self.assertNotIn("next_control", historical["result"])
+        self.assertEqual(historical["result"]["observation_scope"], "historical")
+        code, duplicate = self.approve_meny_edit(request, revised, host)
+        self.assertEqual(code, 1, duplicate)
+        for conflict in (self.ensure(), {"operation": "orders", "action": "list"},
+                         {"operation": "checkout", "action": "prepare"}):
+            code, blocked = self.call(conflict, host=host)
+            self.assertEqual(code, 1, blocked)
+        self.assertEqual(len(self.frames), before)
+
+    def test_meny_edit_reconcile_preserves_vipps_and_survives_loss_of_receipt(self):
+        request, review, live, host = self.begin_meny_edit()
+        code, approved = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 0, approved)
+        reconcile = {**request, "action": "change_reconcile"}
+        live["handoff"] = {"status": "payment_pending", "origin": "https://api.vipps.no",
+                           "path": "/dwo-api-application/v1/deeplink/vippsgateway", "order_id": None, "reservation_ore": 14490}
+        before = len(self.frames)
+        code, pending = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, pending)
+        self.assertTrue(pending["result"]["owner_payment_pending"])
+        self.assertEqual([entry["operation"] for entry in self.frames[before:]], ["observe_edit_handoff"])
+        live["handoff"] = {**live["ready"], "status": "edit_confirmed", "path": "/kassen/bekreftelse",
+                           "order_id": live["original"]["order_number"]}
+        live["lose_receipt"] = True
+        code, lost = self.call(reconcile, host=host)
+        self.assertEqual(code, 1, lost)
+        self.assertIn("confirmation_observed_at", self.state()["native_meny_edit"])
+        live["handoff"] = live["ready"]
+        live["lose_receipt"] = False
+        code, old = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, old)
+        self.assertFalse(old["result"]["observed"])
+        live["original"].update(status="confirmed", item_count=2, reservation_ore=14490, product_subtotal_ore=None,
+                                items=[{"identity": line["identity"], "quantity": line["quantity"]}
+                                       for line in live["draft"]["items"]])
+        code, completed = self.call(reconcile, host=host)
+        self.assertEqual(code, 0, completed)
+        self.assertEqual(completed["result"]["status"], "edit_observed")
+        self.assertTrue(completed["result"]["original_confirmation_seen"])
+        self.assertIsNone(completed["result"]["receipt_product_subtotal_ore"])
+        self.assertFalse(completed["result"]["dispatch"])
+
+    def test_meny_edit_stale_original_and_wrong_draft_stop_and_terminal_cancel_releases_guard(self):
+        request, review, live, host = self.begin_meny_edit()
+        live["original"]["reservation_ore"] += 100
+        code, overwritten = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 1, overwritten)
+        self.assertIn("committed original MENY order changed", overwritten["error"])
+        live["original"]["reservation_ore"] -= 100
+        for field, bad in (("submit_label", "Til betaling"), ("ordinary_cart", True), ("account_sha256", "f" * 64),
+                           ("edit_code_sha256", "e" * 64), ("address_sha256", "f" * 64)):
+            saved = live["draft"][field]
+            live["draft"][field] = bad
+            code, wrong = self.approve_meny_edit(request, review, host)
+            self.assertEqual(code, 1, wrong)
+            live["draft"][field] = saved
+        live["original"]["status"] = "cancelled"
+        code, cancelled = self.call({**request, "action": "change_reconcile"}, host=host)
+        self.assertEqual(code, 0, cancelled)
+        self.assertEqual(cancelled["result"]["status"], "edit_original_order_cancelled")
+        self.assertFalse(cancelled["result"]["dispatch"])
+        code, ordinary = self.call({"operation": "cart", "action": "get"}, host=host)
+        self.assertEqual(code, 0, ordinary)
 
     def test_native_target_cannot_be_adopted_by_a_second_household(self):
         def lose_write(frame):

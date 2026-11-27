@@ -127,6 +127,9 @@ the schedule. Reuse the same installed paths on its later turn. Check the
 destination for the actual result. For the separate native MENY interface, follow its
 account binding and original receipt recovery in the Dots guide for this
 commit. Review an exact calendar window and obtain reservation approval before
-`delivery.select`. Use the verified MENY tab for `checkout.prepare` with Vipps
-and `orders.change_handoff`. The owner completes payment or an eligible order
-change in the shop.
+`delivery.select`. Use the verified MENY tab for `checkout.prepare` with Vipps.
+For an addition to an existing MENY order, use `orders.change_begin`,
+`change_review`, `change_approve` and `change_reconcile` as documented in the
+[MENY item edit protocol](../../docs/dots.md#review-and-verify-an-item-addition-to-a-meny-order).
+The owner reviews and submits the exact update in the private shop handoff.
+Use `orders.change_handoff` for eligibility and other order changes.
