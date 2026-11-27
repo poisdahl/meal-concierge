@@ -528,18 +528,39 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             self.assertFalse(pending["dispatch"])
             read = self.step("recheck_checkout")
 
-    def archive_unrecognized_checkout(self, *, legacy):
+    def test_unlabeled_tracking_changes_cannot_clear_an_earlier_payment_conflict(self):
         ready = self.saved_card_preflight()
         self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
         read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
-        self.assertEqual(self.step("observe_checkout_order", **self.receipt_observation(read, "linked"))["status"],
-                         "checkout_readback")
-        if not legacy:
-            self.clock.return_value += timedelta(minutes=1)
+        self.step("observe_checkout_order", **self.receipt_observation(read, "linked"))
+        self.clock.return_value += timedelta(minutes=1)
+        for tracking in ("unpaid_order", "picking"):
+            read = self.step("recheck_checkout")
+            receipt = self.receipt_observation(read, "linked", tracking)
+            receipt["browser"]["payment_label"] = None
+            pending = self.step("observe_checkout_order", **receipt)
+            self.assertEqual(pending["status"], "checkout_readback")
+            self.assertTrue(pending["checkout_order"]["payment_conflict_unresolved"])
+            self.assertFalse(pending["dispatch"])
         read = self.step("recheck_checkout")
-        receipt = self.receipt_observation(read, "linked")
-        receipt["browser"]["payment_label"] = "Unfamiliar payment wording"
-        self.assertEqual(self.step("observe_checkout_order", **receipt)["status"], "checkout_readback")
+        self.assertEqual(self.step("observe_checkout_order", **self.receipt_observation(read, "linked"))["status"],
+                         "checkout_confirmed")
+
+    def archive_checkout_payment_observations(self, *, legacy,
+                                               first=("paid_and_modifiable", "Betaling autorisert"),
+                                               latest=("paid_and_modifiable", "Unfamiliar payment wording"),
+                                               archive_tracking=None):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
+        for index, (tracking, label) in enumerate((first, latest)):
+            if index:
+                if not legacy:
+                    self.clock.return_value += timedelta(minutes=1)
+                read = self.step("recheck_checkout")
+            receipt = self.receipt_observation(read, "linked", tracking)
+            receipt["browser"]["payment_label"] = label
+            self.assertEqual(self.step("observe_checkout_order", **receipt)["status"], "checkout_readback")
         self.clock.return_value += timedelta(days=2)
         build = BUILD
         if legacy:
@@ -547,8 +568,9 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             old_ledger = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
             old_ledger.pop("checkout_recovery_version")
             checkout = old_ledger["current"]["delivery"]["checkout"]
-            checkout.pop("unclear_payment_label_at")
+            checkout.pop("unclear_payment_label_at", None)
             checkout["result"].pop("payment_label_unresolved")
+            checkout["result"]["payment_conflict_unresolved"] = checkout["last_labeled_payment"]["payment_evidence_conflicting"]
             journal.write_json(ledger_path, old_ledger)
             target = Path(journal.__file__).parent
             with patch.object(journal, "DOT_WORKSPACE", self.state.parent):
@@ -559,25 +581,52 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             "reviewed_total_ore": 4900, "retirement": self.checkout_retirement(),
         }, "fixture", build)
         stamp = self.clock.return_value.isoformat()
+        tracking = None if archive_tracking is None else {"orderNumber": "linked", "status": archive_tracking}
         return journal.run(self.state, self.directory, self.identifier, {
             "action": "observe_checkout_archive", "frame_id": read["hosted_request"]["frame_id"], "plugin_id": "fixture",
             "addresses": ADDRESS, "address_observed_at": stamp, "cart": snapshot(), "cart_observed_at": stamp,
             "existing_orders": {"orders": [], "hasMore": False}, "orders_observed_at": stamp,
-            "order": None, "tracking": None, "order_observed_at": stamp,
+            "order": None, "tracking": tracking, "order_observed_at": stamp,
         }, "fixture", build)
 
     def test_archived_payment_summary_retains_unfamiliar_wording_after_earlier_authorization(self):
-        done = self.archive_unrecognized_checkout(legacy=False)
+        done = self.archive_checkout_payment_observations(legacy=False)
         self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_unresolved_payment_label")
         self.assertTrue(done["checkout_order"]["payment_label_unresolved"])
         self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "authorized")
 
     def test_legacy_checkout_archive_sees_unrecognized_latest_payment_without_another_order_read(self):
-        done = self.archive_unrecognized_checkout(legacy=True)
+        done = self.archive_checkout_payment_observations(legacy=True)
         self.assertEqual(done["status"], "checkout_archived_unknown")
         self.assertFalse(done["dispatch"])
         self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_unresolved_payment_label")
         self.assertEqual(done["checkout_order"]["payment_observation"], "unrecognized")
+        self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "authorized")
+
+    def test_legacy_checkout_archive_rechecks_earlier_authorization_against_stored_unpaid_tracking(self):
+        done = self.archive_checkout_payment_observations(legacy=True, latest=("unpaid_order", None))
+        self.assertEqual(done["status"], "checkout_archived_unknown")
+        self.assertFalse(done["dispatch"])
+        self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_conflicting_observations")
+        self.assertEqual(done["checkout_order"]["merchant_tracking_status"], "unpaid_order")
+        self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "authorized")
+
+    def test_legacy_archive_conflict_takes_precedence_over_unrecognized_payment_wording(self):
+        done = self.archive_checkout_payment_observations(legacy=True, first=("unpaid_order_change", "Ikke betalt"),
+                                                           latest=("picking", "Unfamiliar payment wording"))
+        self.assertEqual(done["status"], "checkout_archived_unknown")
+        self.assertFalse(done["dispatch"])
+        self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_conflicting_observations")
+        self.assertEqual(done["checkout_order"]["merchant_tracking_status"], "picking")
+        self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "negative")
+
+    def test_archive_reports_when_fresh_linked_tracking_disagrees_with_the_last_payment_label(self):
+        done = self.archive_checkout_payment_observations(legacy=True, latest=("paid_and_modifiable", None),
+                                                           archive_tracking="unpaid_order_change")
+        self.assertEqual(done["status"], "checkout_archived_unknown")
+        self.assertFalse(done["dispatch"])
+        self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_conflicting_observations")
+        self.assertEqual(done["checkout_archive"]["linked_merchant_tracking_status"], "unpaid_order_change")
         self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "authorized")
 
     def test_migrated_payment_conflict_survives_two_unlabeled_reads(self):

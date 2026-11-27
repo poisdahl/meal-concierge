@@ -342,6 +342,21 @@ def retain_last_labeled_payment(checkout):
     return checkout.get("last_labeled_payment")
 
 
+def payment_conflicts_with_tracking(observation, tracking):
+    return (observation == "negative" and tracking in ACTIVE_ORDERS
+            or observation in {"authorized", "paid"} and tracking in {"unpaid_order", "unpaid_order_change"})
+
+
+def recorded_payment_conflict(latest, prior):
+    observation = latest.get("payment_observation")
+    if observation in {"not_visible", "unrecognized"}:
+        observation = prior.get("payment_observation")
+    return (latest.get("payment_evidence_conflicting") is True
+            or latest.get("payment_conflict_unresolved") is True
+            or prior.get("payment_evidence_conflicting") is True
+            or payment_conflicts_with_tracking(observation, latest.get("merchant_tracking_status")))
+
+
 def observe_current_checkout(record, value, key):
     from hosted_oda_cart import bound_times, require_fields, now
     from hosted_oda_delivery import inspect_cart
@@ -365,13 +380,6 @@ def observe_current_checkout(record, value, key):
         date = record["delivery"]["date"]
         prior_payment = retain_last_labeled_payment(checkout) or {}
         latest_payment = checkout.get("result", {})
-        payment_outcome = {"authorized": "previously_reported_authorized", "paid": "previously_reported_paid",
-                           "negative": "previously_reported_negative_or_pending"}.get(prior_payment.get("payment_observation"), "unknown")
-        if (prior_payment.get("payment_evidence_conflicting")
-                or latest_payment.get("payment_conflict_unresolved")):
-            payment_outcome = "previously_conflicting_observations"
-        elif latest_payment.get("payment_label_unresolved") or latest_payment.get("payment_observation") == "unrecognized":
-            payment_outcome = "previously_unresolved_payment_label"
         exact_tracking = None
         detail = None
         if order_id:
@@ -389,6 +397,13 @@ def observe_current_checkout(record, value, key):
                           "items": [{"product_id": item["product"]["id"], "quantity": item["quantity"]} for item in rows[:32]]}
             if value["tracking"] is not None:
                 exact_tracking = hosted_oda.orders_view("order_tracking", verified_provider_result(value["tracking"]), arguments)["status"]
+        last_label = prior_payment.get("payment_observation")
+        payment_outcome = {"authorized": "previously_reported_authorized", "paid": "previously_reported_paid",
+                           "negative": "previously_reported_negative_or_pending"}.get(last_label, "unknown")
+        if recorded_payment_conflict(latest_payment, prior_payment) or payment_conflicts_with_tracking(last_label, exact_tracking):
+            payment_outcome = "previously_conflicting_observations"
+        elif latest_payment.get("payment_label_unresolved") or latest_payment.get("payment_observation") == "unrecognized":
+            payment_outcome = "previously_unresolved_payment_label"
         checkout["archive_observation"] = {"cart_count": view["count"], "order_list_truncated": value["existing_orders"]["hasMore"],
                                            "new_order_refs_on_original_date": [row["orderNumber"] for row in value["existing_orders"]["orders"]
                                                if row["deliveryDate"] == date and row["orderNumber"] != order_id
@@ -464,9 +479,8 @@ def observe_order(record, value, key):
     reviewed = {line["product_id"]: line["quantity"] for line in expected["products"]}
     items_match = quantities == reviewed
     observation = payment_observation(browser["payment_label"])
-    paid = observation in {"authorized", "paid"}
-    conflicting = (tracking in ACTIVE_ORDERS and observation == "negative"
-                   or tracking in {"unpaid_order", "unpaid_order_change"} and paid)
+    conflicting = payment_conflicts_with_tracking(observation, tracking)
+    previous_payment = checkout.get("result", {})
     if observation in {"authorized", "paid", "negative"}:
         checkout["last_labeled_payment"] = {"payment_observation": observation, "merchant_tracking_status": tracking,
                                            "payment_evidence_conflicting": conflicting, "observed_at": observed.isoformat()}
@@ -474,8 +488,8 @@ def observe_order(record, value, key):
             checkout.pop("unclear_payment_label_at", None)
     elif observation == "unrecognized":
         checkout["unclear_payment_label_at"] = observed.isoformat()
-    elif checkout.get("result", {}).get("payment_observation") == "unrecognized":
-        checkout.setdefault("unclear_payment_label_at", checkout["result"]["observed_at"])
+    elif previous_payment.get("payment_observation") == "unrecognized":
+        checkout.setdefault("unclear_payment_label_at", previous_payment["observed_at"])
     prior_payment = retain_last_labeled_payment(checkout)
     exact_review = items_match and total == expected["payable_ore"]
     if delivery.get("owner_handoff"):
@@ -489,13 +503,14 @@ def observe_order(record, value, key):
                           "payment_observation": observation, "payment_evidence_conflicting": conflicting,
                           "payment_label_unresolved": "unclear_payment_label_at" in checkout,
                           "observed_at": observed.isoformat()}
-    if observation in {"not_visible", "unrecognized"} and prior_payment is not None:
-        checkout["result"]["prior_labeled_payment"] = prior_payment
-        label = prior_payment["payment_observation"]
-        checkout["result"]["payment_conflict_unresolved"] = (
-            prior_payment.get("payment_evidence_conflicting") is True
-            or (label == "negative" and tracking in ACTIVE_ORDERS)
-            or (label in {"authorized", "paid"} and tracking in {"unpaid_order", "unpaid_order_change"}))
+    if observation in {"not_visible", "unrecognized"}:
+        prior = prior_payment or {}
+        payment_conflict_unresolved = (recorded_payment_conflict(previous_payment, prior)
+                                       or payment_conflicts_with_tracking(prior.get("payment_observation"), tracking))
+        if prior_payment is not None:
+            checkout["result"]["prior_labeled_payment"] = prior_payment
+        if prior_payment is not None or payment_conflict_unresolved:
+            checkout["result"]["payment_conflict_unresolved"] = payment_conflict_unresolved
     if not items_match:
         changes = sorted(product_id for product_id in reviewed.keys() | quantities.keys()
                          if reviewed.get(product_id) != quantities.get(product_id))

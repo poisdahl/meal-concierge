@@ -395,8 +395,12 @@ reads with `observe_checkout_archive`. If the original order is linked,
 perform the emitted detail and tracking reads for that exact order. Return
 `order`, `tracking` and `order_observed_at`. Use `null` for an attempted
 read that returned no evidence. Any unlinked candidates are evidence
-for the owner, with no claim that the purchase succeeded or failed. The
-archive grants no retry. Any later purchase needs its own approval and window.
+for the owner, with no claim that the purchase succeeded or failed. On an
+exact linked order, a missing or unfamiliar payment label preserves any
+earlier disagreement. A recognized payment label that agrees with tracking
+can resolve it. The archive preserves the earlier label and reports any
+disagreement with fresh tracking for the linked order. Any later purchase
+needs its own approval and window.
 
 [OpenAI guidance on saved cards and private sign-in](https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs)
 
