@@ -155,7 +155,16 @@ def supports_menu_journal(target, mode):
             and (mode != "keep_empty" or f"EMPTY_KEEP_JOURNAL_VERSION = {EMPTY_KEEP_JOURNAL_VERSION}".encode() in lines))
 
 
-def require_idle(state, *, target_program=None):
+def supports_checkout_journal(target):
+    module = target / "hosted_oda_checkout.py"
+    if not module.is_file():
+        return False
+    version = hosted_oda_delivery.checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION
+    with module.open("rb") as stream:
+        return f"CHECKOUT_RECOVERY_JOURNAL_VERSION = {version}".encode() in stream.read(8192).splitlines()
+
+
+def require_idle(state, *, target_program=None, check_target_later=False):
     """Keep the issuing program selectable until its original cart is settled."""
     bound = os.path.lexists(state / BINDING_NAME) or os.path.lexists(state / GENERATION_NAME)
     if not bound and not state.is_relative_to(DOT_WORKSPACE):
@@ -168,8 +177,23 @@ def require_idle(state, *, target_program=None):
         if not current or current["owner"] != str(state):
             return
         if current["status"] not in FINISHED:
+            checkout = hosted_oda_delivery.checkout
+            if current["status"] in checkout.PENDING:
+                delivery = current["delivery"]
+                if now() < checkout.retire_after(delivery["checkout"], owner_handoff=delivery.get("owner_handoff", False)):
+                    raise ValueError("wait for the original Oda checkout permit to expire before changing its program")
+                if check_target_later and target_program is None:
+                    return
+                if target_program is None or not supports_checkout_journal(target_program):
+                    raise ValueError("retain the original pending Oda checkout in a checkout-recovery compatible release")
+                if current.get("maintenance_deferred") is not True:
+                    # Adopt the same journal before selecting a compatible successor.
+                    # Keep its issuing build, generation and financial fence.
+                    current["maintenance_deferred"] = True
+                    write_record(ledger, {"key": saved["key"], "write_generation": saved["write_generation"]}, current)
+                return
             if current.get("maintenance_deferred") is not True:
-                raise ValueError("finish the original hosted Oda cart operation before changing its program")
+                raise ValueError("finish the original hosted Oda cart or checkout operation before changing its program")
             if target_program is not None and "menu" in current:
                 if not (target_program / "hosted_oda_menu.py").is_file():
                     raise ValueError("the target program cannot read the deferred Oda menu operation; retain a menu-capable release")
@@ -567,22 +591,27 @@ def status_view(record):
             checkout = delivery["checkout"]
             review = checkout["review"]
             result["native_report_recorded"] = "native_report_id" in checkout
+            result["checkout_review_amount_scope"] = "attached_app_cart_only" if delivery.get("owner_handoff") else "shop_payable"
             result["checkout_review"] = {field: review[field] for field in (
                 "url", "delivery", "products", "amounts", "payable_ore", "payment_method", "masked_card", "control") if field in review}
             if "result" in checkout:
                 result["checkout_order"] = checkout["result"]
             if record["status"] == "checkout_not_submitted":
                 result["checkout_unsubmitted_reason"] = checkout["unsubmitted_reason"]
+            if record["status"] in {"checkout_archived_unknown", "checkout_order_resolved_by_merchant"}:
+                result["checkout_archive"] = checkout["archive_observation"]
         if record["status"] in {"delivery_dispatched", "checkout_dispatched"}:
             result["pending_response"] = {key: record["frame"][key] for key in ("frame_id", "issued_at", "expires_at")}
         if record["status"] in hosted_oda_delivery.FINISHED:
             result["delivery_evidence_scope"] = "historical_observation"
             result["original_dispatch_outcome"] = (
                 "acknowledged" if delivery.get("acknowledged") else "unknown" if "dispatch_expires_at" in delivery else "none")
-            if record["status"] in {"checkout_confirmed", "checkout_order_inactive"}:
+            if record["status"] in {"checkout_confirmed", "checkout_order_inactive", "checkout_order_observed_changed", "checkout_order_resolved_by_merchant"}:
                 result["original_dispatch_outcome"] = "merchant_order_observed"
             elif record["status"] == "checkout_not_submitted":
                 result["original_dispatch_outcome"] = "reported_not_submitted"
+            elif record["status"] == "checkout_archived_unknown":
+                result["original_dispatch_outcome"] = "merchant_order_observed" if "result" in checkout else "unknown"
     elif "menu" in record:
         menu = record["menu"]
         result["menu_ref"] = menu["source"]["menu_ref"]
@@ -640,6 +669,8 @@ def advance(record, action):
 def continue_from_other_build(record, action):
     if record.get("maintenance_deferred") is not True:
         return False
+    if "checkout" in record.get("delivery", {}):
+        return action in hosted_oda_delivery.checkout.RECOVERY_ACTIONS
     if action in {"acknowledge", "recheck", "observe_recovery", "defer"}:
         return True
     if action == "abort":
@@ -805,7 +836,8 @@ def run(state, directory, operation_id, value, plugin, build):
     elif action == "accept_delivery_current":
         require_fields(value, ("action", "review_digest", "owner_accepted_unknown", "original_executor_stopped"))
     elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery",
-                       "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted", "observe_checkout_unsubmitted"):
+                       "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted", "observe_checkout_unsubmitted",
+                       "recheck_checkout_archive", "observe_checkout_archive"):
         require_fields(value, ("action",))
 
     build = {field: build[field] for field in ("source_commit", "source_sha256", "installed_runtime_sha256")}
@@ -903,8 +935,9 @@ def run(state, directory, operation_id, value, plugin, build):
         result = status_view(record)
         if owner_handoff_ready:
             result["owner_handoff_ready"] = True
+            result["owner_handoff_admit_by"] = record["delivery"]["checkout"]["dispatch_expires_at"]
         if action == "recheck" and "delivery" not in record:
             result["hosted_request"] = record["recovery_read"]
-        elif action not in {"defer", "observe_recovery"} and "frame" in record:
+        elif action not in {"defer", "defer_checkout", "observe_recovery"} and "frame" in record:
             result.update(hosted_request=record["frame"], dispatch=dispatch)
         return result

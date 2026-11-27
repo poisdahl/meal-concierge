@@ -14,8 +14,12 @@ from service_common import safe_order_id
 
 
 BEFORE_WRITE = {"checkout_review", "checkout_preflight"}
-PENDING = {"checkout_dispatched", "checkout_readback", "checkout_owner_pending", "checkout_unsubmitted_read"}
-FINISHED = {"checkout_confirmed", "checkout_order_inactive", "checkout_not_submitted"}
+PENDING = {"checkout_dispatched", "checkout_readback", "checkout_owner_pending", "checkout_unsubmitted_read", "checkout_archive_read"}
+FINISHED = {"checkout_confirmed", "checkout_order_inactive", "checkout_not_submitted", "checkout_archived_unknown",
+            "checkout_order_observed_changed", "checkout_order_resolved_by_merchant"}
+CHECKOUT_RECOVERY_JOURNAL_VERSION = 1
+RECOVERY_ACTIONS = {"defer_checkout", "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted",
+                    "observe_checkout_unsubmitted", "recheck_checkout_archive", "observe_checkout_archive"}
 ORDERS_ARGUMENTS = {"page": 1, "size": 20}
 ACTIVE_ORDERS = {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
 INACTIVE_ORDERS = {"cancelled", "failed"}
@@ -83,12 +87,18 @@ def protect_owner_handoff(record, value, baseline, reservation, context, address
 
     observed = now()
     delivery = record["delivery"]
+    window = reservation["window"]
+    cutoff = hosted_oda.response_time(window["cutoff_at"])
+    hold = hosted_oda.response_time(reservation["expires_at"]) if reservation["expires_at"] else cutoff
+    expires = min(observed + timedelta(minutes=2), cutoff, hold, hosted_oda.response_time(window["start_at"]))
+    if expires <= observed:
+        raise ValueError("the Oda checkout window expired before owner handoff")
     delivery.update(browser_context=context, physical_address=address, reservation=reservation,
                     checkout={"review": {"delivery": reservation["window"], "products": products(value["cart"]), "cart": baseline,
                                          "payment_method": delivery["payment_method"], "payable_ore": baseline["amounts_ore"]["total"]},
                               "browser_id": value["browser"]["browser_id"], "tab_id": value["browser"]["tab_id"],
                               "attempt_id": record["operation_id"], "dispatch_issued_at": observed.isoformat(),
-                              "dispatch_expires_at": observed.isoformat(),
+                              "dispatch_expires_at": expires.isoformat(),
                               "existing_orders": recent_orders(value, slot_time, observed)})
     record["status"] = "checkout_owner_pending"
     record.pop("frame")
@@ -186,27 +196,43 @@ def start_readback(record, value):
 
     checkout = record["delivery"]["checkout"]
     issued = now()
-    if issued < hosted_oda.response_time(checkout["dispatch_expires_at"]):
-        raise ValueError("wait for the original Oda checkout dispatch permit to expire before reconciling")
     if "matched_order_id" not in checkout:
         require_fields(value, ("action", "confirmation"))
         confirmation = value["confirmation"]
-        require_fields(confirmation, ("browser_id", "tab_id", "attempt_id", "url", "order_number", "order_link", "observed_at",
-                                      "native_report_id"))
+        fields = ("browser_id", "tab_id", "attempt_id", "url", "order_number", "order_link", "observed_at", "native_report_id")
+        owner_source = isinstance(confirmation, dict) and "owner_confirmed_original" in confirmation
+        require_fields(confirmation, fields + ("owner_confirmed_original", "retirement") if owner_source else fields)
         order_id = safe_order_id(confirmation["order_number"])
         observed = hosted_oda.response_time(confirmation["observed_at"])
         success_url = "https://oda.com/no/checkout/success/"
+        retry_url = f"https://oda.com/no/checkout/retry/?orderNumber={order_id}"
         receipt_url = OdaBrowser._order_url(order_id)
         if (not hosted_oda.response_time(checkout["dispatch_issued_at"]) <= observed <= issued
-                or any(confirmation[field] != checkout[field] for field in ("browser_id", "tab_id", "attempt_id"))
+                or any(confirmation[field] != checkout[field] for field in ("browser_id", "attempt_id"))
                 or order_id in checkout["existing_orders"]
                 or confirmation["order_link"] not in (None, receipt_url)
-                or (confirmation["url"] != f"{success_url}?orderNumber={order_id}"
+                or (confirmation["url"] not in (f"{success_url}?orderNumber={order_id}", retry_url)
                     and (confirmation["url"] != success_url or confirmation["order_link"] != receipt_url))):
             raise ValueError("bind the original Oda confirmation link or number to its checkout attempt")
+        if owner_source:
+            tab = confirmation["tab_id"]
+            if (record["delivery"].get("owner_handoff") is not True or confirmation["owner_confirmed_original"] is not True
+                    or confirmation["url"] != f"{success_url}?orderNumber={order_id}"
+                    or not isinstance(tab, str) or not 1 <= len(tab) <= 150 or not tab.isprintable()
+                    or tab == checkout["tab_id"]):
+                raise ValueError("use the owner's exact original Oda success link to bind this handed-off checkout")
+            verify_retirement(checkout, confirmation["retirement"])
+        elif confirmation["tab_id"] != checkout["tab_id"]:
+            raise ValueError("bind the original Oda confirmation to the tab that made the attempt")
         record_native_report(checkout, confirmation["native_report_id"])
         checkout["matched_order_id"] = order_id
         checkout["confirmation_observed_at"] = observed.isoformat()
+        if owner_source:
+            checkout["confirmation_source"] = "owner_identified_original_success_link"
+        elif confirmation["url"] == retry_url:
+            checkout["confirmation_source"] = "merchant_retry_page"
+        else:
+            checkout["confirmation_source"] = "original_checkout_confirmation"
     else:
         require_fields(value, ("action", "native_report_id") if "native_report_id" in value else ("action",))
         record_native_report(checkout, value.get("native_report_id"))
@@ -219,10 +245,35 @@ def start_readback(record, value):
                                    for name in ("get_order", "order_tracking")]]}
 
 
+def retire_after(checkout, *, owner_handoff):
+    expiry = hosted_oda.response_time(checkout["dispatch_expires_at"])
+    if owner_handoff:
+        return max(expiry, hosted_oda.response_time(checkout["dispatch_issued_at"]) + timedelta(minutes=2))
+    return expiry
+
+
+def verify_retirement(checkout, evidence):
+    from hosted_oda_cart import require_fields
+
+    require_fields(evidence, ("browser_id", "tab_id", "original_tab_retired", "owner_handoff_ended", "no_pending_bank_action"))
+    if (any(evidence[field] != checkout[field] for field in ("browser_id", "tab_id"))
+            or any(evidence[field] is not True for field in ("original_tab_retired", "owner_handoff_ended", "no_pending_bank_action"))):
+        raise ValueError("verify the original checkout tab, any owner takeover and any bank action are retired")
+
+
+def current_checkout_read(record, issued, status):
+    record["status"] = status
+    record["frame"] = {"frame_id": uuid.uuid4().hex, "plugin_id": record["plugin_id"], "issued_at": issued.isoformat(),
+                       "expires_at": (issued + timedelta(minutes=5)).isoformat(),
+                       "retirement_version": CHECKOUT_RECOVERY_JOURNAL_VERSION,
+                       "tools": [{"tool": "get_delivery_addresses", "arguments": {}}, {"tool": "get_cart", "arguments": {}},
+                                 {"tool": "get_orders", "arguments": ORDERS_ARGUMENTS}]}
+
+
 def start_unsubmitted_read(record, value):
     from hosted_oda_cart import now, require_fields
 
-    fields = ("action", "attempt_id", "reason", "original_executor_retired")
+    fields = ("action", "attempt_id", "reason", "original_executor_retired", "retirement", "owner_confirmed_no_submit")
     require_fields(value, fields + ("native_report_id",) if "native_report_id" in value else fields)
     delivery = record["delivery"]
     checkout = delivery["checkout"]
@@ -231,38 +282,119 @@ def start_unsubmitted_read(record, value):
     reasons = ("host_blocked_before_click", "checkout_click_never_called") if delivery.get("native_saved_card") else (
         "owner_returned_without_submitting", "owner_handoff_never_opened")
     if (value["attempt_id"] != checkout["attempt_id"] or reason not in reasons or value["original_executor_retired"] is not True
-            or issued < hosted_oda.response_time(checkout["dispatch_expires_at"])):
+            or issued < retire_after(checkout, owner_handoff=delivery.get("owner_handoff", False))
+            or (reason == "owner_returned_without_submitting" and value["owner_confirmed_no_submit"] is not True)):
         raise ValueError("require a known pre-submit ending and retire the original Oda executor before reconciling")
+    verify_retirement(checkout, value["retirement"])
     record_native_report(checkout, value.get("native_report_id"))
     checkout["unsubmitted_reason"] = reason
-    record["status"] = "checkout_unsubmitted_read"
-    record["frame"] = {"frame_id": uuid.uuid4().hex, "plugin_id": record["plugin_id"], "issued_at": issued.isoformat(),
-                       "expires_at": (issued + timedelta(minutes=5)).isoformat(),
-                       "tools": [{"tool": "get_delivery_addresses", "arguments": {}}, {"tool": "get_cart", "arguments": {}},
-                                 {"tool": "get_orders", "arguments": ORDERS_ARGUMENTS}]}
+    current_checkout_read(record, issued, "checkout_unsubmitted_read")
 
 
-def observe_unsubmitted(record, value, key):
+def start_unknown_archive(record, value):
+    from hosted_oda_cart import now, require_fields
+
+    fields = ("action", "attempt_id", "owner_accepted_unknown", "reviewed_total_ore", "retirement")
+    require_fields(value, fields + ("native_report_id",) if "native_report_id" in value else fields)
+    delivery = record["delivery"]
+    checkout = delivery["checkout"]
+    issued = now()
+    if (value["attempt_id"] != checkout["attempt_id"] or value["owner_accepted_unknown"] is not True
+            or type(value["reviewed_total_ore"]) is not int or value["reviewed_total_ore"] != checkout["review"]["payable_ore"]
+            or issued < hosted_oda.response_time(checkout["review"]["delivery"]["end_at"])
+            or issued < retire_after(checkout, owner_handoff=delivery.get("owner_handoff", False))):
+        raise ValueError("obtain explicit acceptance of this exact unknown Oda purchase after its original delivery window ends")
+    verify_retirement(checkout, value["retirement"])
+    record_native_report(checkout, value.get("native_report_id"))
+    checkout["owner_accepted_unknown_at"] = issued.isoformat()
+    current_checkout_read(record, issued, "checkout_archive_read")
+    if "matched_order_id" in checkout:
+        order_id = checkout["matched_order_id"]
+        record["frame"]["order_id"] = order_id
+        record["frame"]["tools"].extend({"tool": name, "arguments": {"order_number": order_id}}
+                                          for name in ("get_order", "order_tracking"))
+
+
+def original_account(record, addresses, key):
+    from hosted_oda_cart import account_fingerprint, address_selection
+
+    address_id = record["delivery"]["address_id"]
+    roster = address_selection(addresses)["ids"]
+    selection = [{"id": identity, "isSelected": identity == address_id} for identity in roster]
+    if address_id not in roster or not hmac.compare_digest(account_fingerprint(selection, key), record["account"]):
+        raise ValueError("verify the original Oda account and its delivery addresses before reading the receipt")
+
+
+def observe_current_checkout(record, value, key):
     from hosted_oda_cart import bound_times, require_fields, now
     from hosted_oda_delivery import inspect_cart
 
-    require_fields(value, ("action", "frame_id", "plugin_id", "addresses", "address_observed_at",
-                           "cart_observed_at", "cart", "existing_orders", "orders_observed_at"))
     pending = record["frame"]
-    _, cart_time = bound_times(record, pending, value, key, "cart_observed_at")
-    _, current, _ = inspect_cart(value["cart"])
+    if pending.get("retirement_version") != CHECKOUT_RECOVERY_JOURNAL_VERSION:
+        raise ValueError("reissue the original Oda checkout recovery with the current retirement evidence")
+    archive = record["status"] == "checkout_archive_read"
+    order_id = pending.get("order_id") if archive else None
+    fields = ("action", "frame_id", "plugin_id", "addresses", "address_observed_at", "cart_observed_at", "cart", "existing_orders", "orders_observed_at")
+    require_fields(value, fields + ("order", "tracking", "order_observed_at") if order_id else fields)
+    _, cart_time = bound_times(record, pending, value, key, "cart_observed_at", check_account=not archive)
+    if archive:
+        original_account(record, value["addresses"], key)
+    view, current, _ = inspect_cart(value["cart"], allow_grouped=archive)
     checkout = record["delivery"]["checkout"]
     orders = recent_orders(value, cart_time, now())
-    if (hosted_oda.response_time(value["orders_observed_at"]) >= hosted_oda.response_time(pending["expires_at"])
-            or current["goods_sha256"] != checkout["review"]["cart"]["goods_sha256"]
+    if hosted_oda.response_time(value["orders_observed_at"]) >= hosted_oda.response_time(pending["expires_at"]):
+        raise ValueError("the original Oda order-list observation expired")
+    if archive:
+        date = record["delivery"]["date"]
+        prior = checkout.get("result", {})
+        payment_outcome = {"authorized": "previously_reported_authorized", "paid": "previously_reported_paid"}.get(
+            prior.get("payment_observation"), "unknown")
+        if prior.get("payment_evidence_conflicting"):
+            payment_outcome = "previously_conflicting_observations"
+        exact_tracking = None
+        if order_id:
+            order_time = hosted_oda.response_time(value["order_observed_at"])
+            if not hosted_oda.response_time(value["orders_observed_at"]) <= order_time <= now() < hosted_oda.response_time(pending["expires_at"]):
+                raise ValueError("the exact linked Oda order was not read in the archive frame")
+            arguments = {"order_number": order_id}
+            if value["order"] is not None:
+                hosted_oda.orders_view("get_order", verified_provider_result(value["order"]), arguments)
+            if value["tracking"] is not None:
+                exact_tracking = hosted_oda.orders_view("order_tracking", verified_provider_result(value["tracking"]), arguments)["status"]
+        checkout["archive_observation"] = {"cart_count": view["count"], "order_list_truncated": value["existing_orders"]["hasMore"],
+                                           "new_order_refs_on_original_date": [row["orderNumber"] for row in value["existing_orders"]["orders"]
+                                               if row["deliveryDate"] == date and row["orderNumber"] != order_id
+                                               and row["orderNumber"] not in checkout["existing_orders"]],
+                                           "observed_at": value["orders_observed_at"], "payment_outcome": payment_outcome}
+        record["status"] = "checkout_archived_unknown"
+        if order_id:
+            checkout["archive_observation"].update(linked_order_ref=order_id, linked_merchant_tracking_status=exact_tracking,
+                                                   linked_order_detail_observed=value["order"] is not None)
+            if value["order"] is not None and exact_tracking in ACTIVE_ORDERS | INACTIVE_ORDERS:
+                record["status"] = "checkout_order_resolved_by_merchant"
+    elif (current["goods_sha256"] != checkout["review"]["cart"]["goods_sha256"]
             or set(orders) != set(checkout["existing_orders"])):
         raise ValueError("the original Oda cart or order history changed before a non-submission could be established")
-    record["status"] = "checkout_not_submitted"
+    else:
+        record["status"] = "checkout_not_submitted"
     record.pop("frame")
 
 
+def payment_observation(label):
+    if label is None:
+        return "not_visible"
+    label = text(label).casefold()
+    if re.fullmatch(r"(?:betaling autorisert|payment authorized|betaling reservert|payment reserved)", label):
+        return "authorized"
+    if re.fullmatch(r"(?:betalt(?: med kort)?|paid(?: by card| with card)?|betaling gjennomført|payment complete)", label):
+        return "paid"
+    if re.fullmatch(r"(?:betaling(?:en)? (?:mislyktes|avvist|venter)|ikke betalt|ubetalt|(?:card|payment) declined|payment (?:failed|pending)|unpaid)", label):
+        return "negative"
+    return "unrecognized"
+
+
 def observe_order(record, value, key):
-    from hosted_oda_cart import account_fingerprint, address_selection, bound_times, require_fields
+    from hosted_oda_cart import bound_times, now, require_fields
     from hosted_oda_delivery import physical_address_fingerprint
 
     require_fields(value, ("action", "frame_id", "plugin_id", "addresses", "address_observed_at",
@@ -271,11 +403,7 @@ def observe_order(record, value, key):
     _, observed = bound_times(record, pending, value, key, "observed_at", check_account=False)
     order_id = pending["order_id"]
     delivery = record["delivery"]
-    addresses = address_selection(value["addresses"])
-    original_selection = [{"id": identity, "isSelected": identity == delivery["address_id"]} for identity in addresses["ids"]]
-    if (delivery["address_id"] not in addresses["ids"]
-            or not hmac.compare_digest(account_fingerprint(original_selection, key), record["account"])):
-        raise ValueError("verify the original Oda account and its delivery addresses before reading the receipt")
+    original_account(record, value["addresses"], key)
     checkout = delivery["checkout"]
     expected = checkout["review"]
     browser = value["browser"]
@@ -289,7 +417,7 @@ def observe_order(record, value, key):
             or type(retired) is not bool or retired != (tab != checkout["tab_id"])
             or type(browser["address_id"]) is not int or browser["address_id"] != delivery["address_id"]
             or not hmac.compare_digest(physical_address_fingerprint(browser["address_label"], key), delivery["physical_address"])
-            or type(browser["total_ore"]) is not int or browser["total_ore"] != expected["payable_ore"]
+            or type(browser["total_ore"]) is not int
             or not delivery_matches(expected["delivery"], browser["delivery"], observed.isoformat())):
         raise ValueError("verify the exact original Oda shop confirmation and order on the bound native tab")
     arguments = {"order_number": order_id}
@@ -298,24 +426,39 @@ def observe_order(record, value, key):
     order = hosted_oda.order_row(raw_order, include_products=True)
     tracking = hosted_oda.orders_view("order_tracking", verified_provider_result(value["tracking"]), arguments)["status"]
     quantities = {str(item["product"]["id"]): item["quantity"] for item in order["products"]}
+    total = money_cents(order["grossAmount"])
     if (len(quantities) != len(order["products"])
-            or quantities != {line["product_id"]: line["quantity"] for line in expected["products"]}
-            or money_cents(order["grossAmount"]) != expected["payable_ore"] or order["deliveryDate"] != delivery["date"]
+            or total != browser["total_ore"] or order["deliveryDate"] != delivery["date"]
             or (raw_order.get("deliverySlotDisplay") is not None
                 and not order_slot_matches(expected["delivery"], raw_order["deliverySlotDisplay"], observed))):
-        raise ValueError("the new Oda receipt does not match the reviewed goods, total and date")
-    payment = text(browser["payment_label"]).casefold() if browser["payment_label"] is not None else None
-    observation = {None: "not_visible", "betaling autorisert": "authorized", "payment authorized": "authorized",
-                   "betalt": "paid", "paid": "paid"}.get(payment, "unrecognized")
+        raise ValueError("the two Oda receipts do not establish the original order total and delivery")
+    reviewed = {line["product_id"]: line["quantity"] for line in expected["products"]}
+    items_match = quantities == reviewed
+    observation = payment_observation(browser["payment_label"])
     paid = observation in {"authorized", "paid"}
-    conflicting = (tracking in ACTIVE_ORDERS and observation == "unrecognized"
+    conflicting = (tracking in ACTIVE_ORDERS and observation == "negative"
                    or tracking in {"unpaid_order", "unpaid_order_change"} and paid)
-    checkout["result"] = {"order_id": order_id, "amount_ore": expected["payable_ore"], "currency": "NOK",
+    exact_review = items_match and total == expected["payable_ore"]
+    if delivery.get("owner_handoff"):
+        amounts = {"app_cart_amount_ore": expected["payable_ore"], "matches_handoff_cart": exact_review}
+    else:
+        amounts = {"approved_amount_ore": expected["payable_ore"], "approved_items_match": items_match,
+                   "approved_purchase_matches_order": exact_review}
+    checkout["result"] = {"order_id": order_id, "amount_ore": total, "currency": "NOK", **amounts,
+                          "original_reference_source": checkout.get("confirmation_source", "original_checkout_confirmation"),
                           "merchant_tracking_status": tracking, "merchant_reports_payment_authorized": observation == "authorized",
                           "payment_observation": observation, "payment_evidence_conflicting": conflicting,
                           "observed_at": observed.isoformat()}
-    if tracking in ACTIVE_ORDERS and not conflicting:
-        record["status"] = "checkout_confirmed"
-    elif tracking in INACTIVE_ORDERS:
+    if not items_match:
+        changes = sorted(product_id for product_id in reviewed.keys() | quantities.keys()
+                         if reviewed.get(product_id) != quantities.get(product_id))
+        checkout["result"]["quantity_changes"] = {
+            "count": len(changes), "items": [{"product_id": product_id, "reviewed_quantity": reviewed.get(product_id, 0),
+                                             "observed_quantity": quantities.get(product_id, 0)} for product_id in changes[:32]],
+            "truncated": len(changes) > 32}
+    release = now() >= retire_after(checkout, owner_handoff=delivery.get("owner_handoff", False))
+    if release and tracking in ACTIVE_ORDERS and not conflicting:
+        record["status"] = "checkout_confirmed" if exact_review else "checkout_order_observed_changed"
+    elif release and tracking in INACTIVE_ORDERS:
         record["status"] = "checkout_order_inactive"
     record.pop("frame")

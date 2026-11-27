@@ -322,14 +322,24 @@ def advance(record, value, key):
     action, status = value["action"], record["status"]
     if action == "observe_delivery" and status in {"delivery_read", "delivery_preflight", "delivery_readback", "checkout_preflight"}:
         return observe(record, value, key)
-    if action == "recheck_checkout" and status in {"checkout_dispatched", "checkout_owner_pending", "checkout_readback", "checkout_unsubmitted_read"}:
+    if action == "recheck_checkout" and status in checkout.PENDING:
         checkout.start_readback(record, value)
+        return False
+    if action == "defer_checkout" and status in checkout.PENDING:
+        attempt = record["delivery"]["checkout"]
+        if now() < checkout.retire_after(attempt, owner_handoff=record["delivery"].get("owner_handoff", False)):
+            raise ValueError("wait for the original Oda checkout permit to expire before deferring maintenance")
+        record["maintenance_deferred"] = True
         return False
     if action == "recheck_checkout_unsubmitted" and status in {"checkout_dispatched", "checkout_owner_pending", "checkout_unsubmitted_read"}:
         checkout.start_unsubmitted_read(record, value)
         return False
-    if action == "observe_checkout_unsubmitted" and status == "checkout_unsubmitted_read":
-        checkout.observe_unsubmitted(record, value, key)
+    if action == "recheck_checkout_archive" and status in checkout.PENDING:
+        checkout.start_unknown_archive(record, value)
+        return False
+    if (action, status) in {("observe_checkout_unsubmitted", "checkout_unsubmitted_read"),
+                            ("observe_checkout_archive", "checkout_archive_read")}:
+        checkout.observe_current_checkout(record, value, key)
         return False
     if action == "observe_checkout_order" and status == "checkout_readback" and "frame" in record:
         checkout.observe_order(record, value, key)

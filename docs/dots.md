@@ -280,7 +280,7 @@ shop for checkout and payment. [Official Oda MCP specification](https://oda.com/
 
 ##### Oda checkout and order handoff
 
-On a Dot with native merchant checkout, you can ask:
+Paste this prompt into a Dot with native merchant checkout.
 
 > Review my Oda basket and delivery and show me the exact saved-card total.
 > After I approve that purchase, submit it once in your cloud browser. Hand
@@ -317,11 +317,12 @@ Only the new `dispatch: true` frame with `submit_saved_card_checkout` allows
 one click on the original tab. Immediately compare the entire fresh review
 to the approved review before clicking. Honor any native approvals, expiry
 and payment warnings. Use private takeover for bank approval. Do not click
-again after a lost reply or pending payment. When the permit expires, use
-`recheck_checkout` with `confirmation` containing the original observed
-`url`, `order_number`, `order_link` (if present), `browser_id`, `tab_id`,
-`attempt_id`, `observed_at` and `native_report_id` if available, or `null`.
-Capture the exact order identity from the original merchant confirmation.
+again after a lost reply or pending payment. Capture the exact original
+merchant confirmation immediately with `recheck_checkout`. Its `confirmation`
+object contains `url`, `order_number`, `order_link` (use `null` if absent),
+`browser_id`, `tab_id`, `attempt_id`, `observed_at` and `native_report_id` (use
+`null` until available). The original merchant retry page can identify the
+order for readback. It grants no payment retry or proof that the order failed.
 Complete `observe_checkout_order` with the fresh app detail, tracking and
 address list, plus the exact browser receipt on the same account. Once the
 original confirmation is recorded, a same-account replacement in the same
@@ -332,9 +333,10 @@ Its `browser` fields are `url`, `browser_id`, `tab_id`, `attempt_id`,
 `tracking`, `addresses`, `address_observed_at` and `observed_at`.
 Reissue that read with `recheck_checkout` if needed. Use only the already
 recorded order. Attach a late `native_report_id` to that same readback when
-available. Where the merchant does not identify the original order,
-preserve the unresolved operation. Merchant confirmation and card
-authorization are separate observations.
+available. The permit must expire before readback releases the checkout.
+Merchant order acceptance and card authorization are separate observations.
+If the verified original order differs from the approved goods or amount,
+report both the reviewed and observed result and any visible payment state.
 
 For a review or owner handoff, run `hosted-cart` with a new UUID and
 `begin_checkout`.
@@ -344,7 +346,8 @@ the owner is actually taking over. Complete the same independent
 read frame as a delivery review. `checkout_handoff` returns the app cart,
 selected window and merchant cart link for review. `checkout_owner_pending`
 keeps a real owner handoff exclusive. Offer takeover only when the fresh
-`observe_delivery` reply includes `owner_handoff_ready: true`. Include
+`observe_delivery` reply includes `owner_handoff_ready: true` and the current
+time is before `owner_handoff_admit_by`. Include
 `existing_orders` and `orders_observed_at` from its emitted order-list read.
 If a held window has sold out to other shoppers, `delivery.list` can return
 its reference as `current_selected`.
@@ -358,6 +361,11 @@ the owner's approval. The app's receipt contains its cart amount. Confirm
 the actual payable amount in the shop. Retain and reconcile the original
 attempt before switching between owner and Dot submission. A historical
 receipt does not reopen a handoff.
+If the owner completes that handoff on another device, ask them for the exact
+original Oda success link in their private chat. Use a replacement tab in the
+same cloud browser and supply `owner_confirmed_original: true` and the observed
+retirement of the old checkout. A similar order from search or history cannot
+identify the original attempt.
 In the verified ordinary cart, Oda’s `Fortsett` opens the review flow.
 For an owner handoff, leave `Bekreft og betal` and payment controls to the owner. If the
 shop does not show the requested method, tell the owner what is available
@@ -366,12 +374,29 @@ and let them choose. [Oda order and payment controls](https://hjelp.oda.com/no/a
 An attempt that definitively stopped before a click can be closed with
 `recheck_checkout_unsubmitted` and then `observe_checkout_unsubmitted`.
 Wait for any permit to expire. Supply the exact `attempt_id`,
-`original_executor_retired: true`, the report ID if available and the
-reason observed on that original attempt. Use `host_blocked_before_click` or `checkout_click_never_called`
-for native submission. Use `owner_returned_without_submitting` or
-`owner_handoff_never_opened` for an owner handoff. Complete fresh original
-account, cart and order-list reads. A timeout, missing reply or absent order
-alone leaves the original operation pending.
+`original_executor_retired: true`, `owner_confirmed_no_submit`, the report ID
+if available and the reason observed on that original attempt. Use
+`host_blocked_before_click` or `checkout_click_never_called` for native
+submission. Use `owner_returned_without_submitting` with the owner's explicit
+statement, or `owner_handoff_never_opened`, for an owner handoff. `retirement`
+contains the original `browser_id` and `tab_id` and actual observations
+`original_tab_retired`, `owner_handoff_ended` and `no_pending_bank_action`.
+Complete fresh original account, cart and order-list reads. A timeout, missing
+reply or absent order alone leaves the original operation pending.
+
+Use `defer_checkout` after the permit expires to select a compatible program
+release while the original checkout remains pending and further writes stay
+blocked. Do not switch to a release that cannot preserve its checkout journal.
+After the original delivery window ends, the owner can explicitly accept
+archiving the unresolved purchase as `unknown`. Use `recheck_checkout_archive`
+with the exact `attempt_id`, `reviewed_total_ore`, `owner_accepted_unknown: true`
+and the observed `retirement`. Complete its original-account cart and order
+reads with `observe_checkout_archive`. If the original order is linked,
+perform the emitted detail and tracking reads for that exact order. Return
+`order`, `tracking` and `order_observed_at`. Use `null` for an attempted
+read that returned no evidence. Any unlinked candidates are evidence
+for the owner, with no claim that the purchase succeeded or failed. The
+archive grants no retry. Any later purchase needs its own approval and window.
 
 [OpenAI guidance on saved cards and private sign-in](https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs)
 

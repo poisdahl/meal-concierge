@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hosted_oda
 import hosted_oda_cart as journal
+import install
 
 
 TIME = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
@@ -246,6 +247,11 @@ class HostedOdaDeliveryTest(unittest.TestCase):
                 "order_link": None, "observed_at": self.clock.return_value.isoformat(),
                 "native_report_id": "fixture-report-available-after-completion", **overrides}
 
+    @staticmethod
+    def checkout_retirement(**overrides):
+        return {"browser_id": "cloud", "tab_id": "dedicated", "original_tab_retired": True,
+                "owner_handoff_ended": True, "no_pending_bank_action": True, **overrides}
+
     def test_saved_card_dispatches_once_and_confirms_exact_original_purchase(self):
         ready = self.saved_card_preflight()
         facts = self.checkout_observation(ready, preflight=True)
@@ -261,15 +267,16 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "still owns"):
             journal.run(self.state, self.directory, str(uuid.uuid4()),
                         {"action": "begin_saved_card_checkout", "slot_ref": SLOT, "authorized_addresses": ADDRESS}, "fixture", BUILD)
-        with self.assertRaisesRegex(ValueError, "permit to expire"):
-            self.step("recheck_checkout", confirmation=self.checkout_confirmation("new"))
-        self.clock.return_value += timedelta(seconds=46)
         with self.assertRaisesRegex(ValueError, "original Oda confirmation"):
             self.step("recheck_checkout", confirmation=self.checkout_confirmation("original"))
         with self.assertRaisesRegex(ValueError, "original Oda confirmation"):
             self.step("recheck_checkout", confirmation=self.checkout_confirmation("different", url="https://oda.com/no/checkout/success/?orderNumber=new"))
         read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("new"))
         self.assertFalse(read["dispatch"])
+        pending = self.step("observe_checkout_order", **self.receipt_observation(read, "new"))
+        self.assertEqual(pending["status"], "checkout_readback")
+        self.clock.return_value += timedelta(seconds=46)
+        read = self.step("recheck_checkout")
         receipt = self.receipt_observation(read, "new")
         changed = deepcopy(receipt)
         changed["browser"]["tab_id"] = "retired"
@@ -277,7 +284,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             self.step("observe_checkout_order", **changed)
         changed = deepcopy(receipt)
         changed["order"]["grossAmount"] = 50
-        with self.assertRaisesRegex(ValueError, "reviewed goods, total and date"):
+        with self.assertRaisesRegex(ValueError, "original order total and delivery"):
             self.step("observe_checkout_order", **changed)
         changed = deepcopy(receipt)
         changed["tracking"]["isError"] = True
@@ -285,7 +292,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             self.step("observe_checkout_order", **changed)
         changed = deepcopy(receipt)
         changed["order"]["deliverySlotDisplay"] = "06:00–11:00"
-        with self.assertRaisesRegex(ValueError, "reviewed goods, total and date"):
+        with self.assertRaisesRegex(ValueError, "original order total and delivery"):
             self.step("observe_checkout_order", **changed)
         receipt["browser"].update(tab_id="replacement", original_tab_retired=True)
         receipt["addresses"] = [{"id": 7, "isSelected": False}, {"id": 9, "isSelected": True}]
@@ -355,19 +362,183 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         next_id = str(uuid.uuid4())
         with self.assertRaisesRegex(ValueError, "still owns"):
             journal.run(self.state, self.directory, next_id, new_order, "fixture", BUILD)
+        retire = {"attempt_id": self.identifier, "reason": "owner_returned_without_submitting", "original_executor_retired": True,
+                  "retirement": self.checkout_retirement(), "owner_confirmed_no_submit": True}
         with self.assertRaisesRegex(ValueError, "known pre-submit ending"):
-            self.step("recheck_checkout_unsubmitted", attempt_id=self.identifier, reason="timeout", original_executor_retired=True)
-        read = self.step("recheck_checkout_unsubmitted", attempt_id=self.identifier,
-                         reason="owner_returned_without_submitting", original_executor_retired=True)
+            self.step("recheck_checkout_unsubmitted", **retire)
+        self.clock.return_value += timedelta(minutes=3)
+        with self.assertRaisesRegex(ValueError, "owner takeover"):
+            self.step("recheck_checkout_unsubmitted", **{**retire, "retirement": self.checkout_retirement(owner_handoff_ended=False)})
+        with self.assertRaisesRegex(ValueError, "known pre-submit ending"):
+            self.step("recheck_checkout_unsubmitted", **{**retire, "owner_confirmed_no_submit": False})
+        read = self.step("recheck_checkout_unsubmitted", **retire)
         current = {field: facts[field] for field in ("plugin_id", "addresses", "address_observed_at", "cart_observed_at",
                                                        "cart", "existing_orders", "orders_observed_at")}
         current["frame_id"] = read["hosted_request"]["frame_id"]
+        stamp = self.clock.return_value.isoformat()
+        current.update(address_observed_at=stamp, cart_observed_at=stamp, orders_observed_at=stamp)
         resolved = self.step("observe_checkout_unsubmitted", **current)
         self.assertEqual(resolved["status"], "checkout_not_submitted")
         self.assertFalse(resolved["handoff"]["owner_completion_current"])
         next_request = journal.run(self.state, self.directory, next_id, new_order, "fixture", BUILD)
         self.assertFalse(next_request["dispatch"])
         self.assertFalse(self.step("status")["handoff"]["owner_completion_current"])
+
+    def test_lost_post_click_outcome_passes_only_compatible_maintenance_and_archives_after_original_window(self):
+        ready = self.saved_card_preflight()
+        self.assertTrue(self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))["dispatch"])
+        archive = {"attempt_id": self.identifier, "owner_accepted_unknown": True, "reviewed_total_ore": 4900,
+                   "retirement": self.checkout_retirement()}
+        with self.assertRaisesRegex(ValueError, "original delivery window ends"):
+            self.step("recheck_checkout_archive", **archive)
+        with self.assertRaisesRegex(ValueError, "permit to expire"):
+            self.step("defer_checkout")
+        self.clock.return_value += timedelta(minutes=1)
+        self.assertTrue(self.step("defer_checkout")["maintenance_deferred"])
+        with patch.object(journal, "DOT_WORKSPACE", self.state.parent):
+            release = self.state.parent / "target"
+            release.mkdir()
+            with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
+                journal.require_idle(self.state, target_program=release)
+            (release / "hosted_oda_checkout.py").write_text("CHECKOUT_RECOVERY_JOURNAL_VERSION = 1\n", encoding="utf-8")
+            journal.require_idle(self.state, target_program=release)
+            with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
+                journal.require_idle(self.state)
+        with self.assertRaisesRegex(ValueError, "still owns"):
+            journal.run(self.state, self.directory, str(uuid.uuid4()),
+                        {"action": "begin_saved_card_checkout", "slot_ref": SLOT, "authorized_addresses": ADDRESS}, "fixture", BUILD)
+        self.clock.return_value += timedelta(days=2)
+        with self.assertRaisesRegex(ValueError, "owner takeover"):
+            self.step("recheck_checkout_archive", **{**archive, "retirement": self.checkout_retirement(no_pending_bank_action=False)})
+        new_build = {**BUILD, "source_commit": "d" * 40}
+        read = journal.run(self.state, self.directory, self.identifier, {"action": "recheck_checkout_archive", **archive}, "fixture", new_build)
+        stamp = self.clock.return_value.isoformat()
+        facts = {"frame_id": read["hosted_request"]["frame_id"], "plugin_id": "fixture", "addresses": ADDRESS,
+                 "address_observed_at": stamp, "cart_observed_at": stamp, "cart": snapshot(), "orders_observed_at": stamp,
+                 "existing_orders": {"orders": [self.order_fixture("new-candidate")], "hasMore": True}}
+        archived = self.step("observe_checkout_archive", **facts)
+        self.assertEqual(archived["status"], "checkout_archived_unknown")
+        self.assertEqual(archived["original_dispatch_outcome"], "unknown")
+        self.assertEqual(archived["checkout_archive"]["new_order_refs_on_original_date"], ["new-candidate"])
+        self.assertFalse(self.step("status")["dispatch"])
+
+    def test_original_retry_page_can_bind_failed_order_without_authorizing_payment(self):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        self.clock.return_value += timedelta(minutes=1)
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation(
+            "declined", url="https://oda.com/no/checkout/retry/?orderNumber=declined"))
+        unpaid = self.step("observe_checkout_order", **self.receipt_observation(read, "declined", "unpaid_order"))
+        self.assertEqual(unpaid["status"], "checkout_readback")
+        self.assertFalse(unpaid["dispatch"])
+        read = self.step("recheck_checkout")
+        observed = self.step("observe_checkout_order", **self.receipt_observation(read, "declined", "failed"))
+        self.assertEqual(observed["checkout_order"]["original_reference_source"], "merchant_retry_page")
+        self.assertEqual(observed["status"], "checkout_order_inactive")
+
+    def test_owner_identified_original_confirmation_can_report_observed_changes(self):
+        started = self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS,
+                            payment_method="saved_card", owner_handoff=True)
+        facts = self.checkout_observation(started, preflight=True)
+        facts.pop("checkout")
+        self.step("observe_delivery", **facts)
+        self.clock.return_value += timedelta(minutes=3)
+        with self.assertRaisesRegex(ValueError, "tab that made the attempt"):
+            self.step("recheck_checkout", confirmation=self.checkout_confirmation("changed", tab_id="replacement"))
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation(
+            "changed", tab_id="replacement", owner_confirmed_original=True, retirement=self.checkout_retirement()))
+        receipt = self.receipt_observation(read, "changed", "delivered")
+        receipt["browser"].update(tab_id="replacement", original_tab_retired=True, total_ore=5200, payment_label="Betalt med kort")
+        receipt["order"]["grossAmount"] = 52.0
+        receipt["order"]["products"][0]["quantity"] = 2
+        observed = self.step("observe_checkout_order", **receipt)
+        self.assertEqual(observed["status"], "checkout_order_observed_changed")
+        self.assertFalse(observed["checkout_order"]["matches_handoff_cart"])
+        self.assertNotIn("approved_amount_ore", observed["checkout_order"])
+        self.assertEqual(observed["checkout_order"]["quantity_changes"]["items"],
+                         [{"product_id": "515", "reviewed_quantity": 1, "observed_quantity": 2}])
+        self.assertEqual(observed["checkout_order"]["payment_observation"], "paid")
+        self.assertEqual(observed["checkout_order"]["original_reference_source"], "owner_identified_original_success_link")
+
+    def test_exact_order_archive_preserves_prior_conflict_and_reads_current_merchant_status(self):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
+        receipt = self.receipt_observation(read, "linked")
+        receipt["browser"]["payment_label"] = "Betalingen avvist"
+        earlier = self.step("observe_checkout_order", **receipt)
+        self.assertTrue(earlier["checkout_order"]["payment_evidence_conflicting"])
+        self.clock.return_value += timedelta(days=2)
+        read = self.step("recheck_checkout_archive", attempt_id=self.identifier, owner_accepted_unknown=True,
+                         reviewed_total_ore=4900, retirement=self.checkout_retirement())
+        frame = read["hosted_request"]
+        self.assertEqual([tool["tool"] for tool in frame["tools"][-2:]], ["get_order", "order_tracking"])
+        stamp = self.clock.return_value.isoformat()
+        facts = {"frame_id": frame["frame_id"], "plugin_id": "fixture", "addresses": ADDRESS, "address_observed_at": stamp,
+                 "cart_observed_at": stamp, "cart": snapshot(), "orders_observed_at": stamp,
+                 "existing_orders": {"orders": [self.order_fixture("linked")], "hasMore": False},
+                 "order": self.order_fixture("linked"), "order_observed_at": stamp,
+                 "tracking": {"orderNumber": "linked", "status": "delivered"}}
+        done = self.step("observe_checkout_archive", **facts)
+        self.assertEqual(done["status"], "checkout_order_resolved_by_merchant")
+        self.assertTrue(done["checkout_order"]["payment_evidence_conflicting"])
+        self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_conflicting_observations")
+        self.assertEqual(done["checkout_archive"]["linked_merchant_tracking_status"], "delivered")
+        self.assertEqual(done["checkout_archive"]["new_order_refs_on_original_date"], [])
+
+    def test_owner_handoff_admission_ends_with_the_observed_hold(self):
+        started = self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS,
+                            payment_method="vipps", owner_handoff=True)
+        facts = self.checkout_observation(started, preflight=True)
+        facts.pop("checkout")
+        end = (TIME + timedelta(seconds=5)).isoformat()
+        facts["cart"]["deliverySlot"]["expireAt"] = end
+        owner = self.step("observe_delivery", **facts)
+        self.assertEqual(owner["owner_handoff_admit_by"], end)
+
+    def test_installer_adopts_an_expired_legacy_checkout_but_refuses_its_unsubmitted_frame(self):
+        started = self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS,
+                            payment_method="saved_card", owner_handoff=True)
+        facts = self.checkout_observation(started, preflight=True)
+        facts.pop("checkout")
+        self.step("observe_delivery", **facts)
+        self.clock.return_value += timedelta(minutes=3)
+        read = self.step("recheck_checkout_unsubmitted", attempt_id=self.identifier, reason="owner_handoff_never_opened",
+                         original_executor_retired=True, retirement=self.checkout_retirement(), owner_confirmed_no_submit=False)
+        ledger_path = self.directory / "ledger.json"
+        legacy = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
+        legacy["current"]["frame"].pop("retirement_version")
+        journal.write_json(ledger_path, legacy)
+
+        home, code = (self.state.parent / name for name in ("home", "code"))
+        home.mkdir()
+        code.mkdir()
+        target = code / "staged"
+        target.mkdir()
+        config = home / "config.json"
+        plugin = "plugin_checkout_fixture"
+        journal.write_json(config, {"household": "Fixture", "provider": "oda", "hosted_oda_plugin": plugin})
+        journal.write_json(home / "runtime.json", {"manager": "external", "hosted_oda_plugin": plugin, "code_root": str(code),
+                                                   "paths": {"config": str(config), "state": str(self.state)}})
+        with (patch.object(sys, "argv", ["install.py", "update", "--home", str(home)]),
+              patch.object(journal, "DOT_WORKSPACE", self.state.parent), patch.object(install.os, "umask"),
+              patch.object(install, "assert_stopped"), patch.object(install, "stage_release", return_value=target),
+              patch.object(install, "offline", side_effect=RuntimeError("fixture reached publication"))):
+            with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
+                install.main()
+            (target / "hosted_oda_checkout.py").write_text("CHECKOUT_RECOVERY_JOURNAL_VERSION = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "fixture reached publication"):
+                install.main()
+        adopted = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
+        self.assertTrue(adopted["current"]["maintenance_deferred"])
+        self.assertEqual(adopted["write_generation"], legacy["write_generation"])
+        self.assertEqual(adopted["current"]["build"], legacy["current"]["build"])
+        stamp = self.clock.return_value.isoformat()
+        completion = {"action": "observe_checkout_unsubmitted", "frame_id": read["hosted_request"]["frame_id"], "plugin_id": "fixture",
+                      "addresses": ADDRESS, "cart": facts["cart"], "address_observed_at": stamp, "cart_observed_at": stamp,
+                      "existing_orders": facts["existing_orders"], "orders_observed_at": stamp}
+        with self.assertRaisesRegex(ValueError, "current retirement evidence"):
+            journal.run(self.state, self.directory, self.identifier, completion, "fixture", {**BUILD, "source_commit": "d" * 40})
 
     def test_expired_review_never_dispatches_and_grouped_cart_can_close_error(self):
         reading = self.begin()

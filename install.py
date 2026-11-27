@@ -1473,7 +1473,7 @@ def main():
             if path.exists() and meta.get('hosted_oda_plugin') and args.action in {'update', 'rollback'}:
                 from hosted_oda_cart import require_idle
 
-                require_idle(Path(meta['paths']['state']))
+                require_idle(Path(meta['paths']['state']), check_target_later=True)
             settings = meta.pop('initial_config', None)
             meta.pop('update_operation', None)
             if args.action == 'install' and path.exists():
