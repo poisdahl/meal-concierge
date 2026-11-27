@@ -177,6 +177,15 @@ def receipt(host, order_id, *, phase):
     return result
 
 
+def same_original_receipt(original, observed, *, check_cutoff):
+    optional = {"product_subtotal_ore"}
+    if not check_cutoff:
+        optional.add("cutoff_at")
+    return (all(observed[key] == value for key, value in original.items() if key not in optional)
+            and (original["product_subtotal_ore"] is None or observed["product_subtotal_ore"] is None
+                 or observed["product_subtotal_ore"] == original["product_subtotal_ore"]))
+
+
 def quote(host, record):
     original, addition = record["original"], record["addition"]
     value, observed = host.exchange("review_edit_checkout", {"order_id": original["order_id"],
@@ -202,6 +211,12 @@ def quote(host, record):
     breakdown = payment.get("price_breakdown") or {}
     if breakdown.get("status") != "itemized":
         raise HouseholdError("the complete itemized MENY edit reservation is required")
+    package_total = sum(line["quantity"] * line["unit_price_ore"] for line in items.values())
+    subtotal = breakdown["product_subtotal_ore"]
+    if (package_total != subtotal
+            and not (breakdown["discounts_already_in_subtotal"] is True
+                     and package_total + breakdown["discounts_ore"] == subtotal)):
+        raise HouseholdError("the MENY package prices do not match the reviewed goods subtotal")
     return {"items": [items[key] for key in sorted(items)], "price_breakdown": breakdown,
             "price_rows": sorted(payment["price_rows"][1]), "reservation_ore": money_cents(payment["total"])}, observed
 
@@ -269,7 +284,8 @@ def handle(host, store, request, command_id):
         raise HouseholdError("the exact MENY quote approval expired or changed")
     if action == "change_approve":
         original = record["original"]
-        if receipt(host, original["order_id"], phase="approval") != original:
+        observed = receipt(host, original["order_id"], phase="approval")
+        if not same_original_receipt(original, observed, check_cutoff=True):
             raise HouseholdError("the committed original MENY order changed; do not submit its stale edit")
     reviewed, observed = quote(host, record)
     if datetime.now(timezone.utc) >= dots.timestamp(record["original"]["cutoff_at"]):
@@ -330,7 +346,7 @@ def reconcile(host, store, record, action):
         if host.call("get_cart", {})["items"]:
             raise HouseholdError("the original ordinary MENY cart has not been restored")
         restored = receipt(host, original["order_id"], phase="discarded")
-        if restored != {key: value for key, value in original.items() if key != "cutoff_at"}:
+        if not same_original_receipt(original, restored, check_cutoff=False):
             raise HouseholdError("the untouched original MENY receipt could not be verified")
         ending = "edit_discarded"
     else:

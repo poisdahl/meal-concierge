@@ -2372,8 +2372,9 @@ raise SystemExit(client.main())
         begin = {"operation": "orders", "action": "change_begin", "order_id": order_id, "addition": addition}
         return begin, live, host
 
-    def begin_meny_edit(self):
+    def begin_meny_edit(self, *, original_subtotal=2000):
         begin, live, host = self.meny_edit_host()
+        live["original"]["product_subtotal_ore"] = original_subtotal
         code, started = self.call(begin, host=host)
         self.assertEqual(code, 0, started)
         request = {"operation": "orders", "edit_id": started["result"]["edit_id"]}
@@ -2468,6 +2469,48 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, cancelled)
         self.assertEqual(cancelled["result"]["status"], "edit_original_order_cancelled")
         self.assertFalse(cancelled["result"]["dispatch"])
+        code, ordinary = self.call({"operation": "cart", "action": "get"}, host=host)
+        self.assertEqual(code, 0, ordinary)
+
+    def test_meny_edit_package_prices_reconcile_with_goods_and_included_discounts(self):
+        request, review, live, host = self.begin_meny_edit()
+        draft = live["draft"]
+        draft["items"][0]["unit_price_ore"] += 1000
+        code, wrong = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 1, wrong)
+        self.assertIn("package prices do not match", wrong["error"])
+        self.assertEqual(self.state()["native_meny_edit"]["status"], "edit_review")
+
+        draft["payment"]["price_rows"][1].append(["discounts", -1000])
+        code, changed = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 0, changed)
+        revised = changed["result"]
+        self.assertTrue(revised["quote_changed"])
+        self.assertTrue(revised["quote"]["price_breakdown"]["discounts_already_in_subtotal"])
+        code, approved = self.approve_meny_edit(request, revised, host)
+        self.assertEqual(code, 0, approved)
+        self.assertTrue(approved["result"]["owner_handoff_ready"])
+
+    def test_meny_edit_optional_receipt_subtotal_does_not_block_recovery(self):
+        request, review, live, host = self.begin_meny_edit()
+        discard = {**request, "action": "change_discard", "owner_confirmed_no_submit": True}
+        live["original"]["product_subtotal_ore"] = 2500
+        for code, refused in (self.approve_meny_edit(request, review, host), self.call(discard, host=host)):
+            self.assertEqual(code, 1, refused)
+        live["original"]["product_subtotal_ore"] = None
+        code, discarded = self.call(discard, host=host)
+        self.assertEqual(code, 0, discarded)
+        self.assertEqual(discarded["result"]["status"], "edit_discarded")
+
+        request, review, live, host = self.begin_meny_edit(original_subtotal=None)
+        live["original"]["product_subtotal_ore"] = 2000
+        code, approved = self.approve_meny_edit(request, review, host)
+        self.assertEqual(code, 0, approved)
+        self.assertTrue(approved["result"]["owner_handoff_ready"])
+        discard = {**request, "action": "change_discard", "owner_confirmed_no_submit": True}
+        code, discarded = self.call(discard, host=host)
+        self.assertEqual(code, 0, discarded)
+        self.assertEqual(discarded["result"]["status"], "edit_discarded")
         code, ordinary = self.call({"operation": "cart", "action": "get"}, host=host)
         self.assertEqual(code, 0, ordinary)
 
