@@ -486,6 +486,22 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertEqual(done["checkout_archive"]["linked_merchant_tracking_status"], "delivered")
         self.assertEqual(done["checkout_archive"]["new_order_refs_on_original_date"], [])
 
+    def test_a_missing_later_label_preserves_the_last_explicit_payment_conflict(self):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
+        receipt = self.receipt_observation(read, "linked")
+        receipt["browser"]["payment_label"] = "Betalingen avvist"
+        self.step("observe_checkout_order", **receipt)
+        self.clock.return_value += timedelta(minutes=1)
+        read = self.step("recheck_checkout")
+        later = self.receipt_observation(read, "linked")
+        later["browser"]["payment_label"] = None
+        done = self.step("observe_checkout_order", **later)
+        self.assertEqual(done["status"], "checkout_confirmed")
+        self.assertTrue(done["checkout_order"]["payment_conflict_unresolved"])
+        self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "negative")
+
     def test_owner_handoff_admission_ends_with_the_observed_hold(self):
         started = self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS,
                             payment_method="vipps", owner_handoff=True)
