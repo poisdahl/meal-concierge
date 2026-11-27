@@ -17,7 +17,7 @@ BEFORE_WRITE = {"checkout_review", "checkout_preflight"}
 PENDING = {"checkout_dispatched", "checkout_readback", "checkout_owner_pending", "checkout_unsubmitted_read", "checkout_archive_read"}
 FINISHED = {"checkout_confirmed", "checkout_order_inactive", "checkout_not_submitted", "checkout_archived_unknown",
             "checkout_order_observed_changed", "checkout_order_resolved_by_merchant"}
-CHECKOUT_RECOVERY_JOURNAL_VERSION = 1
+CHECKOUT_RECOVERY_JOURNAL_VERSION = 2
 RECOVERY_ACTIONS = {"defer_checkout", "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted",
                     "observe_checkout_unsubmitted", "recheck_checkout_archive", "observe_checkout_archive"}
 ORDERS_ARGUMENTS = {"page": 1, "size": 20}
@@ -252,6 +252,12 @@ def retire_after(checkout, *, owner_handoff):
     return expiry
 
 
+def defer_recovery(record):
+    # Older installers understand the cart flag but cannot preserve this checkout.
+    record.pop("maintenance_deferred", None)
+    record["checkout_recovery_deferred"] = True
+
+
 def verify_retirement(checkout, evidence):
     from hosted_oda_cart import require_fields
 
@@ -358,18 +364,26 @@ def observe_current_checkout(record, value, key):
     if archive:
         date = record["delivery"]["date"]
         prior_payment = retain_last_labeled_payment(checkout) or {}
-        payment_outcome = {"authorized": "previously_reported_authorized", "paid": "previously_reported_paid"}.get(
-            prior_payment.get("payment_observation"), "unknown")
-        if prior_payment.get("payment_evidence_conflicting"):
+        payment_outcome = {"authorized": "previously_reported_authorized", "paid": "previously_reported_paid",
+                           "negative": "previously_reported_negative_or_pending"}.get(prior_payment.get("payment_observation"), "unknown")
+        if (prior_payment.get("payment_evidence_conflicting")
+                or checkout.get("result", {}).get("payment_conflict_unresolved")):
             payment_outcome = "previously_conflicting_observations"
         exact_tracking = None
+        detail = None
         if order_id:
             order_time = hosted_oda.response_time(value["order_observed_at"])
             if not hosted_oda.response_time(value["orders_observed_at"]) <= order_time <= now() < hosted_oda.response_time(pending["expires_at"]):
                 raise ValueError("the exact linked Oda order was not read in the archive frame")
             arguments = {"order_number": order_id}
             if value["order"] is not None:
-                hosted_oda.orders_view("get_order", verified_provider_result(value["order"]), arguments)
+                raw_order = verified_provider_result(value["order"])
+                hosted_oda.orders_view("get_order", raw_order, arguments)
+                order = hosted_oda.order_row(raw_order, include_products=True)
+                rows = order["products"]
+                detail = {"amount_ore": money_cents(order["grossAmount"]), "currency": order["currency"],
+                          "delivery_date": order["deliveryDate"], "item_count": len(rows), "items_truncated": len(rows) > 32,
+                          "items": [{"product_id": item["product"]["id"], "quantity": item["quantity"]} for item in rows[:32]]}
             if value["tracking"] is not None:
                 exact_tracking = hosted_oda.orders_view("order_tracking", verified_provider_result(value["tracking"]), arguments)["status"]
         checkout["archive_observation"] = {"cart_count": view["count"], "order_list_truncated": value["existing_orders"]["hasMore"],
@@ -380,8 +394,8 @@ def observe_current_checkout(record, value, key):
         record["status"] = "checkout_archived_unknown"
         if order_id:
             checkout["archive_observation"].update(linked_order_ref=order_id, linked_merchant_tracking_status=exact_tracking,
-                                                   linked_order_detail_observed=value["order"] is not None)
-            if value["order"] is not None and exact_tracking in ACTIVE_ORDERS | INACTIVE_ORDERS:
+                                                   linked_order_detail=detail)
+            if detail is not None and exact_tracking in ACTIVE_ORDERS | INACTIVE_ORDERS:
                 record["status"] = "checkout_order_resolved_by_merchant"
     elif (current["goods_sha256"] != checkout["review"]["cart"]["goods_sha256"]
             or set(orders) != set(checkout["existing_orders"])):
@@ -399,7 +413,8 @@ def payment_observation(label):
         return "authorized"
     if re.fullmatch(r"(?:betalt(?: med kort)?|paid(?: by card| with card)?|betaling gjennomført|payment complete)", label):
         return "paid"
-    if re.fullmatch(r"(?:betaling(?:en)? (?:mislyktes|avvist|venter)|ikke betalt|ubetalt|(?:card|payment) declined|payment (?:failed|pending)|unpaid)", label):
+    if re.fullmatch(r"(?:betaling(?:en)? (?:mislyktes|feilet|(?:er )?avvist|venter)|kortet ble avvist|venter på betaling|"
+                    r"ikke betalt|ubetalt|(?:card|payment) declined|payment (?:failed|pending)|unpaid)", label):
         return "negative"
     return "unrecognized"
 
@@ -452,6 +467,12 @@ def observe_order(record, value, key):
     if observation in {"authorized", "paid", "negative"}:
         checkout["last_labeled_payment"] = {"payment_observation": observation, "merchant_tracking_status": tracking,
                                            "payment_evidence_conflicting": conflicting, "observed_at": observed.isoformat()}
+        if not conflicting:
+            checkout.pop("unclear_payment_label_at", None)
+    elif observation == "unrecognized":
+        checkout["unclear_payment_label_at"] = observed.isoformat()
+    elif checkout.get("result", {}).get("payment_observation") == "unrecognized":
+        checkout.setdefault("unclear_payment_label_at", checkout["result"]["observed_at"])
     prior_payment = retain_last_labeled_payment(checkout)
     exact_review = items_match and total == expected["payable_ore"]
     if delivery.get("owner_handoff"):
@@ -463,10 +484,15 @@ def observe_order(record, value, key):
                           "original_reference_source": checkout.get("confirmation_source", "original_checkout_confirmation"),
                           "merchant_tracking_status": tracking, "merchant_reports_payment_authorized": observation == "authorized",
                           "payment_observation": observation, "payment_evidence_conflicting": conflicting,
+                          "payment_label_unresolved": "unclear_payment_label_at" in checkout,
                           "observed_at": observed.isoformat()}
     if observation in {"not_visible", "unrecognized"} and prior_payment is not None:
         checkout["result"]["prior_labeled_payment"] = prior_payment
-        checkout["result"]["payment_conflict_unresolved"] = prior_payment.get("payment_evidence_conflicting") is True
+        label = prior_payment["payment_observation"]
+        checkout["result"]["payment_conflict_unresolved"] = (
+            prior_payment.get("payment_evidence_conflicting") is True
+            or (label == "negative" and tracking in ACTIVE_ORDERS)
+            or (label in {"authorized", "paid"} and tracking in {"unpaid_order", "unpaid_order_change"}))
     if not items_match:
         changes = sorted(product_id for product_id in reviewed.keys() | quantities.keys()
                          if reviewed.get(product_id) != quantities.get(product_id))
@@ -475,7 +501,9 @@ def observe_order(record, value, key):
                                              "observed_quantity": quantities.get(product_id, 0)} for product_id in changes[:32]],
             "truncated": len(changes) > 32}
     release = now() >= retire_after(checkout, owner_handoff=delivery.get("owner_handoff", False))
-    if release and tracking in ACTIVE_ORDERS and not conflicting:
+    unresolved_payment = (conflicting or checkout["result"]["payment_label_unresolved"]
+                          or checkout["result"].get("payment_conflict_unresolved") is True)
+    if release and tracking in ACTIVE_ORDERS and not unresolved_payment:
         record["status"] = "checkout_confirmed" if exact_review else "checkout_order_observed_changed"
     elif release and tracking in INACTIVE_ORDERS:
         record["status"] = "checkout_order_inactive"

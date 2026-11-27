@@ -120,8 +120,14 @@ def registry(state, directory, *, initialize, allow_unbound=False):
         require_fields(anchor_value, ("key", "write_generation"))
         private_path(directory, stat.S_ISDIR)
         saved = read_private(ledger, JOURNAL_LIMIT)
-        require_fields(saved, ("key", "write_generation", "current"))
+        fields = ("key", "write_generation", "current")
+        versioned = "checkout_recovery_version" in saved
+        require_fields(saved, fields + ("checkout_recovery_version",) if versioned else fields)
         verify_record(saved["current"])
+        if versioned and (type(saved["checkout_recovery_version"]) is not int
+                          or saved["checkout_recovery_version"] != hosted_oda_delivery.checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION
+                          or (saved["current"] or {}).get("status") not in hosted_oda_delivery.checkout.PENDING):
+            raise ValueError("use a release that can preserve the original Oda checkout journal version")
         key = saved["key"]
         if (key != anchor_value["key"] or not isinstance(key, str) or len(key) != 32
                 or any(char not in "0123456789abcdef" for char in key)):
@@ -186,10 +192,11 @@ def require_idle(state, *, target_program=None, check_target_later=False):
                     return
                 if target_program is None or not supports_checkout_journal(target_program):
                     raise ValueError("retain the original pending Oda checkout in a checkout-recovery compatible release")
-                if current.get("maintenance_deferred") is not True:
+                if (current.get("checkout_recovery_deferred") is not True or "maintenance_deferred" in current
+                        or "checkout_recovery_version" not in saved):
                     # Adopt the same journal before selecting a compatible successor.
                     # Keep its issuing build, generation and financial fence.
-                    current["maintenance_deferred"] = True
+                    checkout.defer_recovery(current)
                     write_record(ledger, {"key": saved["key"], "write_generation": saved["write_generation"]}, current)
                 return
             if current.get("maintenance_deferred") is not True:
@@ -641,7 +648,7 @@ def status_view(record):
         result["independent_cart_read_required"] = True
     if "recovery_observation" in record:
         result["recovery_observation"] = record["recovery_observation"]
-    if record.get("maintenance_deferred") is True:
+    if record.get("maintenance_deferred") is True or record.get("checkout_recovery_deferred") is True:
         result["maintenance_deferred"] = True
     return result
 
@@ -667,10 +674,10 @@ def advance(record, action):
 
 
 def continue_from_other_build(record, action):
+    if "checkout" in record.get("delivery", {}):
+        return record.get("checkout_recovery_deferred") is True and action in hosted_oda_delivery.checkout.RECOVERY_ACTIONS
     if record.get("maintenance_deferred") is not True:
         return False
-    if "checkout" in record.get("delivery", {}):
-        return action in hosted_oda_delivery.checkout.RECOVERY_ACTIONS
     if action in {"acknowledge", "recheck", "observe_recovery", "defer"}:
         return True
     if action == "abort":
@@ -783,6 +790,8 @@ def initial_restoration(directory, original_id, owner, plugin, generation):
 
 def write_record(ledger, authority, record):
     value = {**authority, "current": record}
+    if record["status"] in hosted_oda_delivery.checkout.PENDING:
+        value["checkout_recovery_version"] = hosted_oda_delivery.checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION
     limit = JOURNAL_LIMIT - JOURNAL_ENDING_RESERVE if record["status"] in BEFORE_WRITE else JOURNAL_LIMIT
     size = len((json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n").encode())
     if size > limit:

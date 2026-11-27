@@ -260,6 +260,10 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertTrue(submit["dispatch"])
         self.assertEqual(submit["hosted_request"]["native_browser"]["action"], "submit_saved_card_checkout")
         self.assertEqual(submit["hosted_request"]["native_browser"]["attempt_id"], self.identifier)
+        protected = journal.read_private(self.directory / "ledger.json", journal.JOURNAL_LIMIT)
+        self.assertEqual(protected["checkout_recovery_version"], 2)
+        with self.assertRaises(ValueError):
+            journal.require_fields(protected, ("key", "write_generation", "current"))
         self.assertFalse(self.step("status")["dispatch"])
         self.assertFalse(self.step("begin_saved_card_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS)["dispatch"])
         with self.assertRaisesRegex(ValueError, "exact Oda delivery review"):
@@ -401,6 +405,9 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
                 journal.require_idle(self.state, target_program=release)
             (release / "hosted_oda_checkout.py").write_text("CHECKOUT_RECOVERY_JOURNAL_VERSION = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
+                journal.require_idle(self.state, target_program=release)
+            (release / "hosted_oda_checkout.py").write_text("CHECKOUT_RECOVERY_JOURNAL_VERSION = 2\n", encoding="utf-8")
             journal.require_idle(self.state, target_program=release)
             with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
                 journal.require_idle(self.state)
@@ -484,13 +491,15 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertTrue(done["checkout_order"]["payment_evidence_conflicting"])
         self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_conflicting_observations")
         self.assertEqual(done["checkout_archive"]["linked_merchant_tracking_status"], "delivered")
+        self.assertEqual(done["checkout_archive"]["linked_order_detail"]["amount_ore"], 4900)
+        self.assertEqual(done["checkout_archive"]["linked_order_detail"]["items"], [{"product_id": 515, "quantity": 1}])
         self.assertEqual(done["checkout_archive"]["new_order_refs_on_original_date"], [])
 
     def test_a_missing_later_label_preserves_the_last_explicit_payment_conflict(self):
         ready = self.saved_card_preflight()
         self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
         read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
-        receipt = self.receipt_observation(read, "linked")
+        receipt = self.receipt_observation(read, "linked", "unpaid_order")
         receipt["browser"]["payment_label"] = "Betalingen avvist"
         self.step("observe_checkout_order", **receipt)
         self.clock.return_value += timedelta(minutes=1)
@@ -498,9 +507,26 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         later = self.receipt_observation(read, "linked")
         later["browser"]["payment_label"] = None
         done = self.step("observe_checkout_order", **later)
-        self.assertEqual(done["status"], "checkout_confirmed")
+        self.assertEqual(done["status"], "checkout_readback")
         self.assertTrue(done["checkout_order"]["payment_conflict_unresolved"])
         self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "negative")
+        read = self.step("recheck_checkout")
+        paid = self.receipt_observation(read, "linked")
+        paid["browser"]["payment_label"] = "Betalt med kort"
+        self.assertEqual(self.step("observe_checkout_order", **paid)["status"], "checkout_confirmed")
+
+    def test_unfamiliar_visible_payment_wording_fences_checkout_even_if_the_label_disappears(self):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        self.clock.return_value += timedelta(minutes=1)
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
+        for label in ("Betaling feilet", "Unfamiliar payment message", None):
+            receipt = self.receipt_observation(read, "linked", "picking")
+            receipt["browser"]["payment_label"] = label
+            pending = self.step("observe_checkout_order", **receipt)
+            self.assertEqual(pending["status"], "checkout_readback")
+            self.assertFalse(pending["dispatch"])
+            read = self.step("recheck_checkout")
 
     def test_migrated_payment_conflict_survives_two_unlabeled_reads(self):
         ready = self.saved_card_preflight()
@@ -552,6 +578,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         ledger_path = self.directory / "ledger.json"
         legacy = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
         legacy["current"]["frame"].pop("retirement_version")
+        legacy.pop("checkout_recovery_version")
         journal.write_json(ledger_path, legacy)
 
         home, code = (self.state.parent / name for name in ("home", "code"))
@@ -570,11 +597,13 @@ class HostedOdaDeliveryTest(unittest.TestCase):
               patch.object(install, "offline", side_effect=RuntimeError("fixture reached publication"))):
             with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
                 install.main()
-            (target / "hosted_oda_checkout.py").write_text("CHECKOUT_RECOVERY_JOURNAL_VERSION = 1\n", encoding="utf-8")
+            (target / "hosted_oda_checkout.py").write_text("CHECKOUT_RECOVERY_JOURNAL_VERSION = 2\n", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "fixture reached publication"):
                 install.main()
         adopted = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
-        self.assertTrue(adopted["current"]["maintenance_deferred"])
+        self.assertTrue(adopted["current"]["checkout_recovery_deferred"])
+        self.assertNotIn("maintenance_deferred", adopted["current"])
+        self.assertEqual(adopted["checkout_recovery_version"], 2)
         self.assertEqual(adopted["write_generation"], legacy["write_generation"])
         self.assertEqual(adopted["current"]["build"], legacy["current"]["build"])
         stamp = self.clock.return_value.isoformat()
