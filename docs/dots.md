@@ -884,7 +884,9 @@ origin and browser and tab identities. Reply with that exact observed target
 in the usual envelope. The first frame, `verify_observation_context`, checks
 the original identity before any cart or order frame. Return only the freshly
 derived `account_sha256` and `cart_context_sha256`, `authenticated:true` and
-`new_cart:true` under `result`. The stored fingerprints stay in the runtime.
+`new_cart:true` under `result`. The observer omits the stored fingerprints
+from its frames and compares the host's fresh attestation with the original
+binding. Those checks rely on the browser operator's observations.
 
 For subsequent frames, check the account before and after obtaining each
 observation and verify the approved ordinary-cart context. Place these two
@@ -902,10 +904,10 @@ objects under `result`.
 Each frame accepts one reply within its own expiry. Order history defaults to
 one displayed row. The output labels the results as current account observations
 with unverified backend freshness. `pending_cart_guard` describes the household
-guard during the read. A new observation has its own read window. It uses a tab
-lock in the shared registry and preserves the ownership records, household,
-receipts, pending operation and write policy. Use the original commands and
-evidence for reconciliation. A current cart, including one that matches the
+guard during the read. A new observation has its own read window. It may create
+an empty tab lock file in the shared registry. It preserves ownership records,
+the household, receipts, the pending operation and write policy. Use the
+original commands and evidence for reconciliation. A current cart, including one that matches the
 original quantities, cannot establish the old dispatch ending. The new tab's
 result carries no reconciliation digest.
 
