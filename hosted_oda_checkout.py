@@ -364,12 +364,13 @@ def observe_current_checkout(record, value, key):
     if archive:
         date = record["delivery"]["date"]
         prior_payment = retain_last_labeled_payment(checkout) or {}
+        latest_payment = checkout.get("result", {})
         payment_outcome = {"authorized": "previously_reported_authorized", "paid": "previously_reported_paid",
                            "negative": "previously_reported_negative_or_pending"}.get(prior_payment.get("payment_observation"), "unknown")
         if (prior_payment.get("payment_evidence_conflicting")
-                or checkout.get("result", {}).get("payment_conflict_unresolved")):
+                or latest_payment.get("payment_conflict_unresolved")):
             payment_outcome = "previously_conflicting_observations"
-        elif checkout.get("result", {}).get("payment_label_unresolved"):
+        elif latest_payment.get("payment_label_unresolved") or latest_payment.get("payment_observation") == "unrecognized":
             payment_outcome = "previously_unresolved_payment_label"
         exact_tracking = None
         detail = None

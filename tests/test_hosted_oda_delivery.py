@@ -528,27 +528,56 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             self.assertFalse(pending["dispatch"])
             read = self.step("recheck_checkout")
 
-    def test_archived_payment_summary_retains_unfamiliar_wording_after_earlier_authorization(self):
+    def archive_unrecognized_checkout(self, *, legacy):
         ready = self.saved_card_preflight()
         self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
         read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
         self.assertEqual(self.step("observe_checkout_order", **self.receipt_observation(read, "linked"))["status"],
                          "checkout_readback")
-        self.clock.return_value += timedelta(minutes=1)
+        if not legacy:
+            self.clock.return_value += timedelta(minutes=1)
         read = self.step("recheck_checkout")
         receipt = self.receipt_observation(read, "linked")
         receipt["browser"]["payment_label"] = "Unfamiliar payment wording"
         self.assertEqual(self.step("observe_checkout_order", **receipt)["status"], "checkout_readback")
         self.clock.return_value += timedelta(days=2)
-        read = self.step("recheck_checkout_archive", attempt_id=self.identifier, owner_accepted_unknown=True,
-                         reviewed_total_ore=4900, retirement=self.checkout_retirement())
+        build = BUILD
+        if legacy:
+            ledger_path = self.directory / "ledger.json"
+            old_ledger = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
+            old_ledger.pop("checkout_recovery_version")
+            checkout = old_ledger["current"]["delivery"]["checkout"]
+            checkout.pop("unclear_payment_label_at")
+            checkout["result"].pop("payment_label_unresolved")
+            journal.write_json(ledger_path, old_ledger)
+            target = Path(journal.__file__).parent
+            with patch.object(journal, "DOT_WORKSPACE", self.state.parent):
+                journal.require_idle(self.state, target_program=target)
+            build = {**BUILD, "source_commit": "d" * 40}
+        read = journal.run(self.state, self.directory, self.identifier, {
+            "action": "recheck_checkout_archive", "attempt_id": self.identifier, "owner_accepted_unknown": True,
+            "reviewed_total_ore": 4900, "retirement": self.checkout_retirement(),
+        }, "fixture", build)
         stamp = self.clock.return_value.isoformat()
-        done = self.step("observe_checkout_archive", frame_id=read["hosted_request"]["frame_id"], plugin_id="fixture",
-                         addresses=ADDRESS, address_observed_at=stamp, cart=snapshot(), cart_observed_at=stamp,
-                         existing_orders={"orders": [], "hasMore": False}, orders_observed_at=stamp,
-                         order=None, tracking=None, order_observed_at=stamp)
+        return journal.run(self.state, self.directory, self.identifier, {
+            "action": "observe_checkout_archive", "frame_id": read["hosted_request"]["frame_id"], "plugin_id": "fixture",
+            "addresses": ADDRESS, "address_observed_at": stamp, "cart": snapshot(), "cart_observed_at": stamp,
+            "existing_orders": {"orders": [], "hasMore": False}, "orders_observed_at": stamp,
+            "order": None, "tracking": None, "order_observed_at": stamp,
+        }, "fixture", build)
+
+    def test_archived_payment_summary_retains_unfamiliar_wording_after_earlier_authorization(self):
+        done = self.archive_unrecognized_checkout(legacy=False)
         self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_unresolved_payment_label")
         self.assertTrue(done["checkout_order"]["payment_label_unresolved"])
+        self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "authorized")
+
+    def test_legacy_checkout_archive_sees_unrecognized_latest_payment_without_another_order_read(self):
+        done = self.archive_unrecognized_checkout(legacy=True)
+        self.assertEqual(done["status"], "checkout_archived_unknown")
+        self.assertFalse(done["dispatch"])
+        self.assertEqual(done["checkout_archive"]["payment_outcome"], "previously_unresolved_payment_label")
+        self.assertEqual(done["checkout_order"]["payment_observation"], "unrecognized")
         self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "authorized")
 
     def test_migrated_payment_conflict_survives_two_unlabeled_reads(self):
