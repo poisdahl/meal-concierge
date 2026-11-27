@@ -2030,7 +2030,7 @@ raise SystemExit(client.main())
     def test_rebind_retired_browser_preserves_household_and_blocks_old_target(self):
         tab = "synthetic-observation-tab"
         before = self.state()
-        request = {"tab_id": tab, "original_tab_retired": True}
+        request = {"tab_id": tab, "previous_tab_id": self.binding["tab_id"], "original_tab_retired": True}
 
         def wrong_account(frame):
             reply = self.replacement_observation_host(frame)
@@ -2047,11 +2047,25 @@ raise SystemExit(client.main())
         after = self.state()
         self.assertEqual(after["native_tab_rebind"]["previous_tab"], self.binding["tab_id"])
         self.assertEqual(after["profile"], before["profile"])
+        self.assertNotEqual(after["product_selection_generation"], before.get("product_selection_generation"))
         self.assertNotEqual(after["native_config_sha256"], before["native_config_sha256"])
         self.binding = {**self.binding, "tab_id": tab}
-        code, result = self.call({"operation": "cart", "action": "get"})
+        read = {"operation": "cart", "action": "get"}
+        identifier = str(uuid.uuid4())
+        code, result = self.call(read, identifier)
         self.assertEqual(code, 0, result)
         self.assertEqual(self.frames[-1]["browser_binding"]["tab_id"], tab)
+        next_tab = "synthetic-third-tab"
+        code, latest = self.run_session("rebind-tab", {**request, "tab_id": next_tab, "previous_tab_id": tab},
+                                        lambda frame: self.replacement_observation_host(frame, tab_id=next_tab))
+        self.assertEqual(code, 0, latest)
+        self.assertEqual(self.call(read, identifier), (0, result))
+        code, history = self.run_session("rebind-tab", request)
+        self.assertEqual(code, 0, history)
+        self.assertEqual(history["result"]["observation_scope"], "historical")
+        code, rejected = self.run_session("rebind-tab", {**request, "previous_tab_id": next_tab})
+        self.assertEqual(code, 1, rejected)
+        self.assertEqual(self.state()["native_tab_rebind"]["tab_id"], next_tab)
 
     def protected_delivery_host(self, *, lose_reply=False, altered_address=False):
         from meny import MENY_MONTH_NAMES, MENY_WEEKDAY_NAMES
@@ -2155,6 +2169,42 @@ raise SystemExit(client.main())
         code, ending = self.call({"operation": "delivery", "action": "reconcile", **review_ref}, host=host)
         self.assertEqual(code, 0, ending)
         self.assertEqual(ending["result"]["original_dispatch_outcome"], "unknown")
+        self.assertEqual(live["writes"], 1)
+
+    def test_retired_tab_can_only_reconcile_the_original_delivery(self):
+        reference, live, host = self.protected_delivery_host(lose_reply=True)
+        code, review = self.call({"operation": "delivery", "action": "prepare", "slot_ref": reference}, host=host)
+        self.assertEqual(code, 0, review)
+        review_ref = {key: review["result"][key] for key in ("review_id", "review_digest")}
+        code, lost = self.call({"operation": "delivery", "action": "select", "reservation_approved": True,
+                                **review_ref}, host=host)
+        self.assertEqual(code, 1, lost)
+        before = len(self.frames)
+        tab = "synthetic-observation-tab"
+        rebind = {"tab_id": tab, "previous_tab_id": self.binding["tab_id"], "original_tab_retired": True,
+                  "delivery_recovery": review_ref}
+        code, stopped = self.run_session("rebind-tab", rebind)
+        self.assertEqual(code, 1, stopped)
+        self.assertIn("original expired", stopped["error"])
+        self.assertEqual(len(self.frames), before)
+        pending = self.state()
+        pending["native_delivery_selection"]["dispatch_expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        (self.root / "state/state.json").write_text(json.dumps(pending))
+
+        def replacement(frame):
+            operation = frame["operation"]
+            self.assertEqual(frame["effect"], "read")
+            if operation in ("verify_observation_context", "get_cart"):
+                return self.replacement_observation_host(frame)
+            reply = host(frame)
+            return {**reply, "browser_binding": frame["browser_binding"], "result": {
+                "verified_context": {**{key: self.binding[key] for key in ("account_sha256", "cart_context_sha256")},
+                                     "account_verified_before_and_after": True}, "observation": reply["result"]}}
+
+        code, settled = self.run_session("rebind-tab", rebind, replacement)
+        self.assertEqual(code, 0, settled)
+        self.assertEqual(settled["result"]["delivery_recovery"]["original_dispatch_outcome"], "unknown")
+        self.assertEqual(self.state()["native_tab_rebind"]["tab_id"], tab)
         self.assertEqual(live["writes"], 1)
 
     def test_meny_order_handoff_checks_the_exact_eligible_receipt(self):

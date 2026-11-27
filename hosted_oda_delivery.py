@@ -40,9 +40,11 @@ def frame(record, *, last_read=None, cutoff=None):
     issued = journal.now()
     duration = timedelta(minutes=5)
     expires = issued + duration if last_read is None else min(last_read + timedelta(minutes=2), cutoff)
+    delivery = record["delivery"]
+    if record["status"] in {"delivery_preflight", "delivery_dispatched"}:
+        expires = min(expires, hosted_oda.response_time(delivery["review_expires_at"]))
     if expires <= issued:
         raise ValueError("the Oda delivery quote or cutoff expired")
-    delivery = record["delivery"]
     common = {"frame_id": uuid.uuid4().hex, "plugin_id": record["plugin_id"],
               "issued_at": issued.isoformat(), "expires_at": expires.isoformat()}
     address = {"delivery_address_id": delivery["address_id"]}
@@ -73,14 +75,15 @@ def selected_slot(value):
             "expires_at": hosted_oda.response_time(expires) if expires is not None else None}
 
 
-def inspect_cart(cart):
+def inspect_cart(cart, *, allow_grouped=False):
     from hosted_oda_cart import cart_quantities
 
     required = hosted_oda.CART_FIELDS | {"deliverySlot", "isUnattendedDelivery", "deliveryAddress"}
     if not isinstance(cart, dict) or cart.keys() != required:
         raise ValueError("Oda delivery requires a complete cart and explicit slot and unattended values")
     view = hosted_oda.cart_view({field: cart[field] for field in hosted_oda.CART_FIELDS})
-    if cart_quantities({**cart, "deliverySlot": None}) is None:
+    ordinary_quantities = cart_quantities({**cart, "deliverySlot": None}) is not None
+    if not ordinary_quantities and not allow_grouped:
         raise ValueError("Oda delivery requires complete ungrouped cart quantities")
     unattended = cart["isUnattendedDelivery"]
     if unattended is not None and type(unattended) is not bool:
@@ -88,7 +91,8 @@ def inspect_cart(cart):
     lines = [hosted_oda.cart_line(line) for group in cart["groups"] for line in group["items"]]
     goods = hosted_oda.arguments_digest(sorted(lines, key=lambda line: line["product"]["id"]))
     slot = selected_slot(cart["deliverySlot"]) if cart["deliverySlot"] is not None else None
-    baseline = {"goods_sha256": goods, "amounts_ore": cart_amounts(cart), "unattended": unattended}
+    baseline = {"goods_sha256": goods, "amounts_ore": cart_amounts(cart), "unattended": unattended,
+                "ordinary_quantities": ordinary_quantities}
     return view, baseline, slot
 
 
@@ -144,7 +148,7 @@ def observe(record, value, key):
     slots = value["slots"]
     normalized = hosted_oda.delivery_view(slots, value["slot_arguments"])
     delivery = record["delivery"]
-    view, baseline, current = inspect_cart(value["cart"])
+    view, baseline, current = inspect_cart(value["cart"], allow_grouped=status == "delivery_readback")
     context, address = browser_context(value, key, delivery["address_id"])
     if "physical_address" in delivery and not hmac.compare_digest(delivery["physical_address"], address):
         raise ValueError("the reviewed Oda physical delivery address changed")
@@ -157,6 +161,8 @@ def observe(record, value, key):
         return False
     if status == "delivery_readback" and inactive_readback(record, baseline, current, selected, address_time, cart_date):
         return False
+    if not baseline["ordinary_quantities"]:
+        raise ValueError("the Oda delivery readback no longer contains the reviewed ordinary cart")
     if "browser_context" in delivery and not hmac.compare_digest(delivery["browser_context"], context):
         raise ValueError("the Oda checkout browser changed")
     slot = next((row for row in normalized["slots"] if row["slot_ref"] == delivery["slot_ref"]), None)
@@ -204,7 +210,8 @@ def observe(record, value, key):
         raise ValueError("the requested checkout window is not selected")
     if status == "delivery_read":
         review = {"window": offer, "cart": view, "unattended": baseline["unattended"]}
-        delivery.update(baseline=baseline, browser_context=context, physical_address=address,
+        expiry = min(journal.now() + timedelta(minutes=10), cutoff, hosted_oda.response_time(offer["start_at"]))
+        delivery.update(baseline=baseline, browser_context=context, physical_address=address, review_expires_at=expiry.isoformat(),
                         review=review, review_digest=hosted_oda.arguments_digest({
             "operation_id": record["operation_id"], "account": record["account"], "baseline": baseline,
             "browser_context": context, "physical_address": address, "review": review}))

@@ -187,6 +187,23 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different delivery window or account"):
             self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS, payment_method="saved_card")
 
+    def test_expired_review_never_dispatches_and_grouped_cart_can_close_error(self):
+        reading = self.begin()
+        reviewed = self.step("observe_delivery", **self.observation(reading))
+        self.clock.return_value += timedelta(minutes=10)
+        with self.assertRaisesRegex(ValueError, "quote or cutoff expired"):
+            self.step("approve_delivery", review_digest=reviewed["review_digest"])
+        self.step("abort")
+        self.identifier = str(uuid.uuid4())
+        write = self.step("observe_delivery", **self.observation(self.preflight()))
+        read = self.acknowledge(write, error=True)
+        self.clock.return_value += timedelta(minutes=3)
+        cart = snapshot()
+        cart["groups"][0]["groupType"] = "recipe"
+        recovered = self.step("observe_delivery", **self.observation(read, cart=cart))
+        self.assertEqual(recovered["status"], "delivery_inactive")
+        self.assertFalse(recovered["original_cart_still_matches"])
+
 
 if __name__ == "__main__":
     unittest.main()

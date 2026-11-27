@@ -254,12 +254,10 @@ def order_change_handoff(tracking, order, browser, addresses):
     if tracking["status"] != "paid_and_modifiable":
         return {**tracking, "handoff_ready": False}
     from oda_browser import OdaBrowser
-    from hosted_oda_cart import account_fingerprint
+    from hosted_oda_cart import address_selection
 
     url = OdaBrowser._order_url(order_id)
-    # Validate the address projection without storing it in a foreground receipt.
-    account_fingerprint(addresses, "0" * 32)
-    address = next(row["id"] for row in addresses if row["isSelected"])
+    address = address_selection(addresses)["selected"]
     fields = {"url", "browser_id", "tab_id", "address_edit_path", "order_number", "total_ore",
               "delivery_date", "available_changes"}
     if (not isinstance(browser, dict) or browser.keys() != fields or browser["url"] != url

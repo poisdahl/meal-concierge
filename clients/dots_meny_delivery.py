@@ -12,6 +12,7 @@ from meny import (meny_delivery_list_price_display, meny_delivery_window_identit
 
 STATE_KEY = "native_delivery_selection"
 PENDING = {"dispatching", "dispatched"}
+OBSERVATION_ENDINGS = {"delivery_selection_observed", "delivery_price_drift_observed", "delivery_inactive"}
 EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
 ORDINARY = {"pending_checkout", "pending_cart_change", "pending_cancellation", "order_change"}
 
@@ -144,13 +145,14 @@ def handle(host, store, request, command_id):
         with store.locked() as current:
             current[STATE_KEY] = record
         return view(record)
-    if (not record or any(record[field] != request[field] for field in ("review_id", "review_digest"))
-            or record["browser_binding_sha256"] != digest(host.config["browser_binding"])):
+    if not record or any(record[field] != request[field] for field in ("review_id", "review_digest")):
         raise HouseholdError("use the exact original MENY delivery review and approval")
+    if action in {"reconcile", "accept_current"} and record["status"] in OBSERVATION_ENDINGS:
+        return {**view(record), "observation_scope": "historical",
+                "readback_calendar_price_display": record["readback_calendar_price_display"]}
+    if record["browser_binding_sha256"] != digest(host.config["browser_binding"]):
+        raise HouseholdError("the original MENY delivery review belongs to the retired tab; prepare again")
     if action in {"reconcile", "accept_current"}:
-        if record["status"] in {"delivery_selection_observed", "delivery_price_drift_observed", "delivery_inactive"}:
-            return {**view(record), "observation_scope": "historical",
-                    "readback_calendar_price_display": record["readback_calendar_price_display"]}
         if record["status"] not in PENDING:
             raise HouseholdError("no dispatch to reconcile for this MENY delivery review")
         if datetime.now(timezone.utc) < dots.timestamp(record["dispatch_expires_at"]):

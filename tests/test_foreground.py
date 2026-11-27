@@ -248,6 +248,33 @@ class HostedOdaForegroundTests(unittest.TestCase):
         self.assertNotIn("result", historical)
         self.assertNotIn("Fixture product", (self.calls / f"{self.identifier}.json").read_text())
 
+    def test_order_handoff_binds_exact_order_and_redacts_receipt(self):
+        order_id = "ORDER-PRIVATE-FIXTURE"
+        request = {"operation": "orders", "action": "change_handoff", "order_id": order_id,
+                   "response_view": "agent"}
+        opened, code = self.begin(request)
+        self.assertEqual(code, 0, opened)
+        frame = opened["hosted_request"]
+        self.assertEqual(frame["additional_reads"][0]["arguments"], {"order_number": order_id})
+        path = self.calls / f"{self.identifier}.json"
+        self.assertNotIn(order_id, path.read_text())
+        reply = {**{key: frame[key] for key in ("read_id", "plugin_id", "tool", "arguments")},
+                 "observed_at": datetime.now(timezone.utc).isoformat(),
+                 "orders": {"orderNumber": order_id, "status": "paid_and_modifiable"},
+                 "order": {"orderNumber": order_id, "currency": "NOK", "grossAmount": 42, "deliveryDate": "2030-03-03", "products": []},
+                 "addresses": [{"id": 7, "isSelected": True}],
+                 "browser": {"url": f"https://oda.com/no/account/orders/{order_id}/", "order_number": order_id,
+                             "browser_id": "fixture", "tab_id": "fixture-tab", "address_edit_path": "/no/account/delivery/edit/7/",
+                             "total_ore": 4200, "delivery_date": "2030-03-03", "available_changes": ["items"]}}
+        for key, value in (("address_edit_path", "/no/account/delivery/edit/8/"), ("total_ore", 4000)):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "exact order|amount or delivery date"):
+                self.finish({**reply, "browser": {**reply["browser"], key: value}})
+        current, code = self.finish(reply)
+        self.assertEqual(code, 0, current)
+        self.assertTrue(current["result"]["handoff_ready"])
+        self.assertFalse(current["result"]["dispatch"])
+        self.assertNotIn(order_id, path.read_text())
+
     def test_rejects_wrong_origin_build_and_invalid_cart_before_acceptance(self):
         reply = self.example_reply()
         for key, value in (("plugin_id", "plugin_other"), ("read_id", str(uuid.uuid4())), ("tool", "manipulate_cart")):

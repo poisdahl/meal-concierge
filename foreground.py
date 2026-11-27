@@ -226,7 +226,7 @@ def hosted_call(directory, identifier, request, plugin, build, *, selection=None
     if request["operation"] == "orders" and request["action"] == "change_handoff":
         frame.update(purpose="change_handoff", additional_reads=[{"tool": "get_order", "arguments": arguments},
                      {"tool": "get_delivery_addresses", "arguments": {}}], browser_evidence_required=True)
-    binding = {key: value for key, value in frame.items() if key != "arguments"}
+    binding = {key: value for key, value in frame.items() if key not in ("arguments", "additional_reads")}
     binding["arguments_sha256"] = hosted_oda.arguments_digest(arguments)
     record = {"format": 1, "request_id": identifier, "operation": request["operation"], "action": request["action"],
               "input_sha256": digest,

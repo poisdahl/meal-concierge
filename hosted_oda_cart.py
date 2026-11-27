@@ -245,7 +245,7 @@ def match_frame(saved, value):
         raise ValueError("the observation belongs to a different hosted Oda frame or plugin")
 
 
-def account_fingerprint(addresses, key):
+def address_selection(addresses):
     if not isinstance(addresses, list) or not 1 <= len(addresses) <= 100:
         raise ValueError("Oda cart writes require a stable selected-address observation")
     identifiers, selections = set(), []
@@ -259,7 +259,11 @@ def account_fingerprint(addresses, key):
             selections.append(identity)
     if len(selections) != 1:
         raise ValueError("Oda cart writes require exactly one selected delivery address")
-    payload = hosted_oda.arguments_digest({"ids": sorted(identifiers), "selected": selections[0]})
+    return {"ids": sorted(identifiers), "selected": selections[0]}
+
+
+def account_fingerprint(addresses, key):
+    payload = hosted_oda.arguments_digest(address_selection(addresses))
     return hmac.new(bytes.fromhex(key), payload.encode(), hashlib.sha256).hexdigest()
 
 
@@ -553,7 +557,7 @@ def status_view(record):
     if "delivery" in record:
         delivery = record["delivery"]
         for field in ("slot_ref", "review", "review_digest", "reservation", "reconciled_at", "handoff",
-                      "original_cart_still_matches"):
+                      "original_cart_still_matches", "review_expires_at"):
             if field in delivery:
                 result[field] = delivery[field]
         if record["status"] == "delivery_dispatched":

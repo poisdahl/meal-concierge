@@ -964,12 +964,18 @@ until the owner approves a specific reservation.
 
 If the original tab was retired and the original operations are settled, run
 `clients/dots_session.py rebind-tab --root ORIGINAL_CORE_ROOT`. Supply the new
-`tab_id` in the same cloud browser and `original_tab_retired: true`. Answer
+`tab_id` in the same cloud browser, the retired `previous_tab_id` and
+`original_tab_retired: true`. Answer
 the fresh original-account and ordinary-cart observation frames as in
 [current MENY reads](#current-meny-reads-while-a-write-is-pending). A matching
 read keeps the original household and receipts and leaves item writes disabled.
-Review delivery again on the newly bound tab. If an old dispatch is unresolved,
-reconcile it before replacing the tab.
+Review delivery again on the newly bound tab. If an expired delivery frame is
+still pending and the original tab is retired, include `delivery_recovery`
+with the exact `review_id` and `review_digest`. The new tab only reads the
+original account, picker and cart until the original attempt is reconciled.
+Supply `owner_accepted_unknown: true` inside `delivery_recovery` only when the
+owner specifically accepts archiving an inactive original attempt with its
+historical outcome unknown.
 
 1. Call `delivery.prepare` with the exact `slot_ref` from the calendar.
    For `get_delivery_slots` follow the existing rendered picker protocol,
@@ -991,7 +997,9 @@ reconcile it before replacing the tab.
 3. Only the original `select_delivery_window` frame with
    `effect: "delivery_selection"` grants browser interaction. Before the
    first click recheck the original cloud browser, address hash, goods hash,
-   ordinary-cart mode and `original_selected` state. In the unique authenticated
+   ordinary-cart mode and `original_selected` state. Compute `goods_sha256`
+   by sorting the `items` from `normalize_cart_snapshot` by `product_id` and
+   hashing them with `dots.digest(dots.encoded(items))`. In the unique authenticated
    picker click the exact enabled dated window with the original `calendar_label`.
    Then verify the confirmation offers only that window, with its price and
    home address unchanged, and click the unique enabled `Bekreft levering`
