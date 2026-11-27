@@ -1306,6 +1306,10 @@ raise SystemExit(dots_session.main())
             self.assertEqual(code, 0, unknown)
             self.assertEqual(unknown["result"], {"reconciled": False, "cart_write_pending": False,
                                                 "status": "archived_unknown", "historical_dispatch": "unknown"})
+        for wrong in (old_id, request["legacy_reset_digest"]):
+            code, unmatched = self.call({"operation": "cart", "action": "reconcile_change", "operation_id": wrong})
+            self.assertEqual(code, 1, unmatched)
+            self.assertIn("no current or recorded MENY cart operation", unmatched["error"])
         self.assertEqual(self.frames, [])
         self.binding = {**self.binding, "tab_id": request["tab_id"]}
         cart_command = str(uuid.uuid4())
@@ -1368,44 +1372,69 @@ raise SystemExit(dots_session.main())
 
     def test_legacy_reset_retries_before_and_after_atomic_publication(self):
         self.prepare_legacy_pending_cart()
-        for failure in ("owner_link", "before_state", "after_state"):
+        for failure in ("owner_link", "before_state", "after_replace"):
             with self.subTest(failure=failure):
                 status = self.inspect_cart()
                 request = self.reset_request(status)
                 before = self.state()
                 launch_code = f"""
-import sys
+import stat, sys
 sys.path.insert(0, {str(SOURCE)!r})
 import core
 from clients import dots_session as client
 original = core._atomic_json
 original_link = client.os.link
+original_replace = client.os.replace
+original_fsync = client.os.fsync
 failure = {failure!r}
+renamed_state = False
 def link(source, target, **kwargs):
     if failure == 'owner_link' and target.parent.name == '.meal-concierge-dots-targets':
         raise OSError('simulated interruption during owner publication')
     return original_link(source, target, **kwargs)
+def replace(source, target):
+    global renamed_state
+    original_replace(source, target)
+    renamed_state = failure == 'after_replace' and target.name == 'state.json'
+def fsync(descriptor):
+    if renamed_state and stat.S_ISDIR(client.os.fstat(descriptor).st_mode):
+        raise OSError('simulated interruption before state directory sync')
+    return original_fsync(descriptor)
 def interrupted(path, value):
-    if failure != 'owner_link' and path.name == 'state.json' and 'native_cart_legacy_reset' in value:
-        if failure == 'after_state':
-            original(path, value)
+    if failure == 'before_state' and path.name == 'state.json' and 'native_cart_legacy_reset' in value:
         raise OSError('simulated interruption during state publication')
     original(path, value)
 client.os.link = link
+client.os.replace = replace
+client.os.fsync = fsync
 core._atomic_json = interrupted
 raise SystemExit(client.main())
 """
                 code, stopped = self.run_reset(request, launch_code=launch_code)
                 self.assertEqual(code, 1, stopped)
                 self.assertIn("simulated interruption", stopped["error"])
-                if failure != "after_state":
+                if failure != "after_replace":
                     self.assertEqual(self.state(), before)
                     self.assertEqual(self.inspect_cart(), status)
+                if failure == "before_state":
                     self.frames.clear()
                     self.assertEqual(self.run_reset({**request, "tab_id": "different-tab"})[0], 1)
+                    self.assertEqual(self.call(self.ensure())[0], 1)
                     self.assertEqual(self.frames, [])
-                else:
+                if failure == "after_replace":
                     self.frames.clear()
+                    fail_sync = f"""
+import sys
+sys.path.insert(0, {str(SOURCE)!r})
+from clients import dots_session as client
+def fail_sync(directory):
+    raise OSError('cannot confirm state durability')
+client.sync_reset_state = fail_sync
+raise SystemExit(client.main())
+"""
+                    failed_code, failed_retry = self.run_reset(request, launch_code=fail_sync)
+                    self.assertEqual(failed_code, 1, failed_retry)
+                    self.assertIn("cannot confirm state durability", failed_retry["error"])
                     code, retry = self.run_reset(request)
                     self.assertEqual(code, 0, retry)
                     self.assertTrue(retry["result"]["idempotent"])
@@ -1413,12 +1442,20 @@ raise SystemExit(client.main())
         self.assertEqual(self.writes, 0)
 
     def test_legacy_reset_detects_missing_intent_or_explicit_write_policy(self):
+        prior = self.state()
         request = self.reset_request(self.prepare_legacy_pending_cart())
         self.assertEqual(self.run_reset(request)[0], 0)
         self.frames.clear()
         cart = {"operation": "cart", "action": "get"}
         state_file = self.root / "state" / "state.json"
         saved = self.state()
+        state_file.write_text(json.dumps(prior))  # Restore state alone while leaving the durable reset intent.
+        code, declined = self.call(self.ensure())
+        self.assertEqual(code, 1, declined)
+        self.assertIn("legacy reset must be recovered", declined["error"])
+        code, declined = self.run_reset(request)
+        self.assertEqual(code, 1, declined)
+        self.assertIn("archive is missing", declined["error"])
         state_file.write_text(json.dumps({key: value for key, value in saved.items()
                                           if key != "native_cart_writes_enabled"}))
         self.assertEqual(self.call(cart)[0], 1)
@@ -1426,6 +1463,23 @@ raise SystemExit(client.main())
         (self.root / "state" / "native-cart-legacy-reset-intent.json").unlink()
         self.assertEqual(self.call(cart)[0], 1)
         self.assertEqual(self.run_reset(request)[0], 1)
+        self.assertEqual(self.frames, [])
+
+    def test_legacy_reset_requires_exact_cart_batch_and_no_unattributed_dispatch_record(self):
+        status = self.prepare_legacy_pending_cart(retain_dispatch=True)
+        self.assertEqual(status["dispatch_evidence"], "frame_prepared")
+        state = self.state()
+        state_file = self.root / "state" / "state.json"
+        pending = state["pending_cart_change"]
+        state_file.write_text(json.dumps({**state, "pending_cart_change": {**pending, "cart_only": True}}))
+        self.assertEqual(self.inspect_cart()["dispatch_evidence"], "no_frame_record")
+        self.assertNotIn("legacy_reset_digest", self.inspect_cart())
+        shutil.rmtree(self.root / "state" / "native-cart-dispatch")
+        for changed in ({"operations": [{}]}, {"expected": {}}, {"stopped_before_next_click": True},
+                        {"clear_requested": True, "clear_id": "b" * 32}, {"cart_only": 1}):
+            with self.subTest(changed=changed):
+                state_file.write_text(json.dumps({**state, "pending_cart_change": {**pending, **changed}}))
+                self.assertNotIn("legacy_reset_digest", self.inspect_cart())
         self.assertEqual(self.frames, [])
 
     def test_legacy_reset_refuses_dispatch_evidence_and_an_owned_replacement(self):

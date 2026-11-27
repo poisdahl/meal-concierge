@@ -933,14 +933,17 @@ uses the same `core_ready` and stdin/stdout exchange as `observe`.
 Answer the two read frames using the current-account observation protocol
 above. Verify the account and ordinary cart again in the replacement tab.
 The reset requires a complete empty rendered cart with zero total, no selected
-delivery and no order edit. If any evidence is missing or if the original
-attempt has a saved dispatch frame or acknowledgement, keep the guard in place.
+delivery and no order edit. The original journal must have its operation and
+request identifiers and a valid ordinary cart batch. If any evidence is missing
+or the household has saved dispatch artifacts, keep the guard in place.
 
 `archived_unknown` releases the old local guard and records the original
 pending operation privately. The old command UUID still returns its saved
 outcome or incomplete status. The replacement tab becomes the approved tab
 for `call`. Older source versions stop on the changed binding. If the reset
-is interrupted or its result is lost, use the exact same input and tab.
+is interrupted or its result is lost, use the exact same input and tab. If an
+older state snapshot disagrees with a retained intent, recover the original
+reset archive before running other commands.
 `inspect-cart` can report `legacy_reset_status:"archived_unknown"` after
 publication. Keep the reset intent file with the household and original receipts.
 

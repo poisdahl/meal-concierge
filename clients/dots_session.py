@@ -20,7 +20,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clients import dots
-from core import HouseholdError, STATE_VERSION, StateStore, cart_summary
+from core import HouseholdError, STATE_VERSION, StateStore, _flush_drive_cache, cart_summary
 from meny import normalize_cart_snapshot, normalize_meny_delivery_slot, meny_order_card_status
 from product_observations import normalize_meny_product_search
 from retailer_recipes import meny_recipe_path
@@ -34,6 +34,7 @@ OWNER_FILES = (".service-owner.lock", "recipes.sqlite3.owner.lock", "state.json.
 LEGACY_RESET_INTENT = "native-cart-legacy-reset-intent.json"
 MAX_LINE = 65536
 PRODUCTS_APPLY_BUDGET_SECONDS = 600
+MENY_PRODUCT_PATH = re.compile(r"/varer/[A-Za-z0-9._~%/-]+-[0-9]{4,14}")
 RENDERED_UI_EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
 ORDER_COLUMNS = ["BESTILLINGSKODE", "STATUS", "UTLEVERING", "TID", "SUM"]
 ARCHIVED_DETAIL_LAYOUT = {"source_archived": True, "order_number_label": "Ordrenummer",
@@ -520,7 +521,7 @@ class NativeHost:
             for product in result["products"]:
                 path = product.get("product_id") if isinstance(product, dict) else None
                 if (not isinstance(path, str)
-                        or re.fullmatch(r"/varer/[A-Za-z0-9._~%/-]+-[0-9]{4,14}", path) is None):
+                        or MENY_PRODUCT_PATH.fullmatch(path) is None):
                     raise HouseholdError("native search product requires an exact public product path")
                 try:
                     dots.public_path(path)
@@ -548,7 +549,7 @@ class NativeHost:
                     raise HouseholdError("native cart product must be an exact path")
                 dots.public_path(item["productId"])
                 if (type(item["quantity"]) is not int or not 1 <= abs(item["quantity"]) <= 2
-                        or re.fullmatch(r"/varer/[A-Za-z0-9._~%/-]+-[0-9]{4,14}", item["productId"]) is None):
+                        or MENY_PRODUCT_PATH.fullmatch(item["productId"]) is None):
                     raise HouseholdError("native cart batch requires exact paths and bounded deltas")
             if sum(abs(item["quantity"]) for item in operations) > 2:
                 raise HouseholdError("native cart batch exceeds the existing two-click limit")
@@ -599,6 +600,18 @@ def publish_reset_record(path, record):
     if on_demand._read_file(path, MAX_LINE) != dots.encoded(record):
         raise HouseholdError("legacy reset reservation conflicts with the original owner or request")
     on_demand._sync_directory(path.parent)
+
+
+def sync_reset_state(directory):
+    # A prior StateStore commit may have reported an error after atomic replace.
+    descriptor = os.open(directory / "state.json", os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+        _flush_drive_cache(descriptor)
+        on_demand._sync_directory(directory)
+        _flush_drive_cache(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def native_ownership(stack, root, config, *, new, active_tab=None, observation_tab=None, reserving=False):
@@ -716,13 +729,14 @@ def legacy_reset_intent(tab_id, digest):
             "original_executor_retired": True}
 
 
-def load_bound_state(root, config_data, config):
+def load_bound_state(root, config_data, config, *, allow_reset_recovery=False):
     state = dots.existing_root(root / "state")
     regular(state / "state.json")
     regular(state / "recipes.sqlite3")
     saved = on_demand._json(on_demand._read_file(state / "state.json", on_demand.MAX_MENU))
     active = config
     expected = dots.digest(config_data)
+    intent_path = state / LEGACY_RESET_INTENT
     if "native_cart_legacy_reset" in saved:
         reset = saved["native_cart_legacy_reset"]
         fields = {"base_config_sha256", "original_pending_sha256", "pending_cart_change", "replacement_tab",
@@ -740,10 +754,18 @@ def load_bound_state(root, config_data, config):
         # Old clients compare against the original file digest and fail closed.
         expected = dots.digest(dots.encoded(active))
         intent = legacy_reset_intent(tab_id, reset["original_pending_sha256"])
-        if on_demand._read_file(state / LEGACY_RESET_INTENT, MAX_LINE) != dots.encoded(intent):
+        if on_demand._read_file(intent_path, MAX_LINE) != dots.encoded(intent):
             raise ValueError("original native cart reset intent changed")
     if saved.get("native_config_sha256") != expected:
         raise ValueError("original native configuration binding changed; no replacement account/context")
+    if active == config and os.path.lexists(intent_path):
+        if not allow_reset_recovery:
+            raise HouseholdError("the legacy reset must be recovered before starting a new command")
+        intent = on_demand._json(on_demand._read_file(intent_path, MAX_LINE))
+        digest = legacy_reset_digest(state, config, saved)
+        tab_id = observation_tab_id(intent["tab_id"])
+        if not digest or dots.encoded(intent) != dots.encoded(legacy_reset_intent(tab_id, digest)):
+            raise HouseholdError("the original legacy reset archive is missing or the prior journal changed")
     return state, saved, active
 
 
@@ -753,7 +775,7 @@ def inspect_cart(root):
     with file_lock(root / "command.lock"):
         data = on_demand._read_file(root / "config.json", MAX_LINE)
         config = configuration(on_demand._json(data))
-        state, saved, active = load_bound_state(root, data, config)
+        state, saved, active = load_bound_state(root, data, config, allow_reset_recovery=True)
         result = cart_journal_status(state, active, saved)
         candidate = legacy_reset_digest(state, config, saved)
         if candidate:
@@ -770,28 +792,66 @@ def cart_journal_status(state, config, saved):
             "dispatch_evidence": ending, "core_acknowledged": bool(pending and pending.get("dispatch_finished") is True)}
 
 
-def legacy_reset_digest(state, config, saved):
-    pending = saved.get("pending_cart_change")
+def ordinary_legacy_batch(pending):
     required = {"provider", "operation_id", "request_digest", "before", "expected", "order_change", "operations"}
     optional = {"cart_only", "clear_requested", "clear_id", "dispatch_finished"}
-    if (config.get("browser_binding") is None or saved.get("version") != STATE_VERSION
-            or saved.get("provider") != "meny" or saved.get("household") != config["household"]
-            or "native_cart_legacy_reset" in saved or cart_writes_enabled(config, saved)
-            or not isinstance(pending, dict) or not required <= pending.keys() <= required | optional
+    if (not isinstance(pending, dict) or not required <= pending.keys() <= required | optional
             or pending["provider"] != "meny" or pending["order_change"] is not None
             or pending.get("dispatch_finished", False) is not False
             or not isinstance(pending["operation_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", pending["operation_id"])
             or not isinstance(pending["request_digest"], str) or not re.fullmatch(r"[a-f0-9]{64}", pending["request_digest"])
-            or not isinstance(pending["before"], dict) or not isinstance(pending["expected"], dict)
-            or not isinstance(pending["operations"], list) or not 1 <= len(pending["operations"]) <= 2
+            or any(pending[key] is not True for key in ("cart_only", "clear_requested") if key in pending)
+            or ("clear_id" in pending) != ("clear_requested" in pending)):
+        return False
+    if "clear_id" in pending:
+        clear_id = pending["clear_id"]
+        if "cart_only" in pending or not isinstance(clear_id, str) or not re.fullmatch(r"[a-f0-9]{32}", clear_id):
+            return False
+    for quantities in (pending["before"], pending["expected"]):
+        if not isinstance(quantities, dict) or any(
+                not isinstance(key, str) or not key or type(amount) is not int or amount <= 0
+                for key, amount in quantities.items()):
+            return False
+    operations = pending["operations"]
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 2:
+        return False
+    quantities = dict(pending["before"])
+    clicks = 0
+    for operation in operations:
+        if not isinstance(operation, dict) or set(operation) != {"productId", "quantity"}:
+            return False
+        product, delta = operation["productId"], operation["quantity"]
+        if (not isinstance(product, str) or MENY_PRODUCT_PATH.fullmatch(product) is None
+                or type(delta) is not int or not 1 <= abs(delta) <= 2
+                or (pending.get("cart_only") and delta < 0) or (pending.get("clear_requested") and delta > 0)):
+            return False
+        try:
+            dots.public_path(product)
+        except ValueError:
+            return False
+        clicks += abs(delta)
+        updated = quantities.get(product, 0) + delta
+        if updated < 0:
+            return False
+        if updated:
+            quantities[product] = updated
+        else:
+            quantities.pop(product, None)
+    return clicks <= 2 and quantities == pending["expected"]
+
+
+def legacy_reset_digest(state, config, saved):
+    pending = saved.get("pending_cart_change")
+    if (config.get("browser_binding") is None or saved.get("version") != STATE_VERSION
+            or saved.get("provider") != "meny" or saved.get("household") != config["household"]
+            or "native_cart_legacy_reset" in saved or cart_writes_enabled(config, saved)
+            or not ordinary_legacy_batch(pending)
             or pending["operation_id"] in (saved.get("cart_change_receipts") or {})
             or any(saved.get(key) for key in ("pending_checkout", "pending_cancellation", "order_change"))):
         return None
     dispatches = state / "native-cart-dispatch"
-    if os.path.lexists(dispatches):
-        dots.existing_root(dispatches)
-        if os.path.lexists(dispatches / cart_dispatch_digest(saved["native_config_sha256"], pending)):
-            return None  # Includes incomplete frame directories or orphaned acknowledgements.
+    if os.path.lexists(dispatches) and next(dots.existing_root(dispatches).iterdir(), None) is not None:
+        return None  # Retain any dispatch evidence, even if it cannot be attributed to this batch.
     return dots.digest(dots.encoded(pending))
 
 
@@ -907,7 +967,7 @@ def reset_legacy_cart(root, value, reader):
         dots.existing_root(root / "calls")
         data = on_demand._read_file(root / "config.json", MAX_LINE)
         config = configuration(on_demand._json(data))
-        directory, saved, active = load_bound_state(root, data, config)
+        directory, saved, active = load_bound_state(root, data, config, allow_reset_recovery=True)
         original = config.get("browser_binding")
         if original is None or tab_id == original["tab_id"]:
             raise ValueError("reset needs a separate tab in the original MENY cloud browser")
@@ -920,6 +980,14 @@ def reset_legacy_cart(root, value, reader):
             if (tab_id, digest) != (previous["replacement_tab"], previous["original_pending_sha256"]):
                 raise ValueError("the original legacy cart reset already has a different receipt")
             native_ownership(stack, root, config, new=False, active_tab=active["browser_binding"]["tab_id"])
+            lock_core_files(stack, directory)
+            state_lock = directory / "state.lock"
+            on_demand._read_file(state_lock, 0)
+            with file_lock(state_lock):
+                _, locked_state, _ = load_bound_state(root, data, config)
+                if locked_state.get("native_cart_legacy_reset") != previous:
+                    raise HouseholdError("original legacy reset receipt changed")
+                sync_reset_state(directory)
             return {**result, "observed_at": previous["observed_at"], "idempotent": True}
         if legacy_reset_digest(directory, config, saved) != digest:
             raise HouseholdError("original pending MENY cart is ineligible or its reset digest changed")
@@ -934,9 +1002,9 @@ def reset_legacy_cart(root, value, reader):
             cart, observed_at = read_observation_cart(read)
             if cart["count"] != 0 or cart["total"] != 0 or cart["delivery"] is not None:
                 raise HouseholdError("legacy reset requires a freshly observed empty MENY cart without a delivery slot")
-            publish_reset_record(intent, value)
             owner = registry / (tab_target(original, tab_id) + ".json")
             publish_reset_record(owner, target_owner(root, config))
+            publish_reset_record(intent, value)
             # Publish the archive, the new binding and the retired approvals together.
             state["native_cart_legacy_reset"] = {
                 "base_config_sha256": dots.digest(data), "original_pending_sha256": digest,
@@ -982,6 +1050,8 @@ def reconcile_cart_change(app, request):
     if reset and (operation == reset["pending_cart_change"]["operation_id"] or (operation is None and not pending)):
         return {"reconciled": False, "cart_write_pending": bool(pending), "status": "archived_unknown",
                 "historical_dispatch": "unknown"}
+    if reset and not pending and (not isinstance(operation, str) or operation not in (state.get("cart_change_receipts") or {})):
+        raise HouseholdError("no current or recorded MENY cart operation matches this reference")
     return app.handle(restore_cart_acknowledgement(app, request))
 
 
