@@ -325,6 +325,17 @@ def original_account(record, addresses, key):
         raise ValueError("verify the original Oda account and its delivery addresses before reading the receipt")
 
 
+def retain_last_labeled_payment(checkout):
+    if "last_labeled_payment" not in checkout:
+        prior = checkout.get("result", {})
+        prior = prior.get("prior_labeled_payment", prior)
+        if (prior.get("payment_observation") in {"authorized", "paid", "negative"}
+                or prior.get("payment_evidence_conflicting") is True):
+            fields = ("payment_observation", "merchant_tracking_status", "payment_evidence_conflicting", "observed_at")
+            checkout["last_labeled_payment"] = {field: prior[field] for field in fields}
+    return checkout.get("last_labeled_payment")
+
+
 def observe_current_checkout(record, value, key):
     from hosted_oda_cart import bound_times, require_fields, now
     from hosted_oda_delivery import inspect_cart
@@ -346,8 +357,7 @@ def observe_current_checkout(record, value, key):
         raise ValueError("the original Oda order-list observation expired")
     if archive:
         date = record["delivery"]["date"]
-        prior = checkout.get("result", {})
-        prior_payment = checkout.get("last_labeled_payment", prior)
+        prior_payment = retain_last_labeled_payment(checkout) or {}
         payment_outcome = {"authorized": "previously_reported_authorized", "paid": "previously_reported_paid"}.get(
             prior_payment.get("payment_observation"), "unknown")
         if prior_payment.get("payment_evidence_conflicting"):
@@ -442,7 +452,7 @@ def observe_order(record, value, key):
     if observation in {"authorized", "paid", "negative"}:
         checkout["last_labeled_payment"] = {"payment_observation": observation, "merchant_tracking_status": tracking,
                                            "payment_evidence_conflicting": conflicting, "observed_at": observed.isoformat()}
-    prior_payment = checkout.get("last_labeled_payment", checkout.get("result", {}))
+    prior_payment = retain_last_labeled_payment(checkout)
     exact_review = items_match and total == expected["payable_ore"]
     if delivery.get("owner_handoff"):
         amounts = {"app_cart_amount_ore": expected["payable_ore"], "matches_handoff_cart": exact_review}
@@ -454,7 +464,7 @@ def observe_order(record, value, key):
                           "merchant_tracking_status": tracking, "merchant_reports_payment_authorized": observation == "authorized",
                           "payment_observation": observation, "payment_evidence_conflicting": conflicting,
                           "observed_at": observed.isoformat()}
-    if observation in {"not_visible", "unrecognized"} and prior_payment.get("payment_observation") in {"authorized", "paid", "negative"}:
+    if observation in {"not_visible", "unrecognized"} and prior_payment is not None:
         checkout["result"]["prior_labeled_payment"] = prior_payment
         checkout["result"]["payment_conflict_unresolved"] = prior_payment.get("payment_evidence_conflicting") is True
     if not items_match:

@@ -502,6 +502,34 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertTrue(done["checkout_order"]["payment_conflict_unresolved"])
         self.assertEqual(done["checkout_order"]["prior_labeled_payment"]["payment_observation"], "negative")
 
+    def test_migrated_payment_conflict_survives_two_unlabeled_reads(self):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
+        receipt = self.receipt_observation(read, "linked", "unpaid_order")
+        receipt["browser"]["payment_label"] = "Betaling autorisert"
+        self.step("observe_checkout_order", **receipt)
+        ledger_path = self.directory / "ledger.json"
+        legacy = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
+        checkout = legacy["current"]["delivery"]["checkout"]
+        checkout.pop("last_labeled_payment")
+        checkout["result"]["payment_observation"] = "unrecognized"
+        journal.write_json(ledger_path, legacy)
+        for _ in range(2):
+            read = self.step("recheck_checkout")
+            observed = self.step("observe_checkout_order", **self.receipt_observation(read, "linked", "unpaid_order"))
+            self.assertTrue(observed["checkout_order"]["payment_conflict_unresolved"])
+            self.assertEqual(observed["checkout_order"]["prior_labeled_payment"]["payment_observation"], "unrecognized")
+        self.clock.return_value += timedelta(days=2)
+        read = self.step("recheck_checkout_archive", attempt_id=self.identifier, owner_accepted_unknown=True,
+                         reviewed_total_ore=4900, retirement=self.checkout_retirement())
+        stamp = self.clock.return_value.isoformat()
+        archived = self.step("observe_checkout_archive", frame_id=read["hosted_request"]["frame_id"], plugin_id="fixture",
+                             addresses=ADDRESS, address_observed_at=stamp, cart=snapshot(), cart_observed_at=stamp,
+                             existing_orders={"orders": [], "hasMore": False}, orders_observed_at=stamp,
+                             order=None, tracking=None, order_observed_at=stamp)
+        self.assertEqual(archived["checkout_archive"]["payment_outcome"], "previously_conflicting_observations")
+
     def test_owner_handoff_admission_ends_with_the_observed_hold(self):
         started = self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS,
                             payment_method="vipps", owner_handoff=True)
