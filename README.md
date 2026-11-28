@@ -43,7 +43,7 @@ or a ChatGPT Dot's cloud computer**.
 | [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
-| [ChatGPT Dots](docs/dots.md) | Cloud meal planning, recipes and shopping lists. Separate Oda and MENY households support catalog, cart, order and delivery workflows. Live checkout covers Dot-operated Oda saved card and MENY Vipps with phone approval. Oda Vipps and eligible Oda order changes use a private owner handoff. MENY verifies item additions after private submission. |
+| [ChatGPT Dots](docs/dots.md) | Cloud meal planning, recipes and shopping lists. Separate Oda and MENY households support catalog, cart, order and delivery workflows. Live checkout covers Dot-operated Oda saved card, Oda Vipps via private owner handoff, and MENY Vipps with phone approval. Eligible order changes use a private owner handoff and a fresh read of the same order. |
 
 ### Requirements
 
