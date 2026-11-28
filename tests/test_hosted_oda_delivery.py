@@ -1,5 +1,6 @@
 """Hosted Oda delivery approval and independent reservation readback."""
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 import sys
@@ -410,7 +411,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
                 journal.require_idle(self.state, target_program=release)
             module = release / "hosted_oda_checkout.py"
-            for incompatible_version in (1, 2):
+            for incompatible_version in (1, 2, 3):
                 module.write_text(f"CHECKOUT_RECOVERY_JOURNAL_VERSION = {incompatible_version}\n", encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
                     journal.require_idle(self.state, target_program=release)
@@ -509,6 +510,28 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         replacement["browser"].update(tab_id="replacement", original_tab_retired=True)
         self.assertEqual(self.step("observe_checkout_order", **replacement)["status"], "checkout_confirmed")
 
+    def test_legacy_unknown_retirement_can_link_only_a_saved_native_pre_expiry_confirmation(self):
+        ready = self.saved_card_preflight()
+        submit = self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        original = self.checkout_confirmation("linked")
+        expires = submit["hosted_request"]["expires_at"]
+        self.clock.return_value += timedelta(days=2)
+        self.step("recheck_checkout_archive", attempt_id=self.identifier, owner_accepted_unknown=True,
+                  reviewed_total_ore=4900, retirement=self.checkout_retirement())
+        ledger_path = self.directory / "ledger.json"
+        legacy = journal.read_private(ledger_path, journal.JOURNAL_LIMIT)
+        legacy["checkout_recovery_version"] = 2
+        legacy["current"]["delivery"]["checkout"].pop("original_tab_retired_at")
+        journal.write_json(ledger_path, legacy)
+        with self.assertRaisesRegex(ValueError, "retired before this confirmation"):
+            self.step("recheck_checkout", confirmation={**original, "observed_at": expires})
+        read = self.step("recheck_checkout", confirmation=original)
+        receipt = self.receipt_observation(read, "linked")
+        with self.assertRaisesRegex(ValueError, "original Oda checkout tab was retired"):
+            self.step("observe_checkout_order", **receipt)
+        receipt["browser"].update(tab_id="replacement", original_tab_retired=True)
+        self.assertEqual(self.step("observe_checkout_order", **receipt)["status"], "checkout_confirmed")
+
     def test_migrated_order_readback_requires_a_replacement_after_an_unproven_receipt_tab(self):
         ready = self.saved_card_preflight()
         self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
@@ -575,6 +598,28 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertEqual(order["payment_method_observed_at"], TIME.isoformat())
         self.assertFalse(order["payment_method_matches_review"])
         self.assertTrue(order["approved_items_match"])
+        self.assertFalse(order["approved_purchase_matches_order"])
+
+    def test_conflicting_explicit_payment_methods_cannot_confirm_the_review(self):
+        ready = self.saved_card_preflight()
+        self.step("observe_delivery", **self.checkout_observation(ready, preflight=True))
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("linked"))
+        receipt = self.receipt_observation(read, "linked")
+        receipt["browser"]["payment_label"] = "Betalt med Vipps"
+        self.assertEqual(self.step("observe_checkout_order", **receipt)["status"], "checkout_readback")
+        self.clock.return_value += timedelta(minutes=1)
+        read = self.step("recheck_checkout")
+        receipt = self.receipt_observation(read, "linked")
+        receipt["browser"]["payment_label"] = "Betalt med kort"
+        result = self.step("observe_checkout_order", **receipt)
+        self.assertEqual(result["status"], "checkout_order_observed_changed")
+        self.assertFalse(result["dispatch"])
+        order = result["checkout_order"]
+        self.assertEqual(order["merchant_payment_method"], "card")
+        self.assertEqual(order["conflicting_merchant_payment_evidence"], {
+            "merchant_payment_method": "vipps", "payment_method_observed_at": TIME.isoformat(),
+        })
+        self.assertFalse(order["payment_method_matches_review"])
         self.assertFalse(order["approved_purchase_matches_order"])
 
     def test_exact_order_archive_preserves_prior_conflict_and_reads_current_merchant_status(self):
@@ -796,7 +841,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         home, code = (self.state.parent / name for name in ("home", "code"))
         home.mkdir()
         code.mkdir()
-        target = code / "staged"
+        target = code / ("release-" + "e" * 32)
         target.mkdir()
         config = home / "config.json"
         plugin = "plugin_checkout_fixture"
@@ -819,6 +864,31 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         self.assertEqual(retained["checkout_recovery_version"], 2)
         self.assertEqual(retained["write_generation"], legacy["write_generation"])
         self.assertEqual(retained["current"]["build"], legacy["current"]["build"])
+        manifest = home / "runtime.json"
+        published = {**journal.read_private(manifest), "release": str(target)}
+        journal.write_json(manifest, published)
+        (code / "current").symlink_to(target.name)
+        maintenance = home / "maintenance.json"
+        pending = home / "pending-install.json"
+        journal.write_json(maintenance, {"candidate": str(target)})
+        journal.write_json(pending, {"update_operation": {
+            "format": 1, "id": "f" * 32, "candidate": str(target), "candidate_identity": BUILD,
+            "phase": "published", "published_manifest": published,
+        }})
+        with (patch.object(journal, "DOT_WORKSPACE", self.state.parent),
+              patch.object(install, "candidate_identity", return_value=BUILD),
+              patch.object(install, "offline", return_value=nullcontext())):
+            with patch.object(journal, "write_record", side_effect=RuntimeError("activation interrupted")):
+                with self.assertRaisesRegex(RuntimeError, "activation interrupted"):
+                    install.publish(published, manifest, home, None)
+            self.assertTrue(maintenance.exists())
+            self.assertTrue(pending.exists())
+            self.assertEqual(journal.read_private(ledger_path, journal.JOURNAL_LIMIT)["checkout_recovery_version"], 2)
+            install.publish(published, manifest, home, None)
+        self.assertFalse(maintenance.exists())
+        self.assertFalse(pending.exists())
+        self.assertEqual(journal.read_private(ledger_path, journal.JOURNAL_LIMIT)["checkout_recovery_version"],
+                         CHECKOUT_RECOVERY_JOURNAL_VERSION)
         stamp = self.clock.return_value.isoformat()
         completion = {"action": "observe_checkout_unsubmitted", "frame_id": read["hosted_request"]["frame_id"], "plugin_id": "fixture",
                       "addresses": ADDRESS, "cart": facts["cart"], "address_observed_at": stamp, "cart_observed_at": stamp,

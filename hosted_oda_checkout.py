@@ -17,8 +17,9 @@ BEFORE_WRITE = {"checkout_review", "checkout_preflight"}
 PENDING = {"checkout_dispatched", "checkout_readback", "checkout_owner_pending", "checkout_unsubmitted_read", "checkout_archive_read"}
 FINISHED = {"checkout_confirmed", "checkout_order_inactive", "checkout_not_submitted", "checkout_archived_unknown",
             "checkout_order_observed_changed", "checkout_order_resolved_by_merchant"}
-CHECKOUT_RECOVERY_JOURNAL_VERSION = 3
-LEGACY_CHECKOUT_RECOVERY_JOURNAL_VERSION = 2
+CHECKOUT_RECOVERY_JOURNAL_VERSION = 4
+RETIREMENT_JOURNAL_VERSION = 3
+READABLE_JOURNAL_VERSIONS = (2, RETIREMENT_JOURNAL_VERSION, CHECKOUT_RECOVERY_JOURNAL_VERSION)
 RECOVERY_ACTIONS = {"defer_checkout", "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted",
                     "observe_checkout_unsubmitted", "recheck_checkout_archive", "observe_checkout_archive"}
 ORDERS_ARGUMENTS = {"page": 1, "size": 20}
@@ -232,6 +233,9 @@ def start_readback(record, value):
                 raise ValueError("bind the original Oda confirmation to the tab that made the attempt")
             if "original_tab_retired_at" in checkout:
                 retirement = checkout["original_tab_retired_at"]
+                if retirement is None and record["delivery"].get("native_saved_card") is True:
+                    # Legacy recovery could not record retirement before the native permit expired.
+                    retirement = checkout["dispatch_expires_at"]
                 if retirement is None or observed >= hosted_oda.response_time(retirement):
                     raise ValueError("the original Oda checkout tab was retired before this confirmation")
         record_native_report(checkout, confirmation["native_report_id"])
@@ -268,10 +272,12 @@ def defer_recovery(record):
     record["checkout_recovery_deferred"] = True
 
 
-def migrate_retirement(checkout):
+def migrate_retirement(checkout, version):
     # Older journals did not preserve the first retirement time or the receipt's tab.
-    if (any(field in checkout for field in ("unsubmitted_reason", "owner_accepted_unknown_at", "result"))
-            or checkout.get("confirmation_source") == "owner_identified_original_success_link"):
+    if (version is None or version < RETIREMENT_JOURNAL_VERSION) and (
+        any(field in checkout for field in ("unsubmitted_reason", "owner_accepted_unknown_at", "result"))
+        or checkout.get("confirmation_source") == "owner_identified_original_success_link"
+    ):
         checkout.setdefault("original_tab_retired_at", None)
 
 
@@ -507,11 +513,19 @@ def observe_order(record, value, key):
     method = PAID_METHOD_LABELS.get(text(label).casefold()) if observation == "paid" else None
     requested_method = "card" if expected["payment_method"] == "saved_card" else expected["payment_method"]
     if method is not None:
-        checkout["merchant_payment_evidence"] = {"merchant_payment_method": method, "payment_method_observed_at": observed.isoformat()}
+        previous_method = checkout.get("merchant_payment_evidence")
+        if previous_method is not None and previous_method["merchant_payment_method"] != method:
+            checkout["conflicting_merchant_payment_evidence"] = previous_method
+        checkout["merchant_payment_evidence"] = {
+            "merchant_payment_method": method, "payment_method_observed_at": observed.isoformat(),
+        }
     method_evidence = dict(checkout.get("merchant_payment_evidence", {}))
     method_matches = None
     if method_evidence:
-        method_matches = method_evidence["merchant_payment_method"] == requested_method
+        conflict = checkout.get("conflicting_merchant_payment_evidence")
+        if conflict is not None:
+            method_evidence["conflicting_merchant_payment_evidence"] = conflict
+        method_matches = conflict is None and method_evidence["merchant_payment_method"] == requested_method
         method_evidence["payment_method_matches_review"] = method_matches
     if retired:
         remember_retirement(checkout, observed)

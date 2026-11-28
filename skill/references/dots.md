@@ -85,8 +85,10 @@ fresh checks and one-time dispatch. Hand off bank approval privately. Use
 saved-card or Vipps purchase. Resolve the original attempt before another
 checkout. A historical receipt grants no action. Use
 `orders.change_handoff` for an exact eligible order and let the owner
-complete the change using its verified receipt. Check a fresh merchant
-receipt before reporting any completed action.
+complete the change in the signed-in shop. For an addition, use Oda's cart
+for the approved extra packages and choose the exact existing order at the
+delivery choice. Verify the revised payable review before handing it over.
+Check a fresh merchant receipt for the same order before reporting an update.
 
 For saved-menu Oda shopping, use the discovered `menu_shopping_command`
 and the saved-menu workflow in the retained source’s `docs/dots.md`.

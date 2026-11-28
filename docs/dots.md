@@ -339,7 +339,9 @@ A receipt label that explicitly says the order was paid by card or Vipps
 reports `merchant_payment_method` with its observation time. A payment
 option or the requested method does not establish how the confirmed order
 was paid. If the explicit payment method differs from the review, retain the
-merchant's observed order and report the difference.
+merchant's observed order and report the difference. If two explicit method
+labels disagree, retain both with their observation times and report that the
+reviewed payment method could not be verified.
 If the verified original order differs from the approved goods or amount,
 report both the reviewed and observed result and any visible payment state.
 
@@ -375,7 +377,10 @@ In the verified ordinary cart, Oda’s `Fortsett` opens the review flow.
 For an owner handoff, leave `Bekreft og betal` and payment controls to the owner. If the
 shop does not show the requested method, tell the owner what is available
 and let them choose. [Oda order and payment controls](https://hjelp.oda.com/no/article/100639)
-Oda lists Vipps for its mobile app. When using the app, open the same signed-in
+If the signed-in checkout offers Vipps, include it in the payable review and
+use the private owner handoff on that exact checkout. A displayed choice alone
+does not establish that Oda sent a Vipps request. Oda lists Vipps for its mobile
+app. When using the app, open the same signed-in
 account and review the original cart before continuing the private handoff.
 [Oda payment methods](https://hjelp.oda.com/no/article/b5fbd3-betalingsmetoder-hos-oss)
 
@@ -398,6 +403,9 @@ blocked. Use a release that supports the pending checkout journal's retirement
 evidence. After updating an older pending journal, reissue the same attempt's
 read-only recovery. Use a replacement in the same browser for an already
 linked receipt when the older journal did not retain which tab observed it.
+For a native saved-card attempt in an older journal with unknown retirement
+time, an original confirmation observed before its recorded dispatch deadline
+can identify the order. Read its receipt on a verified replacement tab.
 After the original delivery window ends, the owner can explicitly accept
 archiving the unresolved purchase as `unknown`. Use `recheck_checkout_archive`
 with the exact `attempt_id`, `reviewed_total_ore`, `owner_accepted_unknown: true`
@@ -429,6 +437,18 @@ the visible, enabled `available_changes` among `items`, `delivery` and
 fields. Open the original order through the validated link for the owner to
 review and complete the change in the shop. Check that exact receipt afterward.
 If a cart or delivery operation is pending, reconcile it first.
+
+To add items to an eligible order, use Oda's ordinary cart for the exact
+extra packages. Start with a cart you control and verify that it contains
+only the approved additions. From the cart, continue to the delivery choice
+and select the existing order. Verify its identity, address and window
+against the original receipt before proceeding to the payable review. Leave
+the new-order choice untouched. Show the original order total, added items,
+amount due now and revised total. Hand the verified review to the owner for
+submission and any private payment approval. Then compare a fresh receipt and
+official order read for the same order against the approved item quantities,
+delivery and revised total. If the result is unclear, retain the same attempt
+and check that order before another action. [Oda's item addition guide](https://hjelp.oda.com/no/article/100639-legge-til-varer-p%C3%A5-bestilling)
 
 #### Oda saved-menu shopping
 

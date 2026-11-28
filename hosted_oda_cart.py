@@ -127,8 +127,7 @@ def registry(state, directory, *, initialize, allow_unbound=False):
         checkout = hosted_oda_delivery.checkout
         recovery_version = saved.get("checkout_recovery_version")
         if versioned and (type(recovery_version) is not int
-                          or recovery_version not in (checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION,
-                                                      checkout.LEGACY_CHECKOUT_RECOVERY_JOURNAL_VERSION)
+                          or recovery_version not in checkout.READABLE_JOURNAL_VERSIONS
                           or (saved["current"] or {}).get("status") not in checkout.PENDING):
             raise ValueError("use a release that can preserve the original Oda checkout journal version")
         key = saved["key"]
@@ -173,7 +172,7 @@ def supports_checkout_journal(target):
         return f"CHECKOUT_RECOVERY_JOURNAL_VERSION = {version}".encode() in stream.read(8192).splitlines()
 
 
-def require_idle(state, *, target_program=None, check_target_later=False):
+def require_idle(state, *, target_program=None, check_target_later=False, activate_checkout=False):
     """Keep the issuing program selectable until its original cart is settled."""
     bound = os.path.lexists(state / BINDING_NAME) or os.path.lexists(state / GENERATION_NAME)
     if not bound and not state.is_relative_to(DOT_WORKSPACE):
@@ -195,12 +194,16 @@ def require_idle(state, *, target_program=None, check_target_later=False):
                     return
                 if target_program is None or not supports_checkout_journal(target_program):
                     raise ValueError("retain the original pending Oda checkout in a checkout-recovery compatible release")
-                if current.get("checkout_recovery_deferred") is not True or "maintenance_deferred" in current:
-                    # Keep the issuing build readable if publication is interrupted.
-                    # The selected program advances the version on its next recovery write.
+                previous_version = saved.get("checkout_recovery_version")
+                recovery_version = checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION if activate_checkout else previous_version
+                if (current.get("checkout_recovery_deferred") is not True or "maintenance_deferred" in current
+                        or recovery_version != previous_version):
+                    # Before publication the issuing build must still read the pending journal.
+                    if activate_checkout:
+                        checkout.migrate_retirement(delivery["checkout"], previous_version)
                     checkout.defer_recovery(current)
                     write_record(ledger, {"key": saved["key"], "write_generation": saved["write_generation"]}, current,
-                                 recovery_version=saved.get("checkout_recovery_version"))
+                                 recovery_version=recovery_version)
                 return
             if current.get("maintenance_deferred") is not True:
                 raise ValueError("finish the original hosted Oda cart or checkout operation before changing its program")
@@ -908,9 +911,8 @@ def run(state, directory, operation_id, value, plugin, build):
             raise ValueError("use the original active hosted Oda operation and installed build")
         elif "delivery" in record:
             checkout = hosted_oda_delivery.checkout
-            if (record["status"] in checkout.PENDING
-                    and saved.get("checkout_recovery_version") != checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION):
-                checkout.migrate_retirement(record["delivery"]["checkout"])
+            if record["status"] in checkout.PENDING:
+                checkout.migrate_retirement(record["delivery"]["checkout"], saved.get("checkout_recovery_version"))
             delivery_dispatch = hosted_oda_delivery.advance(record, value, saved["key"])
         elif action == "observe":
             observe(record, value, saved["key"], locks)

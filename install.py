@@ -1702,9 +1702,11 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
     prior_pending = bounded_json(pending, 8 * 1024 * 1024) if pending.exists() else {}
     operation = prior_pending.get('update_operation')
     code = Path(meta['code_root'])
+    hosted_checkout = bool(meta.get('hosted_oda_plugin'))
     if operation is not None:
         release = Path(operation['candidate'])
-        if (operation.get('format') != 1 or not re.fullmatch(r'[0-9a-f]{32}', operation['id'])
+        if (operation.get('format') not in ((1, 2) if hosted_checkout else (1,))
+                or not re.fullmatch(r'[0-9a-f]{32}', operation['id'])
                 or release.is_symlink() or release.parent.resolve() != code.resolve()
                 or not re.fullmatch(r'release-[0-9a-f]{32}', release.name)
                 or prepared_release is not None and Path(prepared_release) != release):
@@ -1713,14 +1715,22 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
             raise RuntimeError('interrupted candidate changed; preserve the original backup')
     else:
         release = prepared_release or stage_release(code, uv_binary)
-    if path.exists() and meta.get('hosted_oda_plugin'):
+    if path.exists() and hosted_checkout:
         from hosted_oda_cart import require_idle
 
         require_idle(Path(meta['paths']['state']), target_program=Path(release))
+
+    def activate_checkout_journal():
+        if hosted_checkout:
+            from hosted_oda_cart import require_idle
+
+            require_idle(Path(meta['paths']['state']), target_program=Path(release), activate_checkout=True)
+
     with offline(meta):
         if operation and operation['phase'] == 'published':
             if bounded_json(path) != operation['published_manifest'] or (code / 'current').resolve() != release.resolve():
                 raise RuntimeError('interrupted publication no longer matches the selected runtime')
+            activate_checkout_journal()
             maintenance.unlink(missing_ok=True)
             pending.unlink()
             return
@@ -1748,7 +1758,8 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
                 backup(meta, destination)
                 sync_backup_tree(destination)
                 print('Offline backup:', destination)
-            operation = {'format': 1, 'id': uuid.uuid4().hex, 'phase': 'prepared', 'candidate': str(release),
+            # Earlier hosted installers must not finalize a pending checkout update.
+            operation = {'format': 2 if hosted_checkout else 1, 'id': uuid.uuid4().hex, 'phase': 'prepared', 'candidate': str(release),
                          'candidate_identity': read(release), 'previous_manifest': previous,
                          'prior_identity': old_identity(prior) if prior and prior.is_dir() and destination else None,
                          'backup': str(destination) if destination else None,
@@ -1781,6 +1792,9 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
                 operation['phase'] != 'migrated' or operation.get('after_state_sha256') != state_fingerprint(Path(meta['paths']['state']))):
             operation['prior_identity'] = None
             write_json(pending, prior_pending)
+        # The candidate can now resume with its durable maintenance record.
+        # Fence old readers before exposing a published phase they can clear.
+        activate_checkout_journal()
         write_unit(meta)
         current = code / 'current'
         replacement = current.with_name('.current-' + uuid.uuid4().hex)
