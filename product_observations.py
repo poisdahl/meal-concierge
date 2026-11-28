@@ -716,7 +716,7 @@ class IncompleteProductBatch(HouseholdError):
 
 
 def normalize_retail_product_search_batch(value: Any, queries: list[str], *, size: int,
-                                          provider: str = "oda") -> dict[str, dict[str, Any]]:
+                                          provider: str = "oda", observed_at: str | None = None) -> dict[str, dict[str, Any]]:
     """Bind every native result to exactly one requested query; never zip by order."""
     if (not isinstance(queries, list) or not 1 <= len(queries) <= 8
             or any(not isinstance(query, str) or not query.strip() or len(query) > 200 for query in queries)
@@ -735,7 +735,7 @@ def normalize_retail_product_search_batch(value: Any, queries: list[str], *, siz
     for batch in batches:
         query = batch["query"]
         try:
-            normalized = normalize_retail_product_search({"result": [batch]}, provider=provider)
+            normalized = normalize_retail_product_search({"result": [batch]}, provider=provider, observed_at=observed_at)
             if len(batch["products"]) > size:
                 raise HouseholdError("Product search batch exceeded its candidate scope")
             normalized["scope"]["requested_size"] = size

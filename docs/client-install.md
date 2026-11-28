@@ -1,5 +1,8 @@
 # Codex and Claude Code
 
+For a ChatGPT Dot that needs to run on its own cloud computer, use the
+[ChatGPT Dots guide](dots.md).
+
 Use the same setup in a desktop app or terminal. Install Meal Concierge once
 on the computer running your agent, then connect the clients you want to use.
 They share the same recipes, settings and store connection. The household

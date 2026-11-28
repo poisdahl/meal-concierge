@@ -80,7 +80,7 @@ MENY_DELIVERY_WINDOW = re.compile(
     r"(?P<day>[1-9]|[12]\d|3[01])\.\s+"
     r"(?P<month>jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|"
     r"aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\.?\s+"
-    r"kl\.\s+(?P<start>(?:[01]\d|2[0-3]):[0-5]\d)[-–](?P<end>(?:[01]\d|2[0-3]):[0-5]\d)$",
+    r"kl\.\s+(?P<start>(?:[01]\d|2[0-3]):[0-5]\d)\s*[-–]\s*(?P<end>(?:[01]\d|2[0-3]):[0-5]\d)$",
     re.IGNORECASE,
 )
 MENY_MONTH_NUMBERS = {
@@ -115,7 +115,7 @@ CART_DRAWER_MODE_JS = r"""(cart,expected) => {
   return matches?'matched':'different';
 }"""
 CHECKOUT_DELIVERY_BINDING_JS = r"""
-  const deliveryPattern = /^(?:man(?:dag)?|tir(?:sdag)?|ons(?:dag)?|tor(?:sdag)?|fre(?:dag)?|lør(?:dag)?|søn(?:dag)?)\s+(?:[1-9]|[12]\d|3[01])\.\s+(?:jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\.?\s+kl\.\s+(?:[01]\d|2[0-3]):[0-5]\d[-–](?:[01]\d|2[0-3]):[0-5]\d$/i;
+  const deliveryPattern = /^(?:man(?:dag)?|tir(?:sdag)?|ons(?:dag)?|tor(?:sdag)?|fre(?:dag)?|lør(?:dag)?|søn(?:dag)?)\s+(?:[1-9]|[12]\d|3[01])\.\s+(?:jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\.?\s+kl\.\s+(?:[01]\d|2[0-3]):[0-5]\d\s*[-–]\s*(?:[01]\d|2[0-3]):[0-5]\d$/i;
   const deliveryHeadings = [...root.querySelectorAll('h2,h3')].filter(visible).filter(x => norm(x.innerText) === 'Dato og tid');
   let deliveryBinding = null;
   if (deliveryHeadings.length === 1) {

@@ -483,6 +483,16 @@ def configured_provider(settings):
     return provider
 
 
+def hosted_oda_plugin(meta, settings):
+    plugin = settings.get('hosted_oda_plugin')
+    if plugin != meta.get('hosted_oda_plugin') or (plugin is not None and (
+        configured_provider(settings) != 'oda' or meta['manager'] != 'external'
+        or not isinstance(plugin, str) or not re.fullmatch(r'plugin_[A-Za-z0-9_-]{1,120}', plugin)
+    )):
+        raise RuntimeError('original hosted Oda installation binding changed')
+    return plugin
+
+
 def native_manager():
     if platform.system() == 'Linux':
         run('systemctl', '--user', 'show-environment', stdout=subprocess.DEVNULL)
@@ -786,6 +796,9 @@ def stage_release(code_root, uv_binary=None):
     configure_installed_bytecode(release)
     # Check both versions AND the actual loaded modules inside this private venv.
     run(release / 'venv/bin/python', '-I', '-B', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.2.0'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
+    # Hosted cart commands are discovered before their dependencies are loaded.
+    run(release / 'venv/bin/python', '-I', '-B', '-c',
+        "import sys; sys.path.insert(0, sys.argv[1]); import hosted_oda_cart", release)
     from build_identity import create, MANIFEST
     write_json(release / MANIFEST, create(SOURCE, release, PYTHON))
     marker.unlink()
@@ -875,6 +888,8 @@ def bounded_json(path, maximum=16384):
 
 def program_baseline(meta):
     value = {key: meta.get(key) for key in ('home', 'release', 'code_root', 'manager', 'name', 'paths', 'runtime_path', 'browser_launch', 'runtime_identity')}
+    if 'hosted_oda_plugin' in meta:
+        value['hosted_oda_plugin'] = meta['hosted_oda_plugin']
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -929,9 +944,11 @@ def prepare_program(home, meta, uv_binary=None):
         if receipts.is_symlink():
             raise RuntimeError('program preparation directory must not be linked')
         write_json(receipts / (identifier + '.json'), receipt)
+    next_step = ('When idle, update --prepared-program this ID and reopen the original foreground tools.'
+                 if meta.get('hosted_oda_plugin') else
+                 'When idle, stop through the existing owner, update --prepared-program this ID, then start through that owner.')
     return {'status': 'prepared', 'prepared_program': identifier, 'build': identity,
-            'service_stop_required': False,
-            'next': 'When idle, stop through the existing owner, update --prepared-program this ID, then start through that owner.'}
+            'service_stop_required': False, 'next': next_step}
 
 
 def read_program_preparation(home, meta, identifier):
@@ -1005,6 +1022,9 @@ def doctor(home):
     except (OSError, RuntimeError, ValueError):
         checked = {}
         result['selected_runtime'] = 'unverified'
+    if meta.get('hosted_oda_plugin'):
+        result.update(transport='hosted_mcp', socket_health='not_applicable')
+        return result
     result.update(socket_health='unavailable', email_work_pending='unknown', serving_selected_runtime='unknown')
     try:
         health_result = health(meta, diagnostics=True)
@@ -1258,6 +1278,7 @@ def main():
     parser.add_argument('--uv', help='explicit uv executable when it is not on the host PATH')
     parser.add_argument('--name', default='meal-concierge' if platform.system() == 'Linux' else 'com.meal-concierge')
     parser.add_argument('--provider', choices=['none', 'oda', 'meny', 'mathem'])
+    parser.add_argument('--oda-plugin', help='new external Oda foreground installation with this ChatGPT plugin ID')
     parser.add_argument('--no-browser', action='store_true', help='store-login: use the local private OAuth handoff for a headless host')
     parser.add_argument('--household')
     parser.add_argument('--adopt', action='store_true')
@@ -1283,6 +1304,14 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
+    if args.oda_plugin is not None and (
+        args.action != 'install' or args.manager != 'external' or args.provider != 'oda' or args.adopt
+        or not re.fullmatch(r'plugin_[A-Za-z0-9_-]{1,120}', args.oda_plugin)
+        or any((args.tokens, args.agent_browser, args.browser_executable, args.browser_profile,
+                args.browser_home, args.browser_socket_directory, args.browser_mode, args.browser_display,
+                args.browser_xauthority))
+    ):
+        raise RuntimeError('--oda-plugin requires a new external Oda install without local tokens or browser settings')
     if args.action == 'resolve-recipe-conflict':
         if not args.prepared or not args.pack_recipe_id or args.expected_revision is None or args.expected_revision < 1 or args.resolution is None:
             raise RuntimeError('resolve-recipe-conflict requires --prepared, --pack-recipe-id, --expected-revision and --resolution')
@@ -1322,6 +1351,8 @@ def main():
         if args.provider or args.tokens or args.code_root or args.config:
             raise RuntimeError('store-login uses the existing installation provider and token location; select it with --home')
         meta = completed_manifest(home)
+        if meta.get('hosted_oda_plugin'):
+            raise RuntimeError('connect the official Oda plugin through ChatGPT; this installation uses foreground tools')
         code_root = Path(meta['code_root'])
         with file_lock(code_root / '.installer.lock'):
             if completed_manifest(home) != meta or bounded_json(code_root / 'owner.json').get('home') != str(home):
@@ -1349,6 +1380,9 @@ def main():
         meta = json.loads(manifest.read_text())
         settings = json.loads(Path(meta['paths']['config']).read_text())
         provider = configured_provider(settings)
+        if hosted_oda_plugin(meta, settings):
+            print(json.dumps({'provider': 'oda', 'transport': 'hosted_mcp', 'browser_required': False}))
+            return
         if provider == 'none':
             print(json.dumps({'provider': provider, 'browser_required': False}))
             print('No store is configured; browser prerequisites are not required.')
@@ -1397,6 +1431,8 @@ def main():
         return
     if args.action == 'attach':
         meta = json.loads((home / 'runtime.json').read_text())
+        if meta.get('hosted_oda_plugin'):
+            raise RuntimeError('this hosted Oda installation uses foreground tools')
         try:
             verify_serving(meta, selected_identity(meta))
         except (OSError, ValueError) as exc:
@@ -1433,9 +1469,19 @@ def main():
             meta = json.loads(manifest.read_text())
             if args.manager is not None and (args.manager == 'external') != (meta['manager'] == 'external'):
                 raise RuntimeError('existing installation manager differs; no implicit ownership transfer')
+            if args.oda_plugin is not None and args.oda_plugin != meta.get('hosted_oda_plugin'):
+                raise RuntimeError('repeat setup must use the original hosted Oda plugin')
+            if meta.get('hosted_oda_plugin') and args.action in {'start', 'stop', 'restart', 'run', 'connect-store'}:
+                raise RuntimeError('this hosted Oda installation uses foreground tools')
+            if path.exists() and meta.get('hosted_oda_plugin') and args.action in {'update', 'rollback'}:
+                from hosted_oda_cart import require_idle
+
+                require_idle(Path(meta['paths']['state']), check_target_later=True)
             settings = meta.pop('initial_config', None)
             meta.pop('update_operation', None)
             if args.action == 'install' and path.exists():
+                if meta.get('hosted_oda_plugin'):
+                    raise RuntimeError('existing hosted Oda installation; reopen its current foreground tools or update the original home')
                 raise RuntimeError('existing installation; use attach or an explicit stopped-service update')
             if args.action == 'connect-store':
                 if not path.exists():
@@ -1578,11 +1624,15 @@ def main():
                 provider = configured_provider(settings)
                 if args.provider and args.provider != provider or args.household and args.household != settings.get('household'):
                     raise RuntimeError('existing config household/provider differs; no implicit conversion')
+                if args.oda_plugin is not None and args.oda_plugin != settings.get('hosted_oda_plugin'):
+                    raise RuntimeError('existing config uses a different Oda connection; no implicit conversion')
             else:
                 if args.adopt or not args.provider or not args.household:
                     raise RuntimeError('new install requires --provider and --household; adoption requires an existing config')
                 settings = {'household': args.household, 'instance': 'household', 'provider': args.provider, 'confirmation_policy': 'fresh', 'primary_recipe_library_id': 'builtin', 'recipe_libraries': [{'library_id': 'builtin', 'provider': 'builtin', 'read_only': False}]}
-            if configured_provider(settings) == 'none':
+                if args.oda_plugin is not None:
+                    settings['hosted_oda_plugin'] = args.oda_plugin
+            if configured_provider(settings) == 'none' or settings.get('hosted_oda_plugin'):
                 paths = {key: value for key, value in paths.items() if key in {'config', 'state', 'socket'}}
             else:
                 paths.update(browser_paths(args, configured_provider(settings)))
@@ -1592,13 +1642,17 @@ def main():
                 if target == code_root or target.is_relative_to(code_root) or code_root.is_relative_to(target):
                     raise RuntimeError('code and private data paths must be disjoint')
             meta = {'format': 1, 'home': str(home), 'code_root': str(code_root), 'name': args.name, 'manager': manager, 'unit': str(unit) if unit is not None else None, 'paths': paths, 'runtime_path': os.environ.get('PATH', os.defpath)}
+            if settings.get('hosted_oda_plugin'):
+                meta['hosted_oda_plugin'] = settings['hosted_oda_plugin']
             if manager != 'external' and active(meta):
                 raise RuntimeError('another service already uses this name')
         actual_settings = dict(settings or json.loads(Path(meta['paths']['config']).read_text()))
         actual_settings['provider'] = configured_provider(actual_settings)
-        if actual_settings['provider'] != 'none':
+        plugin = hosted_oda_plugin(meta, actual_settings)
+        managed_store = actual_settings['provider'] != 'none' and plugin is None
+        if managed_store:
             meta['browser_launch'] = configured_browser_launch(args, meta)
-        if manifest.exists() and actual_settings['provider'] != 'none':
+        if manifest.exists() and managed_store:
             # Validate prerequisites while a healthy owner may still be running.
             # Only after this succeeds do we require the caller to stop it and
             # publish the resolved paths as part of the normal atomic update.
@@ -1621,8 +1675,8 @@ def main():
         elif manifest.exists():
             assert_stopped(meta)
         socket_limit = 103 if platform.system() == 'Darwin' else 107
-        socket_paths = [meta['paths']['socket']]
-        if actual_settings['provider'] != 'none' and (actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary')):
+        socket_paths = [meta['paths']['socket']] if plugin is None else []
+        if managed_store and (actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary')):
             prefix = {'meny': 'meal-concierge-meny-', 'mathem': 'mathem-household-'}.get(actual_settings.get('provider'), 'oda-household-')
             session = prefix + str(actual_settings.get('instance') or 'household')
             socket_paths.append(str(Path(meta['paths']['browser_socket_directory']) / (session + '.sock')))
@@ -1648,9 +1702,11 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
     prior_pending = bounded_json(pending, 8 * 1024 * 1024) if pending.exists() else {}
     operation = prior_pending.get('update_operation')
     code = Path(meta['code_root'])
+    hosted_checkout = bool(meta.get('hosted_oda_plugin'))
     if operation is not None:
         release = Path(operation['candidate'])
-        if (operation.get('format') != 1 or not re.fullmatch(r'[0-9a-f]{32}', operation['id'])
+        if (operation.get('format') not in ((1, 2) if hosted_checkout else (1,))
+                or not re.fullmatch(r'[0-9a-f]{32}', operation['id'])
                 or release.is_symlink() or release.parent.resolve() != code.resolve()
                 or not re.fullmatch(r'release-[0-9a-f]{32}', release.name)
                 or prepared_release is not None and Path(prepared_release) != release):
@@ -1659,10 +1715,22 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
             raise RuntimeError('interrupted candidate changed; preserve the original backup')
     else:
         release = prepared_release or stage_release(code, uv_binary)
+    if path.exists() and hosted_checkout:
+        from hosted_oda_cart import require_idle
+
+        require_idle(Path(meta['paths']['state']), target_program=Path(release))
+
+    def activate_checkout_journal():
+        if hosted_checkout:
+            from hosted_oda_cart import require_idle
+
+            require_idle(Path(meta['paths']['state']), target_program=Path(release), activate_checkout=True)
+
     with offline(meta):
         if operation and operation['phase'] == 'published':
             if bounded_json(path) != operation['published_manifest'] or (code / 'current').resolve() != release.resolve():
                 raise RuntimeError('interrupted publication no longer matches the selected runtime')
+            activate_checkout_journal()
             maintenance.unlink(missing_ok=True)
             pending.unlink()
             return
@@ -1690,7 +1758,8 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
                 backup(meta, destination)
                 sync_backup_tree(destination)
                 print('Offline backup:', destination)
-            operation = {'format': 1, 'id': uuid.uuid4().hex, 'phase': 'prepared', 'candidate': str(release),
+            # Earlier hosted installers must not finalize a pending checkout update.
+            operation = {'format': 2 if hosted_checkout else 1, 'id': uuid.uuid4().hex, 'phase': 'prepared', 'candidate': str(release),
                          'candidate_identity': read(release), 'previous_manifest': previous,
                          'prior_identity': old_identity(prior) if prior and prior.is_dir() and destination else None,
                          'backup': str(destination) if destination else None,
@@ -1723,6 +1792,9 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
                 operation['phase'] != 'migrated' or operation.get('after_state_sha256') != state_fingerprint(Path(meta['paths']['state']))):
             operation['prior_identity'] = None
             write_json(pending, prior_pending)
+        # The candidate can now resume with its durable maintenance record.
+        # Fence old readers before exposing a published phase they can clear.
+        activate_checkout_journal()
         write_unit(meta)
         current = code / 'current'
         replacement = current.with_name('.current-' + uuid.uuid4().hex)
@@ -1739,6 +1811,10 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
         write_json(pending, prior_pending)
         maintenance.unlink()
         pending.unlink()
+    if meta.get('hosted_oda_plugin'):
+        current = Path(meta['code_root']) / 'current'
+        print(f'Installed hosted Oda. Use {current / "foreground.py"} with --home {home} and tools.')
+        return
     print('Installed, stopped. Start explicitly; attach prints agent configuration without changing it.')
     print('Recipe collection is optional. Use prepare-recipes while running, then import-recipes --prepared ID while stopped.')
 

@@ -21,8 +21,8 @@
 
 Use food you already have and shop through **Oda, Mathem or MENY**.
 Meal Concierge keeps your recipes and household preferences between conversations.
-It runs as a background service on the computer hosting your agent, including
-Grok's cloud computer.
+It runs on the computer hosting your agent. ChatGPT Dots can run meal planning
+and shopping lists on their own cloud computer through the foreground runner.
 
 [Install](#installation) · [First use](#first-use) ·
 [Update](#update-meal-concierge) · [Recipe collection](#add-or-update-the-recipe-collection) ·
@@ -30,7 +30,8 @@ Grok's cloud computer.
 
 ## Installation
 
-Use an existing agent on **Linux, Apple Silicon macOS, or Grok's cloud computer**.
+Use an existing agent on **Linux, Apple Silicon macOS, Grok's cloud computer,
+or a ChatGPT Dot's cloud computer**.
 
 ### Agent support
 
@@ -42,14 +43,15 @@ Use an existing agent on **Linux, Apple Silicon macOS, or Grok's cloud computer*
 | [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
+| [ChatGPT Dots](docs/dots.md) | Cloud meal planning, recipes and shopping lists. Separate Oda and MENY households support catalog, cart, order and delivery workflows. Live Oda checkout covers Dot-operated saved card, Vipps and an eligible item addition authorized in Vipps. MENY supports home-delivery Vipps with phone approval and eligible item edits through private owner handoff. |
 
 ### Requirements
 
 - **Python 3.10+ and uv** for installation. The installer manages its own Python
   environment and dependencies.
-- **Linux** needs a working user systemd service manager; **Apple Silicon macOS**
-  needs a logged-in user's launchd session.
-- **With a store:** agent-browser and Chrome or non-snap Chromium. See
+- **Native background services** use user systemd on Linux or a logged-in user's
+  launchd session on Apple Silicon macOS. See the cloud guides for those hosts.
+- **Managed store runtimes** use agent-browser and Chrome or non-snap Chromium. See
   [shared setup](docs/runtime.md#what-you-need) for supported versions and host
   requirements, or [Grok's browser setup](docs/grok.md#browser-and-login) for its
   native browser option.
@@ -68,9 +70,13 @@ own store connection. Delivery also needs an address in its delivery area.
 | Mathem | Sweden / SEK | Saved card. |
 | MENY | Norway / NOK | Vipps; home delivery only. |
 
-Vipps checkout needs your Norwegian mobile number in the installation's private
-configuration. Set it locally during store setup, never in chat. Approve payment
-requests in the Vipps app when prompted.
+Managed store installations use your Norwegian mobile number from their private
+configuration for Vipps checkout. On Dots, the retailer checkout runs in the
+Dot's signed-in cloud browser. Use the official Vipps form for the mobile
+number and approve payment requests privately in the Vipps app.
+
+Follow the [Dots store guide](docs/dots.md#store-availability) for the cloud
+browser and handoff steps.
 
 Enter passwords, payment details and required approvals in the trusted store
 or payment interface, never in chat.
@@ -149,6 +155,8 @@ Ask the agent managing your installation:
 > Preserve my recipes, settings, login, browser profile and saved data. Check
 > prerequisites before stopping; use the bounded verification in that guide.
 > Report the release tag, running commit and health. Do not update the recipe collection.
+
+For ChatGPT Dots, use the [foreground update steps](docs/dots.md#updates-and-troubleshooting).
 
 To update **both program and collection**, replace the last sentence with:
 

@@ -15,7 +15,6 @@ import re
 import stat
 import tempfile
 import time
-import unicodedata
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -23,11 +22,9 @@ from core import (CancellationPreconditionError, CheckoutPreconditionError,
                   HouseholdError, checkout_payment_settings, validate_delivery_slot)
 from checkout_identity import combined_checkout_lines_match, review_checkout_lines
 from clients.muse import private_directory, read_json as _read_json, timestamp
-from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, ODA_CHECKOUT_AMOUNT_LABELS,
-                         OdaBrowser, _oda_checkout_amounts_minor,
-                         cancellation_delivery_matches, cancellation_total_matches,
-                         checkout_delivery_matches, oda_checkout_amount_minor,
-                         require_order_binding)
+from oda_browser import (OdaBrowser, cancellation_delivery_matches, cancellation_total_matches,
+                         checkout_delivery_matches, require_order_binding)
+from oda_checkout_observation import checkout_amounts, native_amount_minor, receipt_delivery_matches, text
 from service_common import canonical, money_cents
 
 
@@ -600,87 +597,8 @@ class NativeBridge:
                                  "closed_at": datetime.now(timezone.utc).isoformat()})
 
 
-def text(value):
-    if not isinstance(value, str) or len(value) > 2000:
-        raise HouseholdError("Muse browser text is unavailable")
-    return " ".join(unicodedata.normalize("NFC", value).split())
-
-
-def native_amount_minor(label, value):
-    # Native AX joins adjacent number/currency nodes on the observed page.
-    value = re.sub(r"(?<=\d)(kr|NOK)$", r" \1", text(value), flags=re.IGNORECASE)
-    return oda_checkout_amount_minor(label, value)
-
-
-def checkout_amounts(rows, product_count, expected_total):
-    """Validate the complete native summary from its observed label/value rows.
-
-    The host must capture one complete amount section. No totals, missing rows
-    or IDs may be filled from the expected MCP cart.
-    """
-    if (type(product_count) is not int or not 0 < product_count <= 1_000_000
-            or type(expected_total) is not int or expected_total < 0
-            or not isinstance(rows, list) or not 3 <= len(rows) <= 9):
-        raise HouseholdError("Muse checkout amount section is unavailable")
-    product_label = "1 vare" if product_count == 1 else f"{product_count} varer"
-    labels = {product_label: "product_subtotal",
-              **{label: key for key, label in ODA_CHECKOUT_AMOUNT_LABELS.items()}}
-    observed = {}
-    for row in rows:
-        if not isinstance(row, Mapping) or set(row) != {"label", "value"}:
-            raise HouseholdError("Muse checkout amount row changed")
-        label = "" if row["label"] is None else text(row["label"])
-        value = text(row["value"])
-        if not label:
-            # One observed zero with no label has no financial effect. Preserve
-            # it in the raw surface without inventing a delivery or fee meaning.
-            if "unlabeled_zero" in observed or native_amount_minor("Total inkl. MVA", value) != 0:
-                raise HouseholdError("Muse unlabeled checkout amount is nonzero or ambiguous")
-            observed["unlabeled_zero"] = 0
-            continue
-        key = labels.get(label)
-        if key is None or key in observed:
-            raise HouseholdError("Muse checkout amount rows are unknown or ambiguous")
-        observed[key] = native_amount_minor(label, value)
-    if not {"product_subtotal", "discounted_subtotal", "provider_total"} <= observed.keys():
-        raise HouseholdError("Muse checkout required amount row is missing")
-    subtotal = observed["product_subtotal"] + observed.get("discounts", 0)
-    fee_keys = ("other_fee", "weight_reservation")
-    payable = (subtotal + observed.get("delivery_price", 0)
-               + observed.get("bags", 0) + observed.get("deposits", 0)
-               + sum(observed.get(key, 0) for key in fee_keys))
-    if (observed["discounted_subtotal"] != subtotal
-            or observed["provider_total"] != payable
-            or payable != expected_total):
-        raise HouseholdError("Muse checkout amount arithmetic or cart total changed")
-    amounts = {key: observed[key] / 100 if key in observed else None
-               for key in ODA_CHECKOUT_AMOUNT_KEYS}
-    amounts["other_fees"] = {ODA_CHECKOUT_AMOUNT_LABELS[key]: observed[key] / 100
-                             for key in fee_keys if key in observed} or None
-    _oda_checkout_amounts_minor(amounts)
-    return amounts
-
-
 def native_receipt_delivery_matches(slot, display, observed_at):
-    """Compare to the frozen absolute slot; retain yearless display as such."""
-    slot = validate_delivery_slot(slot)
-    start, end = (timestamp(slot[key]).astimezone(ZoneInfo("Europe/Oslo"))
-                  for key in ("start_at", "end_at"))
-    if start.date() != end.date() or start.second or end.second or start.microsecond or end.microsecond:
-        return False
-    display = text(display)
-    years = re.findall(r"\b[12][0-9]{3}\b", display)
-    if years and years != [str(start.year)]:
-        return False
-    relative = re.findall(r"\bi (dag|morgen)\b", display.casefold())
-    if relative:
-        observed_date = timestamp(observed_at).astimezone(ZoneInfo("Europe/Oslo")).date()
-        if len(relative) != 1 or observed_date + timedelta(days=relative[0] == "morgen") != start.date():
-            return False
-    months = ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")
-    expected = f"{start:%H:%M}-{end:%H:%M}, {start.day}. {months[start.month - 1]}"
-    return checkout_delivery_matches(expected, [display],
-        today=timestamp(observed_at).astimezone(ZoneInfo("Europe/Oslo")).date())
+    return receipt_delivery_matches(slot, display, timestamp(observed_at))
 
 
 def account_links(value):

@@ -74,6 +74,14 @@ compatibility. Fall back to simple text when a richer feature is unverified.
 All three stores use the configured fresh or standing authorization policy and
 reconcile uncertain outcomes before another attempt.
 
+The table describes the managed store runtimes. The [ChatGPT Dots guide](dots.md#store-availability)
+lists public MENY search, signed-in rendered MENY cart and order reads,
+hosted Oda catalog, cart and order reads, reviewed saved-menu shopping, and
+reviewed delivery selection. It documents guarded saved-card checkout in the
+Oda cloud browser and private handoffs for Oda Vipps and native MENY checkout.
+The owner submits eligible order changes in the signed-in shop. The native
+MENY item-addition workflow checks the revised quote and the original receipt.
+
 Oda and Mathem share their retail connection and checkout implementation, with
 separate accounts, currencies and store-specific payment controls. Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
 provider OAuth registration `mathem-weekly`. The `retail_mcp.RetailMcpClient`

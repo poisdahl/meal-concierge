@@ -1467,6 +1467,8 @@ def main() -> None:
 
 
 def validate_browser_prerequisites(args, settings) -> None:
+    if settings.get('hosted_oda_plugin') is not None:
+        raise SystemExit('this hosted Oda installation uses foreground tools')
     if settings["provider"] not in {"oda", "mathem"}:
         return
     try:
@@ -1487,6 +1489,13 @@ def run(args, settings=None) -> None:
     if settings is None:
         settings = config(args.config)
         validate_browser_prerequisites(args, settings)
+    app = build_application(args, settings)
+    Server(args.socket, args.socket_group, args.agent_uid, app).run()
+
+
+def build_application(args, settings) -> Application:
+    if settings.get('hosted_oda_plugin') is not None:
+        raise SystemExit('this hosted Oda installation uses foreground tools')
     browser_arguments = {
         "instance": str(settings.get("instance") or "household"),
         "binary": args.browser_binary,
@@ -1560,7 +1569,7 @@ def run(args, settings=None) -> None:
         except OSError as exc:
             raise SystemExit("recipe-pack inbox is unavailable to this service") from exc
         os.close(inbox_descriptor)
-    app = Application(
+    return Application(
         StateStore(args.state, settings),
         provider_client,
         checkout_browser,
@@ -1568,7 +1577,6 @@ def run(args, settings=None) -> None:
         recipe_library_adapters=recipe_library_adapters,
         recipe_pack_inbox=recipe_pack_inbox,
     )
-    Server(args.socket, args.socket_group, args.agent_uid, app).run()
 
 
 if __name__ == "__main__":
