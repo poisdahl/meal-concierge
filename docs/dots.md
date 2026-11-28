@@ -326,6 +326,7 @@ Complete `observe_checkout_order` with the fresh app detail, tracking and
 address list, plus the exact browser receipt on the same account. Once the
 original confirmation is recorded, a same-account replacement in the same
 cloud browser can read the receipt if the original tab retired.
+Later reads must use a replacement once that retirement has been recorded.
 Its `browser` fields are `url`, `browser_id`, `tab_id`, `attempt_id`,
 `order_number`, `delivery`, `payment_label` (or null), `address_id`,
 `address_label`, `total_ore` and `original_tab_retired`. Supply the emitted frame identity, `order`,
@@ -334,6 +335,11 @@ Reissue that read with `recheck_checkout` if needed. Use only the already
 recorded order. Attach a late `native_report_id` to that same readback when
 available. The permit must expire before readback releases the checkout.
 Merchant order acceptance and card authorization are separate observations.
+A receipt label that explicitly says the order was paid by card or Vipps
+reports `merchant_payment_method` with its observation time. A payment
+option or the requested method does not establish how the confirmed order
+was paid. If the explicit payment method differs from the review, retain the
+merchant's observed order and report the difference.
 If the verified original order differs from the approved goods or amount,
 report both the reviewed and observed result and any visible payment state.
 
@@ -388,7 +394,10 @@ reply or absent order alone leaves the original operation pending.
 
 Use `defer_checkout` after the permit expires to select a compatible program
 release while the original checkout remains pending and further writes stay
-blocked. Do not switch to a release that cannot preserve its checkout journal.
+blocked. Use a release that supports the pending checkout journal's retirement
+evidence. After updating an older pending journal, reissue the same attempt's
+read-only recovery. Use a replacement in the same browser for an already
+linked receipt when the older journal did not retain which tab observed it.
 After the original delivery window ends, the owner can explicitly accept
 archiving the unresolved purchase as `unknown`. Use `recheck_checkout_archive`
 with the exact `attempt_id`, `reviewed_total_ore`, `owner_accepted_unknown: true`

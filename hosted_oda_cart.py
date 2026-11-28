@@ -124,9 +124,12 @@ def registry(state, directory, *, initialize, allow_unbound=False):
         versioned = "checkout_recovery_version" in saved
         require_fields(saved, fields + ("checkout_recovery_version",) if versioned else fields)
         verify_record(saved["current"])
-        if versioned and (type(saved["checkout_recovery_version"]) is not int
-                          or saved["checkout_recovery_version"] != hosted_oda_delivery.checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION
-                          or (saved["current"] or {}).get("status") not in hosted_oda_delivery.checkout.PENDING):
+        checkout = hosted_oda_delivery.checkout
+        recovery_version = saved.get("checkout_recovery_version")
+        if versioned and (type(recovery_version) is not int
+                          or recovery_version not in (checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION,
+                                                      checkout.LEGACY_CHECKOUT_RECOVERY_JOURNAL_VERSION)
+                          or (saved["current"] or {}).get("status") not in checkout.PENDING):
             raise ValueError("use a release that can preserve the original Oda checkout journal version")
         key = saved["key"]
         if (key != anchor_value["key"] or not isinstance(key, str) or len(key) != 32
@@ -192,12 +195,12 @@ def require_idle(state, *, target_program=None, check_target_later=False):
                     return
                 if target_program is None or not supports_checkout_journal(target_program):
                     raise ValueError("retain the original pending Oda checkout in a checkout-recovery compatible release")
-                if (current.get("checkout_recovery_deferred") is not True or "maintenance_deferred" in current
-                        or "checkout_recovery_version" not in saved):
-                    # Adopt the same journal before selecting a compatible successor.
-                    # Keep its issuing build, generation and financial fence.
+                if current.get("checkout_recovery_deferred") is not True or "maintenance_deferred" in current:
+                    # Keep the issuing build readable if publication is interrupted.
+                    # The selected program advances the version on its next recovery write.
                     checkout.defer_recovery(current)
-                    write_record(ledger, {"key": saved["key"], "write_generation": saved["write_generation"]}, current)
+                    write_record(ledger, {"key": saved["key"], "write_generation": saved["write_generation"]}, current,
+                                 recovery_version=saved.get("checkout_recovery_version"))
                 return
             if current.get("maintenance_deferred") is not True:
                 raise ValueError("finish the original hosted Oda cart or checkout operation before changing its program")
@@ -593,7 +596,7 @@ def status_view(record):
             if field in delivery:
                 result[field] = delivery[field]
         if "handoff" in result:
-            result["handoff"] = {**result["handoff"], "owner_completion_current": record["status"] == "checkout_owner_pending"}
+            result["handoff"] = {**result["handoff"], "owner_completion_current": False}
         if "checkout" in delivery:
             checkout = delivery["checkout"]
             review = checkout["review"]
@@ -788,10 +791,10 @@ def initial_restoration(directory, original_id, owner, plugin, generation):
             "add_response": add_response, "menu": {**menu, "mode": "restore_from_receipt"}}
 
 
-def write_record(ledger, authority, record):
+def write_record(ledger, authority, record, *, recovery_version=hosted_oda_delivery.checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION):
     value = {**authority, "current": record}
-    if record["status"] in hosted_oda_delivery.checkout.PENDING:
-        value["checkout_recovery_version"] = hosted_oda_delivery.checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION
+    if recovery_version is not None and record["status"] in hosted_oda_delivery.checkout.PENDING:
+        value["checkout_recovery_version"] = recovery_version
     limit = JOURNAL_LIMIT - JOURNAL_ENDING_RESERVE if record["status"] in BEFORE_WRITE else JOURNAL_LIMIT
     size = len((json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n").encode())
     if size > limit:
@@ -904,6 +907,10 @@ def run(state, directory, operation_id, value, plugin, build):
                 or (record["build"] != build and not continue_from_other_build(record, action))):
             raise ValueError("use the original active hosted Oda operation and installed build")
         elif "delivery" in record:
+            checkout = hosted_oda_delivery.checkout
+            if (record["status"] in checkout.PENDING
+                    and saved.get("checkout_recovery_version") != checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION):
+                checkout.migrate_retirement(record["delivery"]["checkout"])
             delivery_dispatch = hosted_oda_delivery.advance(record, value, saved["key"])
         elif action == "observe":
             observe(record, value, saved["key"], locks)
@@ -943,6 +950,7 @@ def run(state, directory, operation_id, value, plugin, build):
             write_json(ledger, {**authority, "current": None})
         result = status_view(record)
         if owner_handoff_ready:
+            result["handoff"]["owner_completion_current"] = True
             result["owner_handoff_ready"] = True
             result["owner_handoff_admit_by"] = record["delivery"]["checkout"]["dispatch_expires_at"]
         if action == "recheck" and "delivery" not in record:

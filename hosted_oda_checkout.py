@@ -17,12 +17,17 @@ BEFORE_WRITE = {"checkout_review", "checkout_preflight"}
 PENDING = {"checkout_dispatched", "checkout_readback", "checkout_owner_pending", "checkout_unsubmitted_read", "checkout_archive_read"}
 FINISHED = {"checkout_confirmed", "checkout_order_inactive", "checkout_not_submitted", "checkout_archived_unknown",
             "checkout_order_observed_changed", "checkout_order_resolved_by_merchant"}
-CHECKOUT_RECOVERY_JOURNAL_VERSION = 2
+CHECKOUT_RECOVERY_JOURNAL_VERSION = 3
+LEGACY_CHECKOUT_RECOVERY_JOURNAL_VERSION = 2
 RECOVERY_ACTIONS = {"defer_checkout", "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted",
                     "observe_checkout_unsubmitted", "recheck_checkout_archive", "observe_checkout_archive"}
 ORDERS_ARGUMENTS = {"page": 1, "size": 20}
 ACTIVE_ORDERS = {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
 INACTIVE_ORDERS = {"cancelled", "failed"}
+PAID_METHOD_LABELS = {
+    "betalt med kort": "card", "paid by card": "card", "paid with card": "card",
+    "betalt med vipps": "vipps", "paid by vipps": "vipps", "paid with vipps": "vipps",
+}
 
 
 def review_request(record):
@@ -221,9 +226,14 @@ def start_readback(record, value):
                     or not isinstance(tab, str) or not 1 <= len(tab) <= 150 or not tab.isprintable()
                     or tab == checkout["tab_id"]):
                 raise ValueError("use the owner's exact original Oda success link to bind this handed-off checkout")
-            verify_retirement(checkout, confirmation["retirement"])
-        elif confirmation["tab_id"] != checkout["tab_id"]:
-            raise ValueError("bind the original Oda confirmation to the tab that made the attempt")
+            verify_retirement(checkout, confirmation["retirement"], issued)
+        else:
+            if confirmation["tab_id"] != checkout["tab_id"]:
+                raise ValueError("bind the original Oda confirmation to the tab that made the attempt")
+            if "original_tab_retired_at" in checkout:
+                retirement = checkout["original_tab_retired_at"]
+                if retirement is None or observed >= hosted_oda.response_time(retirement):
+                    raise ValueError("the original Oda checkout tab was retired before this confirmation")
         record_native_report(checkout, confirmation["native_report_id"])
         checkout["matched_order_id"] = order_id
         checkout["confirmation_observed_at"] = observed.isoformat()
@@ -258,13 +268,25 @@ def defer_recovery(record):
     record["checkout_recovery_deferred"] = True
 
 
-def verify_retirement(checkout, evidence):
+def migrate_retirement(checkout):
+    # Older journals did not preserve the first retirement time or the receipt's tab.
+    if (any(field in checkout for field in ("unsubmitted_reason", "owner_accepted_unknown_at", "result"))
+            or checkout.get("confirmation_source") == "owner_identified_original_success_link"):
+        checkout.setdefault("original_tab_retired_at", None)
+
+
+def remember_retirement(checkout, observed):
+    checkout.setdefault("original_tab_retired_at", observed.isoformat())
+
+
+def verify_retirement(checkout, evidence, observed):
     from hosted_oda_cart import require_fields
 
     require_fields(evidence, ("browser_id", "tab_id", "original_tab_retired", "owner_handoff_ended", "no_pending_bank_action"))
     if (any(evidence[field] != checkout[field] for field in ("browser_id", "tab_id"))
             or any(evidence[field] is not True for field in ("original_tab_retired", "owner_handoff_ended", "no_pending_bank_action"))):
         raise ValueError("verify the original checkout tab, any owner takeover and any bank action are retired")
+    remember_retirement(checkout, observed)
 
 
 def current_checkout_read(record, issued, status):
@@ -291,7 +313,7 @@ def start_unsubmitted_read(record, value):
             or issued < retire_after(checkout, owner_handoff=delivery.get("owner_handoff", False))
             or (reason == "owner_returned_without_submitting" and value["owner_confirmed_no_submit"] is not True)):
         raise ValueError("require a known pre-submit ending and retire the original Oda executor before reconciling")
-    verify_retirement(checkout, value["retirement"])
+    verify_retirement(checkout, value["retirement"], issued)
     record_native_report(checkout, value.get("native_report_id"))
     checkout["unsubmitted_reason"] = reason
     current_checkout_read(record, issued, "checkout_unsubmitted_read")
@@ -310,7 +332,7 @@ def start_unknown_archive(record, value):
             or issued < hosted_oda.response_time(checkout["review"]["delivery"]["end_at"])
             or issued < retire_after(checkout, owner_handoff=delivery.get("owner_handoff", False))):
         raise ValueError("obtain explicit acceptance of this exact unknown Oda purchase after its original delivery window ends")
-    verify_retirement(checkout, value["retirement"])
+    verify_retirement(checkout, value["retirement"], issued)
     record_native_report(checkout, value.get("native_report_id"))
     checkout["owner_accepted_unknown_at"] = issued.isoformat()
     current_checkout_read(record, issued, "checkout_archive_read")
@@ -429,7 +451,7 @@ def payment_observation(label):
     label = text(label).casefold()
     if re.fullmatch(r"(?:betaling autorisert|payment authorized|betaling reservert|payment reserved)", label):
         return "authorized"
-    if re.fullmatch(r"(?:betalt(?: med kort)?|paid(?: by card| with card)?|betaling gjennomført|payment complete)", label):
+    if label in PAID_METHOD_LABELS or label in {"betalt", "paid", "betaling gjennomført", "payment complete"}:
         return "paid"
     if re.fullmatch(r"(?:betaling(?:en)? (?:mislyktes|feilet|(?:er )?avvist|venter)|kortet ble avvist|venter på betaling|"
                     r"ikke betalt|ubetalt|(?:card|payment) declined|payment (?:failed|pending)|unpaid)", label):
@@ -464,6 +486,8 @@ def observe_order(record, value, key):
             or type(browser["total_ore"]) is not int
             or not delivery_matches(expected["delivery"], browser["delivery"], observed.isoformat())):
         raise ValueError("verify the exact original Oda shop confirmation and order on the bound native tab")
+    if "original_tab_retired_at" in checkout and not retired:
+        raise ValueError("use a replacement tab after the original Oda checkout tab was retired")
     arguments = {"order_number": order_id}
     raw_order = verified_provider_result(value["order"])
     hosted_oda.orders_view("get_order", raw_order, arguments)
@@ -478,7 +502,19 @@ def observe_order(record, value, key):
         raise ValueError("the two Oda receipts do not establish the original order total and delivery")
     reviewed = {line["product_id"]: line["quantity"] for line in expected["products"]}
     items_match = quantities == reviewed
-    observation = payment_observation(browser["payment_label"])
+    label = browser["payment_label"]
+    observation = payment_observation(label)
+    method = PAID_METHOD_LABELS.get(text(label).casefold()) if observation == "paid" else None
+    requested_method = "card" if expected["payment_method"] == "saved_card" else expected["payment_method"]
+    if method is not None:
+        checkout["merchant_payment_evidence"] = {"merchant_payment_method": method, "payment_method_observed_at": observed.isoformat()}
+    method_evidence = dict(checkout.get("merchant_payment_evidence", {}))
+    method_matches = None
+    if method_evidence:
+        method_matches = method_evidence["merchant_payment_method"] == requested_method
+        method_evidence["payment_method_matches_review"] = method_matches
+    if retired:
+        remember_retirement(checkout, observed)
     conflicting = payment_conflicts_with_tracking(observation, tracking)
     previous_payment = checkout.get("result", {})
     if observation in {"authorized", "paid", "negative"}:
@@ -496,8 +532,8 @@ def observe_order(record, value, key):
         amounts = {"app_cart_amount_ore": expected["payable_ore"], "matches_handoff_cart": exact_review}
     else:
         amounts = {"approved_amount_ore": expected["payable_ore"], "approved_items_match": items_match,
-                   "approved_purchase_matches_order": exact_review}
-    checkout["result"] = {"order_id": order_id, "amount_ore": total, "currency": "NOK", **amounts,
+                   "approved_purchase_matches_order": exact_review and method_matches is not False}
+    checkout["result"] = {"order_id": order_id, "amount_ore": total, "currency": "NOK", **amounts, **method_evidence,
                           "original_reference_source": checkout.get("confirmation_source", "original_checkout_confirmation"),
                           "merchant_tracking_status": tracking, "merchant_reports_payment_authorized": observation == "authorized",
                           "payment_observation": observation, "payment_evidence_conflicting": conflicting,
@@ -522,7 +558,8 @@ def observe_order(record, value, key):
     unresolved_payment = (conflicting or checkout["result"]["payment_label_unresolved"]
                           or checkout["result"].get("payment_conflict_unresolved") is True)
     if release and tracking in ACTIVE_ORDERS and not unresolved_payment:
-        record["status"] = "checkout_confirmed" if exact_review else "checkout_order_observed_changed"
+        record["status"] = ("checkout_confirmed" if exact_review and method_matches is not False
+                            else "checkout_order_observed_changed")
     elif release and tracking in INACTIVE_ORDERS:
         record["status"] = "checkout_order_inactive"
     record.pop("frame")
