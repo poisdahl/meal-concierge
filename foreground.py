@@ -326,6 +326,8 @@ def execute(options):
                             "delivery_reservation_start": "begin_delivery",
                             "checkout_handoff_start": "begin_checkout",
                             "checkout_saved_card_start": "begin_saved_card_checkout",
+                            "checkout_vipps_start": "begin_vipps_checkout",
+                            "order_vipps_addition_start": "begin_vipps_addition",
                             "menu_shopping_command": "hosted-cart",
                             "menu_shopping_start": "begin_menu",
                             "menu_shopping_restore": "restore_menu",

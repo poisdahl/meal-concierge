@@ -254,6 +254,248 @@ class HostedOdaDeliveryTest(unittest.TestCase):
         return {"browser_id": "cloud", "tab_id": "dedicated", "original_tab_retired": True,
                 "owner_handoff_ended": True, "no_pending_bank_action": True, **overrides}
 
+    def vipps_observation(self, frame, *, preflight=False):
+        value = self.checkout_observation(frame, preflight=preflight)
+        value["checkout"]["payment"] = {"method": "vipps", "selected": True}
+        value["checkout"]["submit_control"]["label"] = "Betal med Vipps"
+        return value
+
+    def start_vipps(self, maximum=25000):
+        return self.step("begin_vipps_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS, maximum_payable_ore=maximum)
+
+    def approve_vipps(self, review):
+        return self.step("approve_vipps_checkout", review_digest=review["review_digest"],
+                         approved_total_ore=review["checkout_review"]["payable_ore"])
+
+    def submit_vipps(self):
+        review = self.step("observe_delivery", **self.vipps_observation(self.start_vipps()))
+        return self.step("observe_delivery", **self.vipps_observation(self.approve_vipps(review), preflight=True))
+
+    def test_native_vipps_has_distinct_cap_approval_and_single_merchant_dispatch(self):
+        read = self.start_vipps(4899)
+        with self.assertRaisesRegex(ValueError, "Vipps limit"):
+            self.step("observe_delivery", **self.vipps_observation(read))
+        self.step("abort")
+        self.identifier = str(uuid.uuid4())
+        read = self.start_vipps()
+        self.assertEqual(read["hosted_request"]["native_browser"]["action"], "review_vipps_checkout")
+        wrong = self.vipps_observation(read)
+        wrong["checkout"]["payment"]["method"] = "saved_card"
+        with self.assertRaisesRegex(ValueError, "selected Oda payment method"):
+            self.step("observe_delivery", **wrong)
+        review = self.step("observe_delivery", **self.vipps_observation(read))
+        with self.assertRaisesRegex(ValueError, "owner approval"):
+            self.step("approve_saved_card_checkout", review_digest=review["review_digest"], approved_total_ore=4900)
+        preflight = self.approve_vipps(review)
+        wrong = self.vipps_observation(preflight, preflight=True)
+        wrong["checkout"]["submit_control"]["label"] = "Betal med Vipps 49,01 kr"
+        with self.assertRaisesRegex(ValueError, "exact payable review"):
+            self.step("observe_delivery", **wrong)
+        facts = self.vipps_observation(preflight, preflight=True)
+        submitted = self.step("observe_delivery", **facts)
+        self.assertTrue(submitted["dispatch"])
+        self.assertEqual(submitted["hosted_request"]["native_browser"]["action"], "submit_vipps_checkout")
+        self.assertFalse(self.start_vipps()["dispatch"])
+        self.assertNotIn("hosted_request", self.step("status"))
+        with self.assertRaisesRegex(ValueError, "different delivery window or account"):
+            self.step("begin_checkout", slot_ref=SLOT, authorized_addresses=ADDRESS, payment_method="vipps", owner_handoff=True)
+        with self.assertRaisesRegex(ValueError, "reconcile"):
+            self.step("observe_delivery", **facts)
+
+    def vipps_gateway(self, submit):
+        frame = submit["hosted_request"]
+        stamp = self.clock.return_value.isoformat()
+        gateway = {"attempt_id": self.identifier, "browser_id": "cloud", "tab_id": "dedicated",
+                   "source_url": frame["native_browser"]["url"], "origin": "https://pay.vipps.no", "path": "/",
+                   "query_keys": ["token"], "location_sha256": "a" * 64, "observed_at": stamp, "direct_transition": True,
+                   "canonical_token_url_verified": True,
+                   "merchant": "Oda", "currency": "NOK", "visible_amounts_ore": [], "amount_ambiguous": False,
+                   "recipient_verified": True, "request_already_sent": False,
+                   "control": {"label": "Next", "enabled": True, "count": 1}}
+        request = {"frame_id": frame["frame_id"], "plugin_id": "fixture", "merchant_clicked_at": stamp}
+        return request, gateway
+
+    def test_native_vipps_phone_request_is_bound_to_one_merchant_transition(self):
+        request, gateway = self.vipps_gateway(self.submit_vipps())
+        stamp = self.clock.return_value.isoformat()
+        for change in ({"visible_amounts_ore": [4901]}, {"direct_transition": False}, {"recipient_verified": False},
+                       {"request_already_sent": True}, {"origin": "https://other.example"}, {"amount_ambiguous": True},
+                       {"query_keys": ["token", "ref"]}, {"tab_id": "other"}, {"canonical_token_url_verified": False}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "phone request control"):
+                self.step("request_vipps_phone", **request, gateway={**gateway, **change})
+        phone = self.step("request_vipps_phone", **request, gateway=gateway)
+        self.assertTrue(phone["dispatch"])
+        self.assertFalse(phone["vipps_phone_request_observed"])
+        phone_frame = phone["hosted_request"]
+        self.assertEqual(phone_frame["native_browser"]["action"], "send_vipps_phone_request")
+        with self.assertRaisesRegex(ValueError, "another phone request"):
+            self.step("request_vipps_phone", **request, gateway=gateway)
+        observed = self.step("observe_vipps_phone_request", frame_id=phone_frame["frame_id"], plugin_id="fixture",
+                             attempt_id=self.identifier, browser_id="cloud", tab_id="dedicated", location_sha256="a" * 64,
+                             clicked_at=stamp, observed_at=stamp, request_confirmation_visible=True, recipient_verified=True)
+        self.assertTrue(observed["vipps_phone_request_observed"])
+        self.assertFalse(observed["dispatch"])
+        self.assertNotIn("hosted_request", observed)
+        self.clock.return_value += timedelta(minutes=2)
+        with self.assertRaisesRegex(ValueError, "known pre-submit"):
+            self.step("recheck_checkout_unsubmitted", attempt_id=self.identifier, reason="checkout_click_never_called",
+                      original_executor_retired=True, retirement=self.checkout_retirement(), owner_confirmed_no_submit=False)
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("new"))
+        result = self.step("observe_checkout_order", **self.receipt_observation(read, "new"))
+        self.assertEqual(result["status"], "checkout_confirmed")
+        self.assertTrue(result["vipps_phone_request_observed"])
+
+    def test_phone_request_cannot_use_a_stale_merchant_click_or_recovery_branch(self):
+        request, gateway = self.vipps_gateway(self.submit_vipps())
+        self.clock.return_value += timedelta(minutes=3)
+        gateway["observed_at"] = self.clock.return_value.isoformat()
+        with self.assertRaisesRegex(ValueError, "phone request control"):
+            self.step("request_vipps_phone", **request, gateway=gateway)
+        self.step("defer_checkout")
+        with self.assertRaisesRegex(ValueError, "another phone request"):
+            self.step("request_vipps_phone", **request, gateway=gateway)
+
+    def test_cancelled_order_does_not_release_a_pending_vipps_request(self):
+        request, gateway = self.vipps_gateway(self.submit_vipps())
+        phone = self.step("request_vipps_phone", **request, gateway=gateway)["hosted_request"]
+        stamp = self.clock.return_value.isoformat()
+        self.clock.return_value += timedelta(seconds=46)
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("new"))
+        receipt = self.receipt_observation(read, "new", "cancelled")
+        receipt["browser"].update(tab_id="replacement", original_tab_retired=True)
+        pending = self.step("observe_checkout_order", **receipt)
+        self.assertEqual(pending["status"], "checkout_readback")
+        self.assertEqual(pending["checkout_order"]["merchant_tracking_status"], "cancelled")
+
+        ack = {"frame_id": phone["frame_id"], "plugin_id": "fixture", "attempt_id": self.identifier,
+               "browser_id": "cloud", "tab_id": "dedicated", "location_sha256": "a" * 64,
+               "clicked_at": stamp, "observed_at": self.clock.return_value.isoformat(),
+               "request_confirmation_visible": True, "recipient_verified": True}
+        with self.assertRaisesRegex(ValueError, "not observed on the original"):
+            self.step("observe_vipps_phone_request", **ack)
+        self.assertTrue(self.step("observe_vipps_phone_request", **{**ack, "observed_at": stamp})["vipps_phone_request_observed"])
+
+        read = self.step("recheck_checkout")
+        receipt = self.receipt_observation(read, "new", "cancelled")
+        receipt["browser"].update(tab_id="replacement", original_tab_retired=True)
+        with self.assertRaisesRegex(ValueError, "bank action are retired"):
+            self.step("observe_checkout_order", **receipt, retirement=self.checkout_retirement(no_pending_bank_action=False))
+        result = self.step("observe_checkout_order", **receipt, retirement=self.checkout_retirement())
+        self.assertEqual(result["status"], "checkout_order_inactive")
+        self.assertFalse(result["dispatch"])
+
+    def test_cancelled_order_also_requires_retirement_after_automatic_vipps_request(self):
+        request, gateway = self.vipps_gateway(self.submit_vipps())
+        gateway["request_already_sent"] = True
+        with self.assertRaisesRegex(ValueError, "phone request control"):
+            self.step("request_vipps_phone", **request, gateway=gateway)
+        self.clock.return_value += timedelta(seconds=46)
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("new"))
+        receipt = self.receipt_observation(read, "new", "cancelled")
+        self.assertEqual(self.step("observe_checkout_order", **receipt)["status"], "checkout_readback")
+
+    def addition_observation(self, frame, *, preflight=False):
+        package = {"product": {"id": 730, "name": "Synthetic spaghetti"}, "quantity": 1, "totalGrossAmount": "17.90"}
+        cart = snapshot(total="17.90")
+        cart["totalBreakdown"]["subtotal"] = "17.90"
+        cart["groups"][0]["items"] = [package]
+        stamp = self.clock.return_value.isoformat()
+        result = {"frame_id": frame["hosted_request"]["frame_id"], "plugin_id": "fixture", "addresses": ADDRESS,
+                  "address_observed_at": stamp, "cart_observed_at": stamp, "cart": cart, "address_label": "Fixture address",
+                  "browser": {"browser_id": "cloud", "tab_id": "dedicated", "address_id": 7, "new_cart": True,
+                              "cart_url": "https://oda.com/no/cart/"},
+                  "order": self.order_fixture("new"), "tracking": {"orderNumber": "new", "status": "paid_and_modifiable"},
+                  "order_observed_at": stamp, "order_browser": {"url": "https://oda.com/no/account/orders/new/", "browser_id": "cloud",
+                      "tab_id": "original-order-read", "address_edit_path": "/no/account/delivery/edit/7/", "order_number": "new",
+                      "total_ore": 4900, "delivery_date": DATE, "available_changes": ["items", "cancel"]},
+                  "checkout": {"url": "https://oda.com/no/checkout/confirm/?orderNumber=new", "browser_id": "cloud", "tab_id": "dedicated",
+                               "new_order": False, "exclusive_checkout": True, "order_number": "new", "address_label": "Fixture address",
+                               "delivery": "Hjemlevering 04-09, 28. november", "warnings": [], "observed_at": stamp,
+                               "rows": [{"product_id": "730", "title": "Synthetic spaghetti", "subtitle": "", "quantity": 1}],
+                               "amount_rows": [{"label": label, "value": amount, "count": quantity} for label, amount, quantity in (
+                                   ("Opprinnelig bestilling", "49,00 kr", 1), ("Nye varer lagt til", "17,90 kr", 1),
+                                   ("Å betale", "17,90 kr", None), ("Ny totalsum", "66,90 kr", 2))],
+                               "payment": {"method": "vipps", "selected": True},
+                               "submit_control": {"label": "Betal med Vipps", "enabled": True, "count": 1}}}
+        if preflight:
+            result.update(existing_orders={"orders": [self.order_fixture("new")], "hasMore": False}, orders_observed_at=stamp)
+        return result
+
+    def start_addition(self):
+        self.submit_vipps()
+        self.clock.return_value += timedelta(minutes=2)
+        read = self.step("recheck_checkout", confirmation=self.checkout_confirmation("new"))
+        self.assertEqual(self.step("observe_checkout_order", **self.receipt_observation(read, "new"))["status"], "checkout_confirmed")
+        base = self.identifier
+        self.identifier = str(uuid.uuid4())
+        return self.step("begin_vipps_addition", base_operation_id=base, product_id=730, maximum_payable_ore=2000,
+                         authorized_addresses=ADDRESS)
+
+    def test_native_vipps_addition_checks_increment_original_order_and_same_order_readback(self):
+        read = self.start_addition()
+        self.assertEqual(read["hosted_request"]["native_browser"]["action"], "review_vipps_addition")
+        facts = self.addition_observation(read)
+        for key, invalid in (("order_number", "other"), ("new_order", True)):
+            bad = deepcopy(facts)
+            bad["checkout"][key] = invalid
+            with self.assertRaisesRegex(ValueError, "exact existing-order addition"):
+                self.step("observe_vipps_addition", **bad)
+        bad = deepcopy(facts)
+        bad["order_browser"]["available_changes"] = ["cancel"]
+        with self.assertRaisesRegex(ValueError, "not eligible"):
+            self.step("observe_vipps_addition", **bad)
+        bad = deepcopy(facts)
+        bad["checkout"]["amount_rows"][2]["value"] = "20,01 kr"
+        bad["checkout"]["amount_rows"][3]["value"] = "69,01 kr"
+        with self.assertRaisesRegex(ValueError, "incremental limit"):
+            self.step("observe_vipps_addition", **bad)
+        review = self.step("observe_vipps_addition", **facts)
+        self.assertEqual(review["checkout_review"]["revised_total_ore"], 6690)
+        preflight = self.approve_vipps(review)
+        facts = self.addition_observation(preflight, preflight=True)
+        bad = deepcopy(facts)
+        bad["order"]["products"][0]["product"]["id"] = 516
+        with self.assertRaisesRegex(ValueError, "original Oda items"):
+            self.step("observe_vipps_addition", **bad)
+        sent = self.step("observe_vipps_addition", **facts)
+        self.assertTrue(sent["dispatch"])
+        self.assertEqual(sent["hosted_request"]["native_browser"]["action"], "submit_vipps_addition")
+        request, gateway = self.vipps_gateway(sent)
+        with self.assertRaisesRegex(ValueError, "phone request control"):
+            self.step("request_vipps_phone", **request, gateway=gateway)
+        gateway["visible_amounts_ore"] = [6690]
+        with self.assertRaisesRegex(ValueError, "phone request control"):
+            self.step("request_vipps_phone", **request, gateway=gateway)
+        gateway["visible_amounts_ore"] = [1790]
+        self.assertTrue(self.step("request_vipps_phone", **request, gateway=gateway)["dispatch"])
+        with self.assertRaisesRegex(ValueError, "reconcile"):
+            self.step("observe_vipps_addition", **facts)
+        self.clock.return_value += timedelta(minutes=2)
+        read = self.step("recheck_checkout")
+        old = self.receipt_observation(read, "new")
+        old["browser"]["payment_label"] = "Betalt med Vipps"
+        old["browser"]["rows"] = [{"product_id": "515", "title": "Synthetic oats", "subtitle": "", "quantity": 1}]
+        unchanged = self.step("observe_checkout_order", **old)
+        self.assertEqual(unchanged["status"], "checkout_readback")
+        self.assertFalse(unchanged["checkout_order"]["approved_purchase_matches_order"])
+        self.assertNotIn("merchant_payment_method", unchanged["checkout_order"])
+        read = self.step("recheck_checkout")
+        revised = self.receipt_observation(read, "new", "unpaid_order_change")
+        revised["order"]["products"].append(facts["cart"]["groups"][0]["items"][0])
+        revised["order"]["grossAmount"] = 66.9
+        revised["browser"].update(total_ore=6690, rows=old["browser"]["rows"])
+        with self.assertRaisesRegex(ValueError, "different items or quantities"):
+            self.step("observe_checkout_order", **revised)
+        revised["browser"]["rows"] = [*old["browser"]["rows"], *facts["checkout"]["rows"]]
+        self.assertEqual(self.step("observe_checkout_order", **revised)["status"], "checkout_readback")
+        read = self.step("recheck_checkout")
+        revised["frame_id"] = read["hosted_request"]["frame_id"]
+        revised["tracking"]["status"] = "paid_and_modifiable"
+        done = self.step("observe_checkout_order", **revised)
+        self.assertEqual(done["status"], "checkout_confirmed")
+        self.assertEqual(done["checkout_order"]["approved_amount_ore"], 1790)
+        self.assertEqual(done["checkout_order"]["amount_ore"], 6690)
+
     def test_saved_card_dispatches_once_and_confirms_exact_original_purchase(self):
         ready = self.saved_card_preflight()
         facts = self.checkout_observation(ready, preflight=True)
@@ -411,7 +653,7 @@ class HostedOdaDeliveryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
                 journal.require_idle(self.state, target_program=release)
             module = release / "hosted_oda_checkout.py"
-            for incompatible_version in (1, 2, 3):
+            for incompatible_version in (1, 2, 3, 4):
                 module.write_text(f"CHECKOUT_RECOVERY_JOURNAL_VERSION = {incompatible_version}\n", encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "checkout-recovery compatible"):
                     journal.require_idle(self.state, target_program=release)

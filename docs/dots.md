@@ -453,6 +453,83 @@ official order read for the same order against the approved item quantities,
 delivery and revised total. If the result is unclear, retain the same attempt
 and check that order before another action. [Oda's item addition guide](https://hjelp.oda.com/no/article/100639-legge-til-varer-p%C3%A5-bestilling)
 
+#### Dot-initiated Vipps
+
+Use the Dot's native browser and checkout reporting. The owner approves the
+exact Oda purchase or addition and its limit. The Dot may press the approved
+merchant control only when the host permits it. The owner completes any
+payment or bank approval privately on their phone.
+
+For a new order use `begin_vipps_checkout` with `slot_ref`,
+`authorized_addresses` and `maximum_payable_ore`. Follow the saved-card
+observation steps with `observe_delivery` and the selected Vipps method.
+Supply `{"method":"vipps","selected":true}` in `payment`. Read the full
+payable summary even if the unique enabled `Betal med Vipps` button does
+not include a price. Approve the exact review with `approve_vipps_checkout`,
+`review_digest` and `approved_total_ore`. Recheck the payment method,
+amounts, goods, address, dated slot and exact tab on the fresh
+`submit_vipps_checkout` dispatch. Click only once before it expires.
+
+For an addition, first verify the exact order with `orders.change_handoff`
+and confirm `items` is available. Stage one approved package in the ordinary
+cart and choose the existing order in the shop. Use `begin_vipps_addition`
+with its own UUID, the completed `base_operation_id`, `product_id`,
+`authorized_addresses` and the approved incremental `maximum_payable_ore`.
+Use `observe_vipps_addition` for the exact order detail, order tracking and
+signed-in `order_browser` evidence described for `orders.change_handoff`.
+Supply the same fresh account, cart, browser, address and checkout
+observations as above, plus `order_observed_at`. The checkout has
+`new_order:false`, the exact `order_number` and only the added package in
+`rows`. For `amount_rows` give each observed `label`, `value` and `count`.
+Use the displayed counts for `Opprinnelig bestilling`, `Nye varer lagt til`
+and `Ny totalsum`, and `null` for the count on `Å betale`. Approve and
+recheck the exact incremental payable with `approve_vipps_checkout` and
+the emitted read frame. The fresh `submit_vipps_addition` dispatch is the
+only permit for that merchant click.
+
+If the exact merchant click immediately opens the phone request form in
+the same tab, check the payee, amount and owner-bound recipient. Use
+`request_vipps_phone` with the original `frame_id`, `plugin_id`,
+`merchant_clicked_at` and `gateway`. Report the bound `attempt_id`,
+`browser_id`, `tab_id`, exact Oda `source_url`, observed `origin`, `path`,
+`query_keys`, `observed_at`, and `direct_transition`. Compute
+`location_sha256` from the actual current gateway URL locally without
+printing its token. Set `canonical_token_url_verified` only for the exact
+HTTPS Vipps address with one nonempty `token` and no userinfo, port or fragment.
+Supply `merchant`, `currency`, `visible_amounts_ore`,
+`amount_ambiguous`, `recipient_verified`, `request_already_sent` and the
+observed `control` with `label`, `count` and `enabled`. An addition needs
+the exact incremental Vipps amount. Use only the owner's existing
+verified recipient or a supported private entry. Do not record the actual
+gateway address or recipient. Respect any required host takeover. If the
+merchant click already sent a request, leave the gateway control alone.
+A sent request, expired page or uncertain click requires readback of the
+original attempt.
+
+The fresh `send_vipps_phone_request` frame permits one click on that exact
+destination while the observations match. Record a visible sent
+acknowledgement with `observe_vipps_phone_request`, its `frame_id`,
+`plugin_id`, `attempt_id`, `browser_id`, `tab_id`, `location_sha256`,
+`clicked_at`, `observed_at`, `request_confirmation_visible` and
+`recipient_verified`. Tell the owner to confirm on their phone only after
+there is evidence a request was sent. The phone notification is not an
+order receipt. After private approval, reconcile the original attempt.
+For an addition, `recheck_checkout` returns reads for the known original
+order and `observe_checkout_order` also requires full signed-in receipt
+`rows` in the `browser` object. Verify the revised total and contents on
+that same order, and read current tracking. A payment label for the base
+order does not establish payment for the addition.
+
+For an already approved cancellation, read the exact linked order and its
+tracking and use the signed-in merchant receipt's cancellation control when
+the terms match the owner's approval. Recheck the same receipt and tracking
+afterward. When a phone request may still be outstanding, the inactive order
+alone does not establish its end. Keep the pending journal until the original
+gateway is known to have ended or the owner reports no pending bank action.
+For an inactive linked order, `observe_checkout_order` can include the same
+`retirement` evidence as checkout recovery, with a fresh replacement-tab
+receipt after the original checkout tab and request have ended.
+
 #### Oda saved-menu shopping
 
 Keep your original store-free planning home and separate hosted Oda home.
@@ -662,6 +739,12 @@ and refresh the skill binding. In the planning home, verify `tools`, `status`,
 the saved menu and a prior receipt. In the hosted Oda home, verify `tools`,
 reopen a previous receipt and use the attached plugin for a fresh read.
 Reuse the original home for repeat setup.
+
+For an explicitly requested PR test, use a clean checkout of the reviewed
+full commit and the same staged update steps. Confirm `tools` reports that
+commit from the installed runtime. Use the published stable tag for normal
+installation and updates.
+
 If Oda reports an older server version or the required tool or its arguments
 are missing, refresh the original ChatGPT plugin connection, attach the same
 entry again and verify a fresh read on the approved account. Compare the

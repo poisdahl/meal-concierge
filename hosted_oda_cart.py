@@ -604,9 +604,13 @@ def status_view(record):
             checkout = delivery["checkout"]
             review = checkout["review"]
             result["native_report_recorded"] = "native_report_id" in checkout
+            if "vipps_request" in checkout:
+                result["vipps_phone_request_issued"] = True
+                result["vipps_phone_request_observed"] = "observed_at" in checkout["vipps_request"]
             result["checkout_review_amount_scope"] = "attached_app_cart_only" if delivery.get("owner_handoff") else "shop_payable"
             result["checkout_review"] = {field: review[field] for field in (
-                "url", "delivery", "products", "amounts", "payable_ore", "payment_method", "masked_card", "control") if field in review}
+                "url", "delivery", "products", "amounts", "payable_ore", "payment_method", "masked_card", "control",
+                "maximum_payable_ore", "order_id", "revised_total_ore") if field in review}
             if "result" in checkout:
                 result["checkout_order"] = checkout["result"]
             if record["status"] == "checkout_not_submitted":
@@ -624,7 +628,8 @@ def status_view(record):
             elif record["status"] == "checkout_not_submitted":
                 result["original_dispatch_outcome"] = "reported_not_submitted"
             elif record["status"] == "checkout_archived_unknown":
-                result["original_dispatch_outcome"] = "merchant_order_observed" if "result" in checkout else "unknown"
+                result["original_dispatch_outcome"] = ("merchant_order_observed"
+                                                       if "result" in checkout and "addition" not in delivery else "unknown")
     elif "menu" in record:
         menu = record["menu"]
         result["menu_ref"] = menu["source"]["menu_ref"]
@@ -807,8 +812,10 @@ def write_record(ledger, authority, record, *, recovery_version=hosted_oda_deliv
 
 def run(state, directory, operation_id, value, plugin, build):
     action = value.get("action") if isinstance(value, dict) else None
+    checkout = hosted_oda_delivery.checkout
     new_cart = action in ("begin", "begin_menu")
-    new_delivery = action in ("begin_delivery", "begin_checkout", "begin_saved_card_checkout")
+    new_addition = action == "begin_vipps_addition"
+    new_delivery = new_addition or action in ("begin_delivery", "begin_checkout", *checkout.NATIVE_START)
     authorizing = new_cart or new_delivery
     beginning = authorizing or action == "restore_menu"
     if action == "begin":
@@ -833,6 +840,12 @@ def run(state, directory, operation_id, value, plugin, build):
         require_fields(value, ("action", "choices"))
     elif action == "approve_menu":
         require_fields(value, ("action", "review_digest"))
+    elif new_addition:
+        require_fields(value, ("action", "base_operation_id", "product_id", "maximum_payable_ore", "authorized_addresses"))
+        base_id = value["base_operation_id"]
+        if (not isinstance(base_id, str) or base_id == operation_id or str(uuid.UUID(base_id)) != base_id
+                or not provider_id(value["product_id"]) or not provider_id(value["maximum_payable_ore"])):
+            raise ValueError("use the original Oda checkout UUID, an exact added package and the owner's positive extra limit in øre")
     elif new_delivery:
         fields = ("action", "slot_ref", "authorized_addresses")
         if action == "begin_checkout":
@@ -841,16 +854,21 @@ def run(state, directory, operation_id, value, plugin, build):
                 fields += ("owner_handoff",)
                 if value["owner_handoff"] is not True:
                     raise ValueError("omit owner_handoff for a checkout review without takeover")
+        if action == "begin_vipps_checkout":
+            fields += ("maximum_payable_ore",)
         require_fields(value, fields)
         if action == "begin_checkout" and value["payment_method"] not in ("saved_card", "vipps"):
             raise ValueError("Oda checkout handoff supports saved_card or vipps")
+        if action == "begin_vipps_checkout" and not provider_id(value["maximum_payable_ore"]):
+            raise ValueError("record the owner's positive Oda Vipps limit in øre")
     elif action == "approve_delivery":
         require_fields(value, ("action", "review_digest"))
-    elif action == "approve_saved_card_checkout":
+    elif action in checkout.NATIVE_APPROVE:
         require_fields(value, ("action", "review_digest", "approved_total_ore"))
     elif action == "accept_delivery_current":
         require_fields(value, ("action", "review_digest", "owner_accepted_unknown", "original_executor_stopped"))
     elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery",
+                       "observe_vipps_addition", "request_vipps_phone", "observe_vipps_phone_request",
                        "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted", "observe_checkout_unsubmitted",
                        "recheck_checkout_archive", "observe_checkout_archive"):
         require_fields(value, ("action",))
@@ -885,9 +903,18 @@ def run(state, directory, operation_id, value, plugin, build):
                 raise ValueError("the operation ID belongs to a different saved menu or account")
             if action == "restore_menu" and record.get("restores_operation_id") != original_id:
                 raise ValueError("the operation ID belongs to a different original menu restoration")
-            if new_delivery and (record.get("delivery", {}).get("slot_ref") != value["slot_ref"]
-                                 or record["delivery"].get("payment_method") != ("saved_card" if action == "begin_saved_card_checkout" else value.get("payment_method"))
-                                 or record["delivery"].get("native_saved_card", False) != (action == "begin_saved_card_checkout")
+            if new_addition:
+                delivery = record.get("delivery", {})
+                target = delivery.get("addition", {})
+                if (target.get("base_operation_id") != base_id or target.get("product_id") != value["product_id"]
+                        or delivery.get("maximum_payable_ore") != value["maximum_payable_ore"]
+                        or not hmac.compare_digest(record["account"], account)):
+                    raise ValueError("the operation ID belongs to a different Oda order addition")
+            elif new_delivery and ("addition" in record.get("delivery", {})
+                                 or record.get("delivery", {}).get("slot_ref") != value["slot_ref"]
+                                 or record["delivery"].get("payment_method") != checkout.NATIVE_START.get(action, value.get("payment_method"))
+                                 or checkout.native_method(record["delivery"]) != checkout.NATIVE_START.get(action)
+                                 or record["delivery"].get("maximum_payable_ore") != value.get("maximum_payable_ore")
                                  or record["delivery"].get("owner_handoff", False) != value.get("owner_handoff", False)
                                  or not hmac.compare_digest(record["account"], account)):
                 raise ValueError("the operation ID belongs to a different delivery window or account")
@@ -898,7 +925,12 @@ def run(state, directory, operation_id, value, plugin, build):
                 if current["status"] not in FINISHED:
                     raise ValueError("an original hosted Oda cart operation still owns this registry")
                 archive_record(directory, current)
-            if new_delivery:
+            if new_addition:
+                base_path = directory / (base_id + ".json")
+                original = read_private(base_path, JOURNAL_LIMIT) if os.path.lexists(base_path) else None
+                verify_record(original)
+                initial = checkout.begin_addition(value, original, account, owner, plugin)
+            elif new_delivery:
                 initial = hosted_oda_delivery.begin(value, account)
             elif new_cart:
                 initial = initial_record(action, value, account, locks)
@@ -910,7 +942,6 @@ def run(state, directory, operation_id, value, plugin, build):
                 or (record["build"] != build and not continue_from_other_build(record, action))):
             raise ValueError("use the original active hosted Oda operation and installed build")
         elif "delivery" in record:
-            checkout = hosted_oda_delivery.checkout
             if record["status"] in checkout.PENDING:
                 checkout.migrate_retirement(record["delivery"]["checkout"], saved.get("checkout_recovery_version"))
             delivery_dispatch = hosted_oda_delivery.advance(record, value, saved["key"])
@@ -957,6 +988,6 @@ def run(state, directory, operation_id, value, plugin, build):
             result["owner_handoff_admit_by"] = record["delivery"]["checkout"]["dispatch_expires_at"]
         if action == "recheck" and "delivery" not in record:
             result["hosted_request"] = record["recovery_read"]
-        elif action not in {"defer", "defer_checkout", "observe_recovery"} and "frame" in record:
+        elif action not in {"defer", "defer_checkout", "observe_recovery", "observe_vipps_phone_request"} and "frame" in record:
             result.update(hosted_request=record["frame"], dispatch=dispatch)
         return result

@@ -36,6 +36,8 @@ def begin(value, account):
         payment["owner_handoff"] = True
     if value["action"] == "begin_saved_card_checkout":
         payment = {"payment_method": "saved_card", "native_saved_card": True}
+    elif value["action"] == "begin_vipps_checkout":
+        payment = {"payment_method": "vipps", "native_vipps": True, "maximum_payable_ore": value["maximum_payable_ore"]}
     return {"account": account, "status": "delivery_read", "delivery": {
         "slot_ref": slot_ref, "slot_id": slot_id, "date": date, "address_id": address, **payment}}
 
@@ -60,14 +62,16 @@ def frame(record, *, last_read=None, cutoff=None):
         if unattended is not None:
             arguments["is_unattended_delivery"] = unattended
         return {**common, "tool": "select_delivery_slot", "arguments": arguments}
-    tools = [
-        {"tool": "get_delivery_addresses", "arguments": {}},
-        {"tool": "get_cart", "arguments": {}},
-        {"tool": "get_delivery_slots", "arguments": {**address, "delivery_date": delivery["date"]}},
-    ]
+    tools = [{"tool": name, "arguments": {}} for name in ("get_delivery_addresses", "get_cart")]
+    addition = delivery.get("addition")
+    if addition:
+        tools.extend({"tool": name, "arguments": {"order_number": addition["order_id"]}}
+                     for name in ("get_order", "order_tracking"))
+    else:
+        tools.append({"tool": "get_delivery_slots", "arguments": {**address, "delivery_date": delivery["date"]}})
     if record["status"] == "checkout_preflight" or delivery.get("owner_handoff"):
         tools.append({"tool": "get_orders", "arguments": checkout.ORDERS_ARGUMENTS})
-    if delivery.get("native_saved_card"):
+    if checkout.native_method(delivery):
         return {**common, "tools": tools, "native_browser": checkout.review_request(record)}
     return {**common, "tools": tools}
 
@@ -162,7 +166,7 @@ def observe(record, value, key):
 
     status, pending = record["status"], record["frame"]
     delivery = record["delivery"]
-    fields = OBSERVATION_FIELDS + (("checkout",) if delivery.get("native_saved_card") else ())
+    fields = OBSERVATION_FIELDS + (("checkout",) if checkout.native_method(delivery) else ())
     if status == "checkout_preflight" or delivery.get("owner_handoff"):
         fields += ("existing_orders", "orders_observed_at")
     journal.require_fields(value, fields)
@@ -233,7 +237,7 @@ def observe(record, value, key):
             raise ValueError("fresh Oda reads do not establish the exact active reservation")
         reservation = {"window": offer, "expires_at": expiry.isoformat() if expiry is not None else None,
                        "booking_cutoff_passed": not before_cutoff, "cart": view, "observed_at": slot_time.isoformat()}
-        if delivery.get("native_saved_card"):
+        if checkout.native_method(delivery):
             return checkout.observe_review(record, value, baseline, reservation, context, address, slot_time)
         if status == "delivery_readback":
             before = delivery["baseline"]
@@ -320,8 +324,16 @@ def advance(record, value, key):
     from hosted_oda_cart import now
 
     action, status = value["action"], record["status"]
-    if action == "observe_delivery" and status in {"delivery_read", "delivery_preflight", "delivery_readback", "checkout_preflight"}:
+    addition = "addition" in record["delivery"]
+    if action == "observe_vipps_addition" and addition and status in {"delivery_read", "checkout_preflight"}:
+        return checkout.observe_addition(record, value, key)
+    if action == "observe_delivery" and not addition and status in {"delivery_read", "delivery_preflight", "delivery_readback", "checkout_preflight"}:
         return observe(record, value, key)
+    if action == "request_vipps_phone" and status == "checkout_dispatched":
+        return checkout.issue_vipps_request(record, value)
+    if action == "observe_vipps_phone_request" and status in {"checkout_dispatched", "checkout_readback"}:
+        checkout.observe_vipps_request(record, value)
+        return False
     if action == "recheck_checkout" and status in checkout.PENDING:
         checkout.start_readback(record, value)
         return False
@@ -346,11 +358,12 @@ def advance(record, value, key):
         return False
     if action == "approve_delivery" and status == "delivery_review" and value["review_digest"] == record["delivery"]["review_digest"]:
         record["status"] = "delivery_preflight"
-    elif action == "approve_saved_card_checkout" and status == "checkout_review":
+    elif action in checkout.NATIVE_APPROVE and status == "checkout_review":
         delivery = record["delivery"]
-        if (value["review_digest"] != delivery["review_digest"] or type(value["approved_total_ore"]) is not int
+        if (checkout.NATIVE_APPROVE[action] != checkout.native_method(delivery)
+                or value["review_digest"] != delivery["review_digest"] or type(value["approved_total_ore"]) is not int
                 or value["approved_total_ore"] != delivery["checkout"]["review"]["payable_ore"]):
-            raise ValueError("obtain owner approval for the exact Oda saved-card review and total")
+            raise ValueError("obtain owner approval for the exact Oda payment review and total")
         record["status"] = "checkout_preflight"
     elif action == "acknowledge_delivery" and status == "delivery_dispatched":
         acknowledge(record, value)

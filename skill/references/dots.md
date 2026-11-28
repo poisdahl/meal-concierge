@@ -82,14 +82,20 @@ Use `begin_saved_card_checkout` when the owner wants the Dot to submit a new
 Oda saved-card order. Follow the guide's exact payable review, owner approval,
 fresh checks and one-time dispatch. Hand off bank approval privately. Use
 `begin_checkout` with `owner_handoff: true` when the owner will complete a
-saved-card or Vipps purchase. Resolve the original attempt before another
-checkout. A historical receipt grants no action. Use
-`orders.change_handoff` for an exact eligible order and let the owner
-complete the change in the signed-in shop. Before adding approved extra
-packages to Oda's cart, verify that a fresh handoff for the exact order
-has `handoff_ready: true` and includes `items` in `available_changes`.
-Choose that order at delivery and verify the payable review before handoff.
-Check a fresh merchant receipt for the same order before reporting an update.
+purchase in the signed-in shop. Use the discovered `checkout_vipps_start` or
+`order_vipps_addition_start` and the guide's Dot-initiated Vipps procedure when
+the owner asks you to press the approved merchant button. Check each fresh
+one-time permit immediately before clicking. If the gateway needs its own
+phone request, verify the owner-bound recipient privately and use its separate
+permit. An addition requires the exact incremental Vipps amount. The owner
+confirms payment on their phone. Resolve the original attempt before another
+checkout. A historical receipt grants no action.
+
+Before staging approved packages, verify that a fresh `orders.change_handoff`
+for the exact order has `handoff_ready: true` and includes `items` in
+`available_changes`. Choose that order at delivery, verify the payable review,
+and use the approved browser flow. Check a fresh merchant receipt for the same
+order and current tracking before reporting an update.
 
 For saved-menu Oda shopping, use the discovered `menu_shopping_command`
 and the saved-menu workflow in the retained source’s `docs/dots.md`.
