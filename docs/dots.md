@@ -78,8 +78,9 @@ installation can search products and recipes and read the cart, delivery
 windows and orders when the official Oda plugin is callable in the Dot.
 It can also [shop a saved planning menu](#oda-saved-menu-shopping) into an
 owner-designated cart, preserve existing items and reserve a reviewed delivery
-window in a new cart. Checkout and eligible order changes continue in the shop. Follow the
-[hosted Oda setup](#oda-cart-reads).
+window in a new cart. A test Dot completed saved-card checkout, Dot-initiated
+Vipps checkout and an eligible item addition with phone approval. Follow the
+[hosted Oda setup](#oda-cart-reads) and [Vipps workflow](#dot-initiated-vipps).
 The planning
 installation can also search the [public MENY catalog](#public-meny-catalog).
 Full MENY shopping uses the shared store runtime with a working dedicated browser.
@@ -447,8 +448,9 @@ only the approved additions. From the cart, continue to the delivery choice
 and select the existing order. Verify its identity, address and window
 against the original receipt before proceeding to the payable review. Leave
 the new-order choice untouched. Show the original order total, added items,
-amount due now and revised total. Hand the verified review to the owner for
-submission and any private payment approval. Then compare a fresh receipt and
+amount due now and revised total. Use the approved Dot-initiated Vipps flow
+for one package or hand the verified review to the owner for submission.
+The owner handles any phone approval privately. Then compare a fresh receipt and
 official order read for the same order against the approved item quantities,
 delivery and revised total. If the result is unclear, retain the same attempt
 and check that order before another action. [Oda's item addition guide](https://hjelp.oda.com/no/article/100639-legge-til-varer-p%C3%A5-bestilling)

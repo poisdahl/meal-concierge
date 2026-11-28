@@ -43,7 +43,7 @@ or a ChatGPT Dot's cloud computer**.
 | [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
-| [ChatGPT Dots](docs/dots.md) | Cloud meal planning, recipes and shopping lists. Separate Oda and MENY households support catalog, cart, order and delivery workflows. Live checkout covers Dot-operated Oda saved card, Oda Vipps via private owner handoff, and MENY Vipps with phone approval. Eligible order changes use a private owner handoff and a fresh read of the same order. |
+| [ChatGPT Dots](docs/dots.md) | Cloud meal planning, recipes and shopping lists. Separate Oda and MENY households support catalog, cart, order and delivery workflows. Live Oda checkout covers Dot-operated saved card, Vipps and an eligible item addition authorized in Vipps. MENY supports home-delivery Vipps with phone approval and eligible item edits through private owner handoff. |
 
 ### Requirements
 
@@ -70,12 +70,13 @@ own store connection. Delivery also needs an address in its delivery area.
 | Mathem | Sweden / SEK | Saved card. |
 | MENY | Norway / NOK | Vipps; home delivery only. |
 
-Vipps checkout needs your Norwegian mobile number in the installation's private
-configuration. Set it locally during store setup, never in chat. Approve payment
-requests in the Vipps app when prompted.
+Managed store installations use your Norwegian mobile number from their private
+configuration for Vipps checkout. On Dots, the retailer checkout runs in the
+Dot's signed-in cloud browser. Use the official Vipps form for the mobile
+number and approve payment requests privately in the Vipps app.
 
-On Dots, the owner completes the retailer’s checkout in the signed-in cloud
-browser or shop. Follow the [Dots store guide](docs/dots.md#store-availability).
+Follow the [Dots store guide](docs/dots.md#store-availability) for the cloud
+browser and handoff steps.
 
 Enter passwords, payment details and required approvals in the trusted store
 or payment interface, never in chat.
