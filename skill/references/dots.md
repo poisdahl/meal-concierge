@@ -85,9 +85,10 @@ fresh checks and one-time dispatch. Hand off bank approval privately. Use
 saved-card or Vipps purchase. Resolve the original attempt before another
 checkout. A historical receipt grants no action. Use
 `orders.change_handoff` for an exact eligible order and let the owner
-complete the change in the signed-in shop. For an addition, use Oda's cart
-for the approved extra packages and choose the exact existing order at the
-delivery choice. Verify the revised payable review before handing it over.
+complete the change in the signed-in shop. Before adding approved extra
+packages to Oda's cart, verify that a fresh handoff for the exact order
+has `handoff_ready: true` and includes `items` in `available_changes`.
+Choose that order at delivery and verify the payable review before handoff.
 Check a fresh merchant receipt for the same order before reporting an update.
 
 For saved-menu Oda shopping, use the discovered `menu_shopping_command`

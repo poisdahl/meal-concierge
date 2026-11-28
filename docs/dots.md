@@ -339,9 +339,10 @@ A receipt label that explicitly says the order was paid by card or Vipps
 reports `merchant_payment_method` with its observation time. A payment
 option or the requested method does not establish how the confirmed order
 was paid. If the explicit payment method differs from the review, retain the
-merchant's observed order and report the difference. If two explicit method
-labels disagree, retain both with their observation times and report that the
-reviewed payment method could not be verified.
+merchant's observed order and report the difference. If explicit paid-method
+labels disagree, the journal keeps the most recent observation time for each
+reported method. Report both methods and that the reviewed payment method
+could not be verified.
 If the verified original order differs from the approved goods or amount,
 report both the reviewed and observed result and any visible payment state.
 
@@ -438,7 +439,9 @@ fields. Open the original order through the validated link for the owner to
 review and complete the change in the shop. Check that exact receipt afterward.
 If a cart or delivery operation is pending, reconcile it first.
 
-To add items to an eligible order, use Oda's ordinary cart for the exact
+Before adding items for an existing order, run a fresh `orders.change_handoff`
+for that exact order. Continue only when `handoff_ready: true` and
+`available_changes` includes `items`. Use Oda's ordinary cart for the exact
 extra packages. Start with a cart you control and verify that it contains
 only the approved additions. From the cart, continue to the delivery choice
 and select the existing order. Verify its identity, address and window
