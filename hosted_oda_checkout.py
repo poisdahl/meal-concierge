@@ -17,16 +17,18 @@ BEFORE_WRITE = {"checkout_review", "checkout_preflight"}
 PENDING = {"checkout_dispatched", "checkout_readback", "checkout_owner_pending", "checkout_unsubmitted_read", "checkout_archive_read"}
 FINISHED = {"checkout_confirmed", "checkout_order_inactive", "checkout_not_submitted", "checkout_archived_unknown",
             "checkout_order_observed_changed", "checkout_order_resolved_by_merchant"}
-CHECKOUT_RECOVERY_JOURNAL_VERSION = 5
+CHECKOUT_RECOVERY_JOURNAL_VERSION = 6
 RETIREMENT_JOURNAL_VERSION = 3
-READABLE_JOURNAL_VERSIONS = (2, RETIREMENT_JOURNAL_VERSION, 4, CHECKOUT_RECOVERY_JOURNAL_VERSION)
+READABLE_JOURNAL_VERSIONS = (2, RETIREMENT_JOURNAL_VERSION, 4, 5, CHECKOUT_RECOVERY_JOURNAL_VERSION)
 NATIVE_START = {"begin_saved_card_checkout": "saved_card", "begin_vipps_checkout": "vipps"}
 NATIVE_APPROVE = {"approve_saved_card_checkout": "saved_card", "approve_vipps_checkout": "vipps"}
 RECOVERY_ACTIONS = {"defer_checkout", "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted",
-                    "observe_checkout_unsubmitted", "recheck_checkout_archive", "observe_checkout_archive", "observe_vipps_phone_request"}
+                    "observe_checkout_unsubmitted", "recheck_checkout_archive", "observe_checkout_archive", "observe_vipps_phone_request",
+                    "prepare_vipps_retry"}
 ORDERS_ARGUMENTS = {"page": 1, "size": 20}
 ACTIVE_ORDERS = {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
 INACTIVE_ORDERS = {"cancelled", "failed"}
+VIPPS_REQUEST_LABELS = {"Next", "Neste", "Continue to pay with Vipps"}
 PAID_METHOD_LABELS = {
     "betalt med kort": "card", "paid by card": "card", "paid with card": "card",
     "betalt med vipps": "vipps", "paid by vipps": "vipps", "paid with vipps": "vipps",
@@ -51,6 +53,10 @@ def review_request(record):
 
 def addition_url(order_id):
     return f"{CHECKOUT_URL}?orderNumber={order_id}"
+
+
+def retry_url(order_id):
+    return f"https://oda.com/no/checkout/retry/?orderNumber={order_id}"
 
 
 def delivery_matches(window, display, observed_at):
@@ -80,6 +86,7 @@ def record_native_report(checkout, report_id):
     if report_id is None:
         return
     if (not isinstance(report_id, str) or not 1 <= len(report_id) <= 200 or not report_id.isprintable()
+            or checkout.get("original_vipps", {}).get("native_report_id") == report_id
             or checkout.get("native_report_id", report_id) != report_id):
         raise ValueError("the accompanying native checkout report ID is invalid or changed")
     checkout["native_report_id"] = report_id
@@ -352,12 +359,14 @@ def issue_native_submit(record, checked, expires, existing_orders):
     delivery = record["delivery"]
     checkout = delivery["checkout"]
     review = checkout["review"]
-    checkout.update(attempt_id=record["operation_id"], dispatch_issued_at=checked.isoformat(), dispatch_expires_at=expires.isoformat(),
-                    existing_orders=existing_orders)
+    checkout.setdefault("attempt_id", record["operation_id"])
+    checkout.update(dispatch_issued_at=checked.isoformat(), dispatch_expires_at=expires.isoformat(), existing_orders=existing_orders)
     action = f"submit_{native_method(delivery)}_checkout"
     if "addition" in delivery:
         checkout.update(matched_order_id=delivery["addition"]["order_id"], confirmation_source="original_existing_order")
         action = "submit_vipps_addition"
+    elif "original_vipps" in checkout:
+        action = "submit_vipps_retry"
     record["status"] = "checkout_dispatched"
     record["frame"] = {"frame_id": uuid.uuid4().hex, "plugin_id": record["plugin_id"],
                        "issued_at": checked.isoformat(), "expires_at": expires.isoformat(),
@@ -375,7 +384,7 @@ def issue_vipps_request(record, value):
     delivery = record["delivery"]
     checkout = delivery["checkout"]
     if (native_method(delivery) != "vipps" or "vipps_request" in checkout or record.get("checkout_recovery_deferred") is True
-            or pending.get("native_browser", {}).get("action") not in {"submit_vipps_checkout", "submit_vipps_addition"}):
+            or pending.get("native_browser", {}).get("action") not in {"submit_vipps_checkout", "submit_vipps_addition", "submit_vipps_retry"}):
         raise ValueError("reconcile the original Oda Vipps click instead of issuing another phone request")
     match_frame(pending, value)
     gateway = value["gateway"]
@@ -390,7 +399,7 @@ def issue_vipps_request(record, value):
     deadlines = [observed + timedelta(seconds=45), clicked + timedelta(minutes=2),
                  hosted_oda.response_time(review["delivery"]["cutoff_at"]), hosted_oda.response_time(delivery["review_expires_at"])]
     hold = delivery.get("reservation", {}).get("expires_at")
-    if hold:
+    if hold and "original_vipps" not in checkout:
         deadlines.append(hosted_oda.response_time(hold))
     expires = min(deadlines)
     control = gateway["control"]
@@ -405,11 +414,12 @@ def issue_vipps_request(record, value):
             or gateway["canonical_token_url_verified"] is not True
             or not isinstance(location, str) or re.fullmatch(r"[a-f0-9]{64}", location) is None
             or text(gateway["merchant"]).casefold() != "oda" or gateway["currency"] != "NOK"
-            or not isinstance(amounts, list) or len(amounts) > 10 or ("addition" in delivery and not amounts)
+            or not isinstance(amounts, list) or len(amounts) > 10
+            or (("addition" in delivery or "original_vipps" in checkout) and not amounts)
             or any(type(amount) is not int or amount != review["payable_ore"] for amount in amounts)
             or gateway["amount_ambiguous"] is not False or gateway["recipient_verified"] is not True
             or gateway["request_already_sent"] is not False or type(control["count"]) is not int or control["count"] != 1
-            or control["enabled"] is not True or text(control["label"]) not in {"Next", "Neste"}):
+            or control["enabled"] is not True or text(control["label"]) not in VIPPS_REQUEST_LABELS):
         raise ValueError("the exact Oda Vipps transition, amount, recipient or phone request control could not be verified")
     common = {"frame_id": uuid.uuid4().hex, "plugin_id": record["plugin_id"],
               "issued_at": checked.isoformat(), "expires_at": expires.isoformat()}
@@ -458,13 +468,13 @@ def start_readback(record, value):
         order_id = safe_order_id(confirmation["order_number"])
         observed = hosted_oda.response_time(confirmation["observed_at"])
         success_url = "https://oda.com/no/checkout/success/"
-        retry_url = f"https://oda.com/no/checkout/retry/?orderNumber={order_id}"
+        original_retry_url = retry_url(order_id)
         receipt_url = OdaBrowser._order_url(order_id)
         if (not hosted_oda.response_time(checkout["dispatch_issued_at"]) <= observed <= issued
                 or any(confirmation[field] != checkout[field] for field in ("browser_id", "attempt_id"))
                 or order_id in checkout["existing_orders"]
                 or confirmation["order_link"] not in (None, receipt_url)
-                or (confirmation["url"] not in (f"{success_url}?orderNumber={order_id}", retry_url)
+                or (confirmation["url"] not in (f"{success_url}?orderNumber={order_id}", original_retry_url)
                     and (confirmation["url"] != success_url or confirmation["order_link"] != receipt_url))):
             raise ValueError("bind the original Oda confirmation link or number to its checkout attempt")
         if owner_source:
@@ -490,20 +500,112 @@ def start_readback(record, value):
         checkout["confirmation_observed_at"] = observed.isoformat()
         if owner_source:
             checkout["confirmation_source"] = "owner_identified_original_success_link"
-        elif confirmation["url"] == retry_url:
+        elif confirmation["url"] == original_retry_url:
             checkout["confirmation_source"] = "merchant_retry_page"
         else:
             checkout["confirmation_source"] = "original_checkout_confirmation"
     else:
-        require_fields(value, ("action", "native_report_id") if "native_report_id" in value else ("action",))
+        fields = ("action", "native_report_id") if "native_report_id" in value else ("action",)
+        if "native_report_id" in value and "original_vipps" in checkout:
+            fields += ("attempt_id",)
+            if value.get("attempt_id") != checkout["attempt_id"]:
+                raise ValueError("use the active Oda retry attempt's native checkout report")
+        require_fields(value, fields)
         record_native_report(checkout, value.get("native_report_id"))
         order_id = checkout["matched_order_id"]
     record["status"] = "checkout_readback"
     record["frame"] = {"frame_id": uuid.uuid4().hex, "plugin_id": record["plugin_id"], "issued_at": issued.isoformat(),
-                       "expires_at": (issued + timedelta(minutes=5)).isoformat(), "order_id": order_id,
+                       "expires_at": (issued + timedelta(minutes=5)).isoformat(), "order_id": order_id, "attempt_id": checkout["attempt_id"],
                        "tools": [{"tool": "get_delivery_addresses", "arguments": {}},
                                  *[{"tool": name, "arguments": {"order_number": order_id}}
                                    for name in ("get_order", "order_tracking")]]}
+
+
+def start_vipps_retry(record, value, build):
+    from hosted_oda_cart import now, require_fields
+
+    require_fields(value, ("action", "approved_total_ore", "gateway_end", "retirement"))
+    delivery = record["delivery"]
+    checkout = delivery["checkout"]
+    review = checkout["review"]
+    result = checkout.get("result", {})
+    order_id = checkout.get("matched_order_id")
+    issued = now()
+    if (native_method(delivery) != "vipps" or "addition" in delivery or "original_vipps" in checkout
+            or "vipps_request" in checkout or not order_id or checkout.get("confirmation_source") != "merchant_retry_page"
+            or result.get("merchant_tracking_status") != "unpaid_order" or result.get("payment_observation") != "negative"
+            or result.get("approved_purchase_matches_order") is not True
+            or type(value["approved_total_ore"]) is not int or value["approved_total_ore"] != review["payable_ore"]
+            or not retire_after(checkout, owner_handoff=False) <= issued < hosted_oda.response_time(review["delivery"]["cutoff_at"])):
+        raise ValueError("only the exact previously approved unpaid Oda Vipps order can be reviewed for recovery")
+    end = value["gateway_end"]
+    require_fields(end, ("attempt_id", "browser_id", "tab_id", "origin", "cancel_control", "returned_url", "observed_at",
+                         "direct_return_observed", "phone_request_never_called"))
+    observed = hosted_oda.response_time(end["observed_at"])
+    if (any(end[field] != checkout[field] for field in ("attempt_id", "browser_id", "tab_id")) or end["origin"] != "https://pay.vipps.no"
+            or text(end["cancel_control"]) != "Cancel payment and return to the webshop"
+            or end["returned_url"] != retry_url(order_id) or end["direct_return_observed"] is not True
+            or end["phone_request_never_called"] is not True
+            or not hosted_oda.response_time(checkout["dispatch_issued_at"]) <= observed
+            <= hosted_oda.response_time(checkout["confirmation_observed_at"])):
+        raise ValueError("verify the original Vipps cancellation and its exact Oda retry return before recovery")
+    verify_retirement(checkout, value["retirement"], issued)
+    start_readback(record, {"action": "recheck_checkout"})
+    record["frame"].update(vipps_retry={"build": build, "gateway_end": end},
+                           native_browser={"action": "review_vipps_retry", "url": retry_url(order_id),
+                                           "new_tab_required": True, "attempt_id": checkout["attempt_id"]})
+
+
+def nonzero_checkout_amounts(amounts):
+    minor = _oda_checkout_amounts_minor(amounts)
+    fees = minor.pop("other_fees") or {}
+    return {**{field: amount for field, amount in minor.items() if amount},
+            "other_fees": {label: amount for label, amount in fees.items() if amount}}
+
+
+def observe_vipps_retry(record, value, key, observed, tracking, items_match, total):
+    from hosted_oda_cart import now, require_fields
+    from hosted_oda_delivery import physical_address_fingerprint
+
+    delivery = record["delivery"]
+    original = delivery["checkout"]
+    review = original["review"]
+    order_id = original["matched_order_id"]
+    receipt, retry = value["browser"], value["retry_checkout"]
+    require_fields(retry, ("url", "browser_id", "tab_id", "address_label", "delivery", "observed_at",
+                           "amount_rows", "payment", "submit_control", "rows", "warnings"))
+    timestamp = hosted_oda.response_time(retry["observed_at"])
+    checked = now()
+    expires = min(timestamp + timedelta(seconds=45), hosted_oda.response_time(review["delivery"]["cutoff_at"]),
+                  hosted_oda.response_time(record["frame"]["expires_at"]))
+    if (tracking != "unpaid_order" or not items_match or total != review["payable_ore"]
+            or text(receipt["payment_label"]).casefold() not in {"betaling feilet", "betaling mislyktes", "payment failed"}
+            or not observed <= timestamp <= checked < expires or receipt["original_tab_retired"] is not True
+            or retry["url"] != retry_url(order_id) or any(retry[field] != receipt[field] for field in ("browser_id", "tab_id"))
+            or not delivery_matches(review["delivery"], retry["delivery"], retry["observed_at"])
+            or retry["warnings"] != [] or (retry["rows"] is not None and not checkout_rows_match(review["products"], retry["rows"]))
+            or (retry["address_label"] is not None and not hmac.compare_digest(
+                physical_address_fingerprint(retry["address_label"], key), delivery["physical_address"]))):
+        raise ValueError("the Oda retry must match the fresh, failed receipt for the exact original unpaid order")
+    amount_rows = retry["amount_rows"]
+    amounts = checkout_amounts(amount_rows, sum(line["quantity"] for line in review["products"]), total,
+                               require_discounted_subtotal=False)
+    if nonzero_checkout_amounts(amounts) != nonzero_checkout_amounts(review["amounts"]):
+        raise ValueError("the Oda retry goods or fee summary changed")
+    payment = reviewed_payment(retry["payment"], retry["submit_control"], "vipps", total)
+    attempt_id = str(uuid.uuid4())
+    current_review = {**review, **payment, "order_id": order_id, "url": retry["url"]}
+    record["delivery"]["checkout"] = {
+        "review": current_review, "browser_id": retry["browser_id"], "tab_id": retry["tab_id"], "attempt_id": attempt_id,
+        "matched_order_id": order_id, "confirmation_source": "verified_original_unpaid_order_retry",
+        "original_vipps": {**original, "build": record["build"], "review_digest": delivery["review_digest"],
+                           "maintenance_deferred": record.pop("checkout_recovery_deferred", False),
+                           "gateway_end": record["frame"]["vipps_retry"]["gateway_end"]},
+    }
+    delivery["review_digest"] = hosted_oda.arguments_digest({"attempt_id": attempt_id, "review": current_review})
+    delivery["review_expires_at"] = min(timestamp + timedelta(minutes=5), hosted_oda.response_time(review["delivery"]["cutoff_at"])).isoformat()
+    issue_native_submit(record, checked, expires, original["existing_orders"])
+    return True
 
 
 def retire_after(checkout, *, owner_handoff):
@@ -518,6 +620,8 @@ def retire_after(checkout, *, owner_handoff):
 def defer_recovery(record):
     # Older installers understand the cart flag but cannot preserve this checkout.
     record.pop("maintenance_deferred", None)
+    if "vipps_retry" in record.get("frame", {}):
+        record.pop("frame")
     record["checkout_recovery_deferred"] = True
 
 
@@ -748,8 +852,13 @@ def observe_order(record, value, key):
     from hosted_oda_delivery import physical_address_fingerprint
 
     fields = ("action", "frame_id", "plugin_id", "addresses", "address_observed_at", "observed_at", "browser", "order", "tracking")
-    require_fields(value, fields + ("retirement",) if "retirement" in value else fields)
     pending = record["frame"]
+    retry = pending.get("vipps_retry") if value["action"] == "observe_vipps_retry" else None
+    if retry:
+        fields += ("retry_checkout",)
+    elif "retirement" in value:
+        fields += ("retirement",)
+    require_fields(value, fields)
     _, observed = bound_times(record, pending, value, key, "observed_at", check_account=False)
     order_id = pending["order_id"]
     delivery = record["delivery"]
@@ -774,6 +883,8 @@ def observe_order(record, value, key):
         raise ValueError("verify the exact original Oda shop confirmation and order on the bound native tab")
     if "original_tab_retired_at" in checkout and not retired:
         raise ValueError("use a replacement tab after the original Oda checkout tab was retired")
+    if tab == checkout.get("original_vipps", {}).get("tab_id"):
+        raise ValueError("the earlier Oda Vipps tab was retired before this retry")
     arguments = {"order_number": order_id}
     raw_order = verified_provider_result(value["order"])
     hosted_oda.orders_view("get_order", raw_order, arguments)
@@ -792,6 +903,8 @@ def observe_order(record, value, key):
         raise ValueError("the Oda browser and official order receipt show different items or quantities")
     label = browser["payment_label"]
     observation = payment_observation(label)
+    if retry:
+        return observe_vipps_retry(record, value, key, observed, tracking, quantities == reviewed, total)
     # The base order's authorization does not prove payment for an addition.
     # Keep negative or unclear receipt evidence so it can still block completion.
     if addition and observation in {"authorized", "paid"}:
@@ -871,3 +984,4 @@ def observe_order(record, value, key):
             checkout["vipps_inactive_reconciled_at"] = observed.isoformat()
             record["status"] = "checkout_order_inactive"
     record.pop("frame")
+    return False

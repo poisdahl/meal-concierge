@@ -498,10 +498,15 @@ printing its token. Set `canonical_token_url_verified` only for the exact
 HTTPS Vipps address with one nonempty `token` and no userinfo, port or fragment.
 Supply `merchant`, `currency`, `visible_amounts_ore`,
 `amount_ambiguous`, `recipient_verified`, `request_already_sent` and the
-observed `control` with `label`, `count` and `enabled`. An addition needs
+observed `control` with `label`, `count` and `enabled`. Vipps may say `Next`,
+`Neste` or `Continue to pay with Vipps`. An addition needs
 the exact incremental Vipps amount. Use only the owner's existing
-verified recipient or a supported private entry. Do not record the actual
-gateway address or recipient. Respect any required host takeover. If the
+verified recipient or a supported private entry. If the owner expressly
+authorizes using their number for this payment, enter it only in the exact
+official form with native input. Verify that it was accepted and the field
+stayed populated on that same form. Masking alone does not verify an unknown
+number. Do not record the actual gateway address or recipient. Respect any
+required host takeover. If the
 merchant click already sent a request, leave the gateway control alone.
 A sent request, expired page or uncertain click requires readback of the
 original attempt.
@@ -529,6 +534,44 @@ gateway is known to have ended or the owner reports no pending bank action.
 For an inactive linked order, `observe_checkout_order` can include the same
 `retirement` evidence as checkout recovery, with a fresh replacement-tab
 receipt after the original checkout tab and request have ended.
+
+#### Completing the exact same unpaid Oda order
+
+Use `prepare_vipps_retry` only if the Dot observed the original Vipps form end
+through **Cancel payment and return to the webshop** before any phone request.
+The return must have bound the original payable order to its checkout journal.
+Read the exact failed shop receipt and official `unpaid_order` tracking first.
+Retire the original checkout tab and verify that no bank action or handoff is
+pending. Keep the original UUID and cart. This recovery is available once for
+a new-order Vipps attempt and requires a still-payable original order.
+
+Give `prepare_vipps_retry` the same `approved_total_ore`, the checkout recovery
+`retirement` fields and `gateway_end` with `attempt_id`, `browser_id`, `tab_id`,
+`origin`, `cancel_control`, `returned_url`, `observed_at` from the original
+return, `direct_return_observed: true` and `phone_request_never_called: true`.
+It emits a read frame and the exact retry
+link. Use a fresh replacement tab in the original cloud browser. First read the
+original merchant receipt and official `get_order`, `order_tracking` and
+`get_delivery_addresses`, then open the exact merchant retry page and expand
+the price summary. Supply them to `observe_vipps_retry` in the same fields as
+`observe_checkout_order`. Add `retry_checkout` with observed `url`,
+`browser_id`, `tab_id`, `address_label` (or `null` when omitted by Oda),
+`delivery`, `observed_at`, `amount_rows`, `payment`, `submit_control`, `rows`
+(or `null` when the retry page does not list items), and `warnings` for any
+new warnings about the current purchase.
+The independent receipt establishes the goods and address when the retry page
+only shows the count and total. The retry must show the same complete fees,
+dated window and payable total. Give the visible rows as shown. The retry can
+omit `Delsum` when the visible goods and discounts establish it.
+
+Use the resulting `submit_vipps_retry` once, on its new attempt and tab after
+rechecking the exact payable control. Start a new native checkout report for
+this attempt. If a separate Vipps phone request is necessary, it needs the
+exact visible payable and the usual one-time permit. Use `recheck_checkout`
+and the new attempt in signed-in readback. Give its `attempt_id` when
+attaching the new `native_report_id`. A lost or ambiguous result stays
+with that attempt. Read-only `status` exposes `checkout_attempt_id`. The
+original click, closure and prior read remain recorded.
 
 #### Oda saved-menu shopping
 

@@ -354,8 +354,9 @@ def advance(record, value, key):
         checkout.observe_current_checkout(record, value, key)
         return False
     if action == "observe_checkout_order" and status == "checkout_readback" and "frame" in record:
-        checkout.observe_order(record, value, key)
-        return False
+        return checkout.observe_order(record, value, key)
+    if action == "observe_vipps_retry" and status == "checkout_readback" and "vipps_retry" in record.get("frame", {}):
+        return checkout.observe_order(record, value, key)
     if action == "approve_delivery" and status == "delivery_review" and value["review_digest"] == record["delivery"]["review_digest"]:
         record["status"] = "delivery_preflight"
     elif action in checkout.NATIVE_APPROVE and status == "checkout_review":

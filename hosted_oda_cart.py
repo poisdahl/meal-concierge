@@ -197,7 +197,7 @@ def require_idle(state, *, target_program=None, check_target_later=False, activa
                 previous_version = saved.get("checkout_recovery_version")
                 recovery_version = checkout.CHECKOUT_RECOVERY_JOURNAL_VERSION if activate_checkout else previous_version
                 if (current.get("checkout_recovery_deferred") is not True or "maintenance_deferred" in current
-                        or recovery_version != previous_version):
+                        or "vipps_retry" in current.get("frame", {}) or recovery_version != previous_version):
                     # Before publication the issuing build must still read the pending journal.
                     if activate_checkout:
                         checkout.migrate_retirement(delivery["checkout"], previous_version)
@@ -603,6 +603,8 @@ def status_view(record):
         if "checkout" in delivery:
             checkout = delivery["checkout"]
             review = checkout["review"]
+            if "attempt_id" in checkout:
+                result["checkout_attempt_id"] = checkout["attempt_id"]
             result["native_report_recorded"] = "native_report_id" in checkout
             if "vipps_request" in checkout:
                 result["vipps_phone_request_issued"] = True
@@ -869,7 +871,8 @@ def run(state, directory, operation_id, value, plugin, build):
         require_fields(value, ("action", "review_digest", "owner_accepted_unknown", "original_executor_stopped"))
     elif action not in ("observe", "acknowledge", "observe_recovery", "observe_menu_search", "observe_delivery", "acknowledge_delivery",
                        "observe_vipps_addition", "request_vipps_phone", "observe_vipps_phone_request",
-                       "recheck_checkout", "observe_checkout_order", "recheck_checkout_unsubmitted", "observe_checkout_unsubmitted",
+                       "prepare_vipps_retry", "observe_vipps_retry", "recheck_checkout", "observe_checkout_order",
+                       "recheck_checkout_unsubmitted", "observe_checkout_unsubmitted",
                        "recheck_checkout_archive", "observe_checkout_archive"):
         require_fields(value, ("action",))
 
@@ -920,6 +923,8 @@ def run(state, directory, operation_id, value, plugin, build):
                 raise ValueError("the operation ID belongs to a different delivery window or account")
             return status_view(record)
         delivery_dispatch = False
+        retry_frame = record.get("frame", {}).get("vipps_retry", {}) if record else {}
+        approved_retry_build = action == "observe_vipps_retry" and retry_frame.get("build") == build
         if beginning:
             if current is not None:
                 if current["status"] not in FINISHED:
@@ -939,12 +944,19 @@ def run(state, directory, operation_id, value, plugin, build):
             record = {"operation_id": operation_id, "owner": owner, "plugin_id": plugin, "build": build, **initial}
             record["frame"] = hosted_oda_delivery.frame(record) if new_delivery else frame(record)
         elif (record is None or record is not current
-                or (record["build"] != build and not continue_from_other_build(record, action))):
+                or (record["build"] != build and not approved_retry_build and not continue_from_other_build(record, action))):
             raise ValueError("use the original active hosted Oda operation and installed build")
         elif "delivery" in record:
             if record["status"] in checkout.PENDING:
                 checkout.migrate_retirement(record["delivery"]["checkout"], saved.get("checkout_recovery_version"))
-            delivery_dispatch = hosted_oda_delivery.advance(record, value, saved["key"])
+            if action == "prepare_vipps_retry" and record["status"] == "checkout_readback":
+                checkout.start_vipps_retry(record, value, build)
+            elif action != "observe_vipps_retry" or approved_retry_build:
+                delivery_dispatch = hosted_oda_delivery.advance(record, value, saved["key"])
+                if approved_retry_build and delivery_dispatch:
+                    record["build"] = build
+            else:
+                raise ValueError("observe the Oda retry from the installed build that issued its read frame")
         elif action == "observe":
             observe(record, value, saved["key"], locks)
         elif action == "observe_menu_search":

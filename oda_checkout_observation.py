@@ -22,11 +22,11 @@ def native_amount_minor(label, value):
     return oda_checkout_amount_minor(label, value)
 
 
-def checkout_amounts(rows, product_count, expected_total):
+def checkout_amounts(rows, product_count, expected_total, *, require_discounted_subtotal=True):
     """Validate the complete native summary from its observed label/value rows.
 
-    The host must capture one complete amount section. No totals, missing rows
-    or IDs may be filled from the expected MCP cart.
+    The host supplies each visible row. Some same-order retry pages omit the
+    intermediate discounted subtotal, which is computed from the visible rows.
     """
     if (type(product_count) is not int or not 0 < product_count <= 1_000_000
             or type(expected_total) is not int or expected_total < 0
@@ -52,9 +52,13 @@ def checkout_amounts(rows, product_count, expected_total):
         if key is None or key in observed:
             raise HouseholdError("Oda checkout amount rows are unknown or ambiguous")
         observed[key] = native_amount_minor(label, value)
-    if not {"product_subtotal", "discounted_subtotal", "provider_total"} <= observed.keys():
+    required = {"product_subtotal", "provider_total"}
+    if require_discounted_subtotal:
+        required.add("discounted_subtotal")
+    if not required <= observed.keys():
         raise HouseholdError("Oda checkout required amount row is missing")
     subtotal = observed["product_subtotal"] + observed.get("discounts", 0)
+    observed.setdefault("discounted_subtotal", subtotal)
     fee_keys = ("other_fee", "weight_reservation")
     payable = (subtotal + observed.get("delivery_price", 0)
                + observed.get("bags", 0) + observed.get("deposits", 0)
